@@ -1,0 +1,3697 @@
+// @ts-nocheck
+import 'dotenv/config';
+import express from 'express';
+import { WebSocketServer, WebSocket } from 'ws';
+import cors from 'cors';
+import { games, createGame, updateGame, deleteGame, profile, friends, users, createUser, updateUser, deleteUser, feedbacks, subscriptionPlans, characters, createCharacter, updateCharacter, deleteCharacter } from './db.js';
+import OpenAI from 'openai';
+import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
+import pdfParse from 'pdf-parse';
+import fs from 'fs';
+import path from 'path';
+import type { User } from './types';
+import { getPrisma } from './prisma.js';
+import type { Game } from './types';
+import multer from 'multer';
+import { toFile } from 'openai/uploads';
+import crypto from 'crypto';
+
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 4000;
+
+app.use(cors());
+app.use(express.json());
+// Глобальные обработчики, чтобы не падать процессом и видеть ошибку
+process.on('unhandledRejection', (err) => {
+  try { console.error('[unhandledRejection]', err); } catch {}
+});
+process.on('uncaughtException', (err) => {
+  try { console.error('[uncaughtException]', err); } catch {}
+});
+
+function parseProxies(): string[] {
+  const listEnvRaw = process.env.OPENAI_PROXIES || '';
+  const singleRaw = process.env.OPENAI_PROXY || process.env.HTTPS_PROXY || '';
+  const strip = (s: string) => s.trim().replace(/^['"]+|['"]+$/g, '');
+  const listEnv = strip(listEnvRaw);
+  const single = strip(singleRaw);
+  const parts = [listEnv, single].filter(Boolean).join(',');
+  return parts
+    .split(',')
+    .map((s) => strip(s))
+    .filter(Boolean);
+}
+
+function createProxiedFetchForOpenAI(proxies: string[], timeoutMs: number) {
+  return (async (input: RequestInfo, init?: RequestInit) => {
+    const controllers: Array<AbortController> = [];
+    const attempts = proxies.length ? proxies : ['__direct__'];
+    let lastErr: unknown = null;
+    for (const p of attempts) {
+      try {
+        const controller = new AbortController();
+        controllers.push(controller);
+        const timer = setTimeout(() => controller.abort(), Math.max(5000, timeoutMs));
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        // @ts-ignore
+        const res = await undiciFetch(input as any, { ...(init as any), dispatcher, signal: controller.signal });
+        clearTimeout(timer);
+        return res;
+      } catch (e) {
+        lastErr = e;
+        // try next proxy
+      }
+    }
+    throw lastErr || new Error('All OpenAI proxy attempts failed');
+  }) as unknown as typeof fetch;
+}
+
+// Локальный клиент OpenAI с прокси/фейловером только для GPT-запросов
+function createOpenAIClient(apiKey: string) {
+  const proxies = parseProxies();
+  const timeoutMs = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 15000);
+  if (proxies.length) {
+    const proxiedFetch = createProxiedFetchForOpenAI(proxies, timeoutMs);
+    return new OpenAI({ apiKey, fetch: proxiedFetch });
+  }
+  return new OpenAI({ apiKey });
+}
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
+try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
+app.use('/uploads', express.static(UPLOAD_DIR));
+
+app.get('/', (_req, res) => {
+  res.type('text/plain').send('MIRA API. Health: /api/health, Games: /api/games, Profile: /api/profile');
+});
+
+// Простой тест OpenAI через те же прокси/клиент
+app.post('/api/debug/openai', async (req, res) => {
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    if (!apiKey) return res.json({ ok: false, reason: 'no_api_key' });
+    const client = createOpenAIClient(apiKey);
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const r = await client.chat.completions.create({
+      model,
+      temperature: 0.0,
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'Проверка соединения. Ответь коротко: ОК.' }],
+    });
+    const text = r.choices?.[0]?.message?.content?.trim() || '';
+    return res.json({ ok: true, model, text });
+  } catch (e: any) {
+    return res.json({
+      ok: false,
+      error: (e && (e.stack || e.message)) || String(e),
+      code: e?.code,
+      status: e?.status,
+      details: e,
+    });
+  }
+});
+
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.get('/api/games', async (_req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.game.findMany({
+      where: { status: 'PUBLISHED' as any },
+      select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true }
+    });
+    res.json(list);
+  } catch {
+    res.json(games.map(({ rules, gallery, editions, ...short }) => short));
+  }
+});
+
+app.get('/api/games/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({ where: { id: req.params.id }, include: { editions: true, locations: { orderBy: { order: 'asc' } }, characters: true } });
+    if (!game) return res.status(404).json({ error: 'Not found' });
+    res.json({ ...game, editions: game.editions });
+  } catch {
+    const game = games.find((g) => g.id === req.params.id);
+    if (!game) return res.status(404).json({ error: 'Not found' });
+    res.json(game);
+  }
+});
+
+app.post('/api/games', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const created = await prisma.game.create({
+      data: {
+        title: req.body.title,
+        description: req.body.description ?? '',
+        rating: req.body.rating ?? 5,
+        tags: req.body.tags ?? [],
+        author: req.body.author ?? 'Автор',
+        coverUrl: req.body.coverUrl ?? '',
+        rules: req.body.rules ?? '',
+        gallery: req.body.gallery ?? [],
+        worldRules: req.body.worldRules,
+        gameplayRules: req.body.gameplayRules,
+        vkVideoUrl: req.body.vkVideoUrl,
+        promoDescription: req.body.promoDescription,
+        marketplaceLinks: req.body.marketplaceLinks ?? [],
+        shelfCategory: req.body.shelfCategory,
+        shelfPosition: req.body.shelfPosition,
+        bannerStyle: req.body.bannerStyle,
+        ageRating: req.body.ageRating,
+        authorUserId: req.body.authorUserId,
+        status: req.body.status || 'DRAFT',
+        winCondition: req.body.winCondition,
+        loseCondition: req.body.loseCondition,
+        deathCondition: req.body.deathCondition,
+        finalScreenUrl: req.body.finalScreenUrl,
+      },
+    });
+    res.status(201).json(created);
+  } catch {
+    const created = createGame(req.body);
+    res.status(201).json(created);
+  }
+});
+
+app.patch('/api/games/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.game.update({ where: { id: req.params.id }, data: req.body });
+    res.json(updated);
+  } catch {
+    const updated = updateGame(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Not found' });
+    res.json(updated);
+  }
+});
+
+app.delete('/api/games/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    await prisma.game.delete({ where: { id: req.params.id } });
+    res.status(204).end();
+  } catch {
+    const ok = deleteGame(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Not found' });
+    res.status(204).end();
+  }
+});
+
+// Admin: список всех игр (без фильтрации по статусу)
+app.get('/api/admin/games', async (_req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.game.findMany({ select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true, status: true, createdAt: true } });
+    return res.json(list);
+  } catch {
+    return res.json(games.map(({ rules, gallery, editions, ...short }) => ({ ...short, status: 'PUBLISHED', createdAt: new Date().toISOString() })));
+  }
+});
+
+// Admin: полная игра
+app.get('/api/admin/games/:id/full', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({
+      where: { id: req.params.id },
+      include: { editions: true, locations: { orderBy: { order: 'asc' } }, characters: true },
+    });
+    if (!game) return res.status(404).json({ error: 'Not found' });
+    return res.json(game);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_load', details: String(e) });
+  }
+});
+
+// Admin: обновление игры (поля публикации/рейтинги/баннеры и т.п.)
+app.patch('/api/admin/games/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.game.update({ where: { id: req.params.id }, data: req.body });
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_update', details: String(e) });
+  }
+});
+
+// Локации игры
+app.get('/api/games/:id/locations', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.location.findMany({ where: { gameId: req.params.id }, orderBy: { order: 'asc' } });
+    return res.json(list);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_list', details: String(e) });
+  }
+});
+app.post('/api/games/:id/locations', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const maxOrder = await prisma.location.aggregate({ _max: { order: true }, where: { gameId: req.params.id } });
+    const created = await prisma.location.create({
+      data: {
+        gameId: req.params.id,
+        order: (maxOrder._max.order || 0) + 1,
+        title: req.body.title || 'Новая локация',
+        description: req.body.description,
+        rulesPrompt: req.body.rulesPrompt,
+        backgroundUrl: req.body.backgroundUrl,
+        layout: req.body.layout,
+        musicUrl: req.body.musicUrl,
+      },
+    });
+    return res.status(201).json(created);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_create', details: String(e) });
+  }
+});
+app.patch('/api/locations/:locId', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.location.update({ where: { id: req.params.locId }, data: req.body });
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_update', details: String(e) });
+  }
+});
+app.delete('/api/locations/:locId', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    await prisma.location.delete({ where: { id: req.params.locId } });
+    return res.status(204).end();
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_delete', details: String(e) });
+  }
+});
+
+// -------------------- Location exits (переходы/триггеры) --------------------
+app.get('/api/locations/:locId/exits', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.locationExit.findMany({ where: { locationId: req.params.locId } });
+    return res.json(list);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_list_exits', details: String(e) });
+  }
+});
+app.post('/api/locations/:locId/exits', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const created = await prisma.locationExit.create({
+      data: {
+        locationId: req.params.locId,
+        type: req.body?.type || 'BUTTON',
+        buttonText: req.body?.buttonText || null,
+        triggerText: req.body?.triggerText || null,
+        targetLocationId: req.body?.targetLocationId || null,
+        isGameOver: Boolean(req.body?.isGameOver),
+      },
+    });
+    return res.status(201).json(created);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_create_exit', details: String(e) });
+  }
+});
+app.patch('/api/exits/:exitId', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.locationExit.update({
+      where: { id: req.params.exitId },
+      data: {
+        type: req.body?.type,
+        buttonText: req.body?.buttonText,
+        triggerText: req.body?.triggerText,
+        targetLocationId: req.body?.targetLocationId,
+        isGameOver: req.body?.isGameOver,
+      },
+    });
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_update_exit', details: String(e) });
+  }
+});
+app.delete('/api/exits/:exitId', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    await prisma.locationExit.delete({ where: { id: req.params.exitId } });
+    return res.status(204).end();
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_delete_exit', details: String(e) });
+  }
+});
+
+// -------------------- Editions CRUD --------------------
+app.get('/api/games/:id/editions', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const items = await prisma.edition.findMany({ where: { gameId: req.params.id } });
+    return res.json(items);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_list_editions' });
+  }
+});
+app.post('/api/games/:id/editions', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const created = await prisma.edition.create({
+      data: {
+        gameId: req.params.id,
+        name: req.body?.name || 'Издание',
+        description: req.body?.description || '',
+        price: Number(req.body?.price || 0),
+        badge: req.body?.badge || null,
+      },
+    });
+    return res.status(201).json(created);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_create_edition' });
+  }
+});
+app.patch('/api/editions/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.edition.update({
+      where: { id: req.params.id },
+      data: {
+        name: req.body?.name,
+        description: req.body?.description,
+        price: typeof req.body?.price === 'number' ? req.body.price : undefined,
+        badge: req.body?.badge,
+      },
+    });
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_update_edition' });
+  }
+});
+app.delete('/api/editions/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    await prisma.edition.delete({ where: { id: req.params.id } });
+    return res.status(204).end();
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_delete_edition' });
+  }
+});
+
+// -------------------- Admin: asset upload (image/audio), returns URL under /uploads
+app.post('/api/admin/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
+    const kindRaw = typeof req.body?.kind === 'string' ? req.body.kind : '';
+    let detected: 'image' | 'audio' | 'video' = 'image';
+    if (req.file.mimetype.startsWith('audio/')) detected = 'audio';
+    if (req.file.mimetype.startsWith('video/')) detected = 'video';
+    const kind = (['image', 'audio', 'video'] as const).includes(kindRaw as any) ? (kindRaw as 'image' | 'audio' | 'video') : detected;
+    const ext = (() => {
+      const fromName = (req.file.originalname || '').split('.').pop() || '';
+      const safe = fromName.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toLowerCase();
+      if (safe) return '.' + safe;
+      if (req.file.mimetype.startsWith('image/')) return '.png';
+      if (req.file.mimetype === 'audio/mpeg') return '.mp3';
+      if (req.file.mimetype === 'audio/ogg' || req.file.mimetype === 'audio/ogg; codecs=opus') return '.ogg';
+      if (req.file.mimetype.startsWith('video/')) return '.mp4';
+      return '';
+    })();
+    const fname = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+    const dir = path.join(UPLOAD_DIR, kind);
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const full = path.join(dir, fname);
+    fs.writeFileSync(full, Buffer.from(req.file.buffer));
+    const urlPath = `/uploads/${kind}/${fname}`;
+    return res.status(201).json({ url: urlPath, kind, size: req.file.size });
+  } catch (e) {
+    return res.status(500).json({ error: 'upload_failed', details: String(e) });
+  }
+});
+
+// -------------------- Admin: ingest scenario from PDF (returns normalized import JSON) --------------------
+app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
+  try {
+    // util: fix mojibake when filename comes as latin1 from multipart
+    const fixLatin1 = (s: unknown): string => {
+      const str = typeof s === 'string' ? s : '';
+      if (!str) return '';
+      // Heuristic: common mojibake markers for Cyrillic shown as Ð, Ñ, Ð¡ etc.
+      if (/[ÐÑÂ]/.test(str)) {
+        try { return Buffer.from(str, 'latin1').toString('utf8'); } catch { /* noop */ }
+      }
+      return str;
+    };
+    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
+    const parsed = await pdfParse(req.file.buffer).catch(() => null);
+    // Очистим текст: нормализуем переносы + вырежем "Оглавление" + уберём лидеры ("..... 3")
+    const rawText = (parsed?.text || '').replace(/\r/g, '\n');
+    const stripTocAndLeaders = (src: string): string => {
+      let t = src;
+      const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
+      if (m) {
+        const start = m.index || 0;
+        const rest = t.slice(start);
+        const reEnd = /(^|\n)\s*(Введение|Предыстория|Зацепк[аи][^\n]*приключ|Глава|Часть|Сцена|Локация)\s*($|\n)|(\f)/im;
+        const endM = reEnd.exec(rest);
+        if (endM && typeof endM.index === 'number' && endM.index > 0) {
+          t = t.slice(0, start) + rest.slice(endM.index);
+        } else {
+          t = t.slice(0, start) + rest.slice(Math.min(rest.length, 4000));
+        }
+      }
+      // Удалим строки вида "Название .......... 3" в первых 15000 символах
+      const limit = 15000;
+      let head = t.slice(0, limit);
+      const tail = t.slice(limit);
+      head = head.split('\n').filter((ln) => {
+        return !/^\s*\S.{0,120}\.{3,}\s*\d+\s*$/.test(ln);
+      }).join('\n');
+      return head + tail;
+    };
+    const text = stripTocAndLeaders(rawText).slice(0, 200000);
+    if (!text.trim()) return res.status(400).json({ error: 'pdf_empty' });
+    const fast = String(req.query.fast || req.body?.fast || '') === '1';
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    let scenario: any = null;
+    if (apiKey && !fast) {
+      try {
+        const client = createOpenAIClient(apiKey);
+        const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+            const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON-схему полного сценария для нашей игры без комментариев и лишнего текста.';
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
+        const prompt = `Исходный текст PDF (фрагменты):\n---\n${text.slice(0, 8000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, осмысленные названия сцен и короткие (2-3 предложения) описания.`;
+        const r = await client.chat.completions.create({
+          model,
+          temperature: 0.4,
+          max_tokens: 2000,
+          response_format: { type: 'json_object' } as any,
+          messages: [
+            { role: 'system', content: sys },
+            { role: 'user', content: prompt },
+          ],
+        });
+        const content = r.choices?.[0]?.message?.content || '{}';
+        scenario = JSON.parse(content);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('PDF ingest AI failed:', e);
+      }
+    }
+    // Build robust fallback / normalization
+    const buildScenarioFromText = (srcText: string) => {
+      const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
+        const idx = srcText.search(labelRe);
+        if (idx < 0) return null;
+        const tail = srcText.slice(idx);
+        const lines = tail.split('\n');
+        lines.shift();
+        const acc: string[] = [];
+        for (const ln of lines) {
+          // стоп по следующим заголовкам (кроме повтора того же самого раздела)
+          const isIntro = /^\s*Введение\b/i.test(ln);
+          const isBack = /^\s*Предыстория\b/i.test(ln);
+          const isHooks = /^\s*Зацепк[аи][^\n]*приключ/i.test(ln);
+          if (labelName !== 'intro' && isIntro) break;
+          if (labelName !== 'back' && isBack) break;
+          if (labelName !== 'hooks' && isHooks) break;
+          if (/^\s*(Глава|Локация|Сцена|Часть)\b/i.test(ln)) break;
+          if (/^\s*\d+[\.\)]\s+[^\n]+$/.test(ln)) break;
+          acc.push(ln);
+          if (acc.join('\n').length > 6000) break;
+        }
+        const s = acc.join('\n').trim();
+        return s ? s.slice(0, 6000) : null;
+      };
+      const introduction = pickBlock(/(^|\n)\s*Введение\s*$/im, 'intro') || null;
+      const backstory = pickBlock(/(^|\n)\s*Предыстория\s*$/im, 'back') || null;
+      const adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*$/im, 'hooks') || null;
+      const extractSections = (): Array<{ title: string; body: string }> => {
+        const markers: RegExp[] = [
+          /^\s*(Глава|Локация|Сцена|Часть)\s+([^\n]{3,100})/gmi,
+          /^\s*\d+[\.\)]\s+([A-Za-zА-Яа-яЁё0-9][^\n]{3,100})/gm,
+          /^\s*#{1,3}\s+([^\n]{3,100})/gm,
+        ];
+        let matches: Array<{ title: string; index: number }> = [];
+        for (const re of markers) {
+          const m: Array<{ title: string; index: number }> = [];
+          let r: RegExpExecArray | null;
+          while ((r = re.exec(srcText)) !== null) {
+            const t = (r[2] || r[1] || '').toString().trim();
+            if (t) m.push({ title: t, index: r.index });
+          }
+          if (m.length >= 3) { matches = m; break; }
+        }
+        const out: Array<{ title: string; body: string }> = [];
+        if (matches.length >= 2) {
+          for (let i = 0; i < matches.length; i++) {
+            const cur = matches[i];
+            const next = matches[i + 1];
+            const body = srcText.slice(cur.index, next ? next.index : undefined);
+            const cleanBody = body.split('\n').slice(1).join('\n').trim();
+            const b = cleanBody ? cleanBody.slice(0, 1800) : '';
+            out.push({ title: cur.title, body: b });
+            if (out.length >= 14) break;
+          }
+          return out.filter(s => s.title && s.body);
+        }
+        // Chunk fallback
+        const paragraphs = srcText.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+        const chunks: string[] = [];
+        let buf = '';
+        for (const p of paragraphs) {
+          if ((buf + '\n\n' + p).length > 1200) {
+            if (buf) chunks.push(buf);
+            buf = p;
+          } else {
+            buf = buf ? (buf + '\n\n' + p) : p;
+          }
+          if (chunks.length >= 12) break;
+        }
+        if (buf && chunks.length < 14) chunks.push(buf);
+        return chunks.map((c, i) => {
+          const first = c.split(/[\.!\?]\s/)[0] || 'Сцена';
+          const title = (first.trim().slice(0, 60) || `Сцена ${i + 1}`);
+          return { title, body: c.slice(0, 1800) };
+        });
+      };
+      const sections = extractSections();
+      const worldRules = pickBlock(/Правила мира/i) || pickBlock(/Особенности местности/i) || '—';
+      const gameplayRules = pickBlock(/Правила игрового процесса/i) || pickBlock(/Дальнейшие события/i) || '—';
+      const locations = sections.length ? sections.map((s, i) => ({ key: `loc${i + 1}`, order: i + 1, title: s.title, description: s.body, backgroundUrl: null, musicUrl: null })) :
+        [{ key: 'start', order: 1, title: 'Стартовая локация', description: srcText.split('\n').slice(0, 8).join('\n'), backgroundUrl: null, musicUrl: null }];
+      const exits = locations.length > 1 ? locations.slice(0, -1).map((_, i) => ({ fromKey: `loc${i + 1}`, type: 'BUTTON', buttonText: 'Дальше', triggerText: null, toKey: `loc${i + 2}`, isGameOver: false })) : [];
+      return {
+        game: { title: fixLatin1(req.file.originalname.replace(/\.pdf$/i, '')), description: 'Импортировано из PDF', author: 'GM', worldRules, gameplayRules, introduction, backstory, adventureHooks },
+        locations, exits,
+      };
+    };
+    if (!scenario || !scenario.locations || !scenario.locations.length) {
+      scenario = buildScenarioFromText(text);
+    } else {
+      // enrich missing rules if empty
+      if (!scenario.game) scenario.game = {};
+      if (!scenario.game.worldRules) scenario.game.worldRules = ((): string | null => {
+        const blk = (text.match(/Правила мира[\s\S]{0,2000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 1800) : null;
+      })();
+      if (!scenario.game.gameplayRules) scenario.game.gameplayRules = ((): string | null => {
+        const blk = (text.match(/Правила игрового процесса[\s\S]{0,2000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 1800) : null;
+      })();
+    }
+    // Normalize possible mojibake from AI or filename
+    try {
+      if (scenario?.game) {
+        scenario.game.title = fixLatin1(scenario.game.title);
+        scenario.game.author = fixLatin1(scenario.game.author);
+        scenario.game.description = fixLatin1(scenario.game.description);
+      }
+    } catch {}
+    return res.json({ import: scenario });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('ingest_pdf_error', e);
+    return res.status(500).json({ error: 'ingest_failed' });
+  }
+});
+
+// -------------------- Admin: async ingest+import job (avoids proxy 100s timeout) --------------------
+type IngestJob = { status: 'queued' | 'running' | 'done' | 'error'; error?: string; gameId?: string; progress?: string };
+const ingestJobs = new Map<string, IngestJob>();
+
+app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
+    const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
+    ingestJobs.set(jobId, { status: 'queued', progress: 'Scheduled' });
+    res.json({ jobId });
+    // run async
+    (async () => {
+      const set = (patch: Partial<IngestJob>) => {
+        const cur = ingestJobs.get(jobId) || { status: 'running' as const };
+        ingestJobs.set(jobId, { ...cur, ...patch });
+      };
+      try {
+        set({ status: 'running', progress: 'Reading PDF' });
+        const pdfBuf = req.file!.buffer;
+        const parsed = await pdfParse(pdfBuf).catch(() => null);
+        const rawText = (parsed?.text || '').replace(/\r/g, '\n');
+        const stripTocAndLeaders = (src: string): string => {
+          let t = src;
+          const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
+          if (m) {
+            const start = m.index || 0;
+            const rest = t.slice(start);
+            const reEnd = /(^|\n)\s*(Введение|Предыстория|Зацепк[аи][^\n]*приключ|Глава|Часть|Сцена|Локация)\s*($|\n)|(\f)/im;
+            const endM = reEnd.exec(rest);
+            if (endM && typeof endM.index === 'number' && endM.index > 0) {
+              t = t.slice(0, start) + rest.slice(endM.index);
+            } else {
+              t = t.slice(0, start) + rest.slice(Math.min(rest.length, 4000));
+            }
+          }
+          const limit = 15000;
+          let head = t.slice(0, limit);
+          const tail = t.slice(limit);
+          head = head.split('\n').filter((ln) => {
+            return !/^\s*\S.{0,120}\.{3,}\s*\d+\s*$/.test(ln);
+          }).join('\n');
+          return head + tail;
+        };
+        const text = stripTocAndLeaders(rawText);
+        // Try AI ingest (full)
+        set({ progress: 'AI analyze' });
+        const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+        let scenario: any = null;
+        const tryAI = async () => {
+          if (!apiKey) return null;
+          try {
+            const client = createOpenAIClient(apiKey);
+            const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+            const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON полного сценария нашей игры без комментариев.';
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
+            const prompt = `Исходный текст PDF (фрагменты):\n---\n${text.slice(0, 12000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, короткие описания (2–3 предложения), базовые персонажи (NPC).`;
+            const r = await client.chat.completions.create({
+              model, temperature: 0.4, max_tokens: 2000,
+              response_format: { type: 'json_object' } as any,
+              messages: [{ role: 'system', content: sys }, { role: 'user', content: prompt }],
+            });
+            const content = r.choices?.[0]?.message?.content || '';
+            if (!content.trim().startsWith('{')) return null;
+            return JSON.parse(content);
+          } catch {
+            return null;
+          }
+        };
+        scenario = await tryAI();
+        // Fallback: build from headings if AI missing parts
+        const ensureScenario = (sc: any) => {
+          const extractSections = (srcText: string): Array<{ title: string; body: string }> => {
+            const markers: RegExp[] = [
+              /^\s*(Глава|Локация|Сцена|Часть)\s+([^\n]{3,100})/gmi,
+              /^\s*\d+[\.\)]\s+([A-Za-zА-Яа-яЁё0-9][^\n]{3,100})/gm,
+              /^\s*#{1,3}\s+([^\n]{3,100})/gm,
+            ];
+            let matches: Array<{ title: string; index: number }> = [];
+            for (const re of markers) {
+              const m: Array<{ title: string; index: number }> = [];
+              let r: RegExpExecArray | null;
+              while ((r = re.exec(srcText)) !== null) {
+                const t = (r[2] || r[1] || '').toString().trim();
+                if (t) m.push({ title: t, index: r.index });
+              }
+              if (m.length >= 3) { matches = m; break; }
+            }
+            const out: Array<{ title: string; body: string }> = [];
+            if (matches.length >= 2) {
+              for (let i = 0; i < matches.length; i++) {
+                const cur = matches[i];
+                const next = matches[i + 1];
+                const body = srcText.slice(cur.index, next ? next.index : undefined);
+                const cleanBody = body.split('\n').slice(1).join('\n').trim();
+                const b = cleanBody ? cleanBody.slice(0, 1800) : '';
+                out.push({ title: cur.title, body: b });
+                if (out.length >= 14) break;
+              }
+              return out.filter(s => s.title && s.body);
+            }
+            // Chunk fallback
+            const paragraphs = srcText.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+            const chunks: string[] = [];
+            let buf = '';
+            for (const p of paragraphs) {
+              if ((buf + '\n\n' + p).length > 1200) {
+                if (buf) chunks.push(buf);
+                buf = p;
+              } else {
+                buf = buf ? (buf + '\n\n' + p) : p;
+              }
+              if (chunks.length >= 12) break;
+            }
+            if (buf && chunks.length < 14) chunks.push(buf);
+            return chunks.map((c, i) => {
+              const first = c.split(/[\.!\?]\s/)[0] || 'Сцена';
+              const title = (first.trim().slice(0, 60) || `Сцена ${i + 1}`);
+              return { title, body: c.slice(0, 1800) };
+            });
+          };
+          const out: any = sc && typeof sc === 'object' ? sc : {};
+          out.game = out.game || { title: (req.file!.originalname || 'Scenario').replace(/\.pdf$/i, ''), description: 'Импортировано из PDF', author: 'GM', worldRules: '—', gameplayRules: '—' };
+          // Попробуем выделить тематические разделы, если не заданы
+          const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
+            const idx = text.search(labelRe);
+            if (idx < 0) return null;
+            const tail = text.slice(idx);
+            const lines = tail.split('\n');
+            // убрать строку заголовка
+            lines.shift();
+            const acc: string[] = [];
+            for (const ln of lines) {
+              const isIntro = /^\s*Введение\b/i.test(ln);
+              const isBack = /^\s*Предыстория\b/i.test(ln);
+              const isHooks = /^\s*Зацепк[аи][^\n]*приключ/i.test(ln);
+              if (labelName !== 'intro' && isIntro) break;
+              if (labelName !== 'back' && isBack) break;
+              if (labelName !== 'hooks' && isHooks) break;
+              if (/^\s*\d+[\.\)]\s+[^\n]+$/.test(ln)) break;
+              acc.push(ln);
+              if (acc.join('\n').length > 6000) break;
+            }
+            const s = acc.join('\n').trim();
+            return s ? s.slice(0, 6000) : null;
+          };
+          if (!out.game.introduction) out.game.introduction = pickBlock(/(^|\n)\s*Введение\s*$/im, 'intro') || null;
+          if (!out.game.backstory) out.game.backstory = pickBlock(/(^|\n)\s*Предыстория\s*$/im, 'back') || null;
+          if (!out.game.adventureHooks) out.game.adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*$/im, 'hooks') || null;
+          const locs: any[] = Array.isArray(out.locations) ? out.locations : [];
+          if (!locs.length) {
+            const sections = extractSections(text);
+            out.locations = sections.length ? sections.map((s, i) => ({ key: `loc${i + 1}`, order: i + 1, title: s.title, description: s.body, backgroundUrl: null, musicUrl: null })) :
+              [{ key: 'start', order: 1, title: 'Стартовая локация', description: null, backgroundUrl: null, musicUrl: null }];
+          }
+          if (!Array.isArray(out.exits) || !out.exits.length) {
+            out.exits = [];
+            for (let i = 1; i < out.locations.length; i++) {
+              out.exits.push({ fromKey: `loc${i}`, type: 'BUTTON', buttonText: 'Дальше', triggerText: null, toKey: `loc${i + 1}`, isGameOver: false });
+            }
+          }
+          if (!Array.isArray(out.characters)) out.characters = [];
+          if (!out.characters.length) {
+            // Extract NPC names from "Статистика НИП"
+            const m = text.match(/Статистика НИП[\s\S]*/);
+            const npcBlock = m ? m[0] : '';
+            const cand: string[] = [];
+            npcBlock.split('\n').forEach((ln) => {
+              const s = ln.trim().replace(/\[[^\]]+\]/g, '');
+              if (!s || s.length > 48) return;
+              if (/:|\./.test(s)) return;
+              if (/^[0-9]/.test(s)) return;
+              if (/^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё’'\-\. ]{1,}$/.test(s)) cand.push(s);
+            });
+            const uniq: string[] = [];
+            for (const n of cand) { if (!uniq.includes(n)) uniq.push(n); if (uniq.length >= 10) break; }
+            out.characters = uniq.map((name) => ({ name, isPlayable: false, role: 'NPC' }));
+          }
+          if (!Array.isArray(out.editions) || !out.editions.length) out.editions = [{ name: 'Стандарт', description: '—', price: 0, badge: null }];
+          return out;
+        };
+        scenario = ensureScenario(scenario);
+        set({ progress: 'Import scenario' });
+        // Import into DB (reuse logic from /api/admin/scenario/import)
+        const prisma = getPrisma();
+        const g = scenario.game || {};
+        const game = await prisma.game.create({
+          data: {
+            title: g.title || (req.file!.originalname || 'Scenario').replace(/\.pdf$/i, ''),
+            description: g.description || 'Импортировано из PDF',
+            author: g.author || 'GM',
+            coverUrl: g.coverUrl || '',
+            tags: g.tags || [],
+            rules: g.rules || '',
+            worldRules: g.worldRules || null,
+            gameplayRules: g.gameplayRules || null,
+            introduction: g.introduction || null,
+            backstory: g.backstory || null,
+            adventureHooks: g.adventureHooks || null,
+            promoDescription: g.promoDescription || null,
+            marketplaceLinks: g.marketplaceLinks || [],
+            shelfCategory: g.shelfCategory || null,
+            shelfPosition: typeof g.shelfPosition === 'number' ? g.shelfPosition : null,
+            bannerStyle: g.bannerStyle || null,
+            ageRating: g.ageRating || null,
+            status: g.status || 'DRAFT',
+          },
+        });
+        const keyToId = new Map<string, string>();
+        for (let i = 0; i < scenario.locations.length; i++) {
+          const l = scenario.locations[i] || {};
+          const order = Number(l.order || i + 1);
+          const created = await prisma.location.create({
+            data: {
+              gameId: game.id, order,
+              title: l.title || `Локация ${order}`,
+              description: l.description || null,
+              rulesPrompt: l.rulesPrompt || null,
+              backgroundUrl: l.backgroundUrl || null,
+              layout: l.layout || null,
+              musicUrl: l.musicUrl || null,
+            },
+          });
+          if (l.key) keyToId.set(String(l.key), created.id);
+        }
+        let createdExits = 0;
+        for (const e of scenario.exits) {
+          const fromId = keyToId.get(String(e.fromKey || ''));
+          const toId = e.toKey ? keyToId.get(String(e.toKey)) : null;
+          if (!fromId) continue;
+          await prisma.locationExit.create({
+            data: {
+              locationId: fromId,
+              type: (e.type || 'BUTTON') as any,
+              buttonText: e.buttonText || null,
+              triggerText: e.triggerText || null,
+              targetLocationId: toId || null,
+              isGameOver: Boolean(e.isGameOver),
+            },
+          });
+          createdExits++;
+        }
+        for (const c of (scenario.characters || [])) {
+          const abilitiesValue =
+            Array.isArray(c.abilities) ? c.abilities.filter((s: any) => typeof s === 'string' && s.trim()).join('\n') :
+            (typeof c.abilities === 'string' ? c.abilities : null);
+          await prisma.character.create({
+            data: {
+              gameId: game.id,
+              name: c.name || 'Персонаж',
+              gender: c.gender || null,
+              race: c.race || null,
+              avatarUrl: c.avatarUrl || `https://picsum.photos/seed/${Math.random().toString(36).slice(2)}/80/80`,
+              description: c.description || null,
+              rating: typeof c.rating === 'number' ? c.rating : null,
+              role: c.role || null,
+              voiceId: c.voiceId || null,
+              persona: c.persona || null,
+              origin: c.origin || null,
+              isPlayable: Boolean(c.isPlayable),
+              abilities: abilitiesValue,
+            },
+          });
+        }
+        for (const e of (scenario.editions || [])) {
+          await prisma.edition.create({
+            data: {
+              gameId: game.id,
+              name: e.name || 'Стандарт',
+              description: e.description || '',
+              price: typeof e.price === 'number' ? e.price : 0,
+              badge: e.badge || null,
+            },
+          });
+        }
+        // Backgrounds
+        set({ progress: 'Generate backgrounds' });
+        const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+        const oaKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+        const locList = await prisma.location.findMany({ where: { gameId: game.id }, orderBy: { order: 'asc' } });
+        let done = 0;
+        for (const loc of locList) {
+          if (done >= 8) break;
+          if (loc.backgroundUrl) continue;
+          const guidance = 'Атмосферный фон сцены (без текста и водяных знаков). Киношный свет, глубина, без крупных персонажей.';
+          const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), (g.worldRules || ''), (g.gameplayRules || '')].filter(Boolean).join('\n\n').slice(0, 1600);
+          let b64 = '';
+          try {
+            if (geminiKey) b64 = await generateViaGemini(prompt, '1536x1024', geminiKey);
+            if (!b64 && oaKey) {
+              try {
+                const client = createOpenAIClient(oaKey);
+                const img = await client.images.generate({ model: 'gpt-image-1', prompt, size: '1536x1024', quality: 'high' } as any);
+                b64 = img?.data?.[0]?.b64_json || '';
+                const url = img?.data?.[0]?.url || '';
+                if (!b64 && url) {
+                  const r = await undiciFetch(url);
+                  const buf = Buffer.from(await r.arrayBuffer());
+                  b64 = buf.toString('base64');
+                }
+              } catch {}
+            }
+          } catch {}
+          if (b64) {
+            try {
+              const buf = Buffer.from(b64, 'base64');
+              const fname = `bg_${game.id}_${loc.id}.png`;
+              const dir = path.join(UPLOAD_DIR, 'image');
+              try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+              fs.writeFileSync(path.join(dir, fname), buf);
+              await prisma.location.update({ where: { id: loc.id }, data: { backgroundUrl: `/uploads/image/${fname}` } });
+              done++;
+            } catch {}
+          }
+        }
+        set({ status: 'done', gameId: game.id, progress: 'Completed' });
+      } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.error('ingest_import_job_error', e);
+        set({ status: 'error', error: (e?.message || String(e)).slice(0, 500) });
+      }
+    })();
+  } catch (e) {
+    return res.status(500).json({ error: 'ingest_start_failed' });
+  }
+});
+
+app.get('/api/admin/ingest-import/:id', async (req, res) => {
+  const j = ingestJobs.get(req.params.id);
+  if (!j) return res.status(404).json({ error: 'not_found' });
+  return res.json(j);
+});
+
+// -------------------- Admin: generate background image for a specific location --------------------
+app.post('/api/admin/locations/:id/generate-background', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const id = String(req.params.id);
+    const size = String(req.query.size || req.body?.size || '1536x1024');
+    const provider = String(req.query.provider || req.body?.provider || '').toLowerCase(); // '', 'gemini', 'openai', 'stability'
+    const loc = await prisma.location.findUnique({ where: { id } });
+    if (!loc) return res.status(404).json({ error: 'location_not_found' });
+    const game = await prisma.game.findUnique({ where: { id: loc.gameId } });
+    if (!game) return res.status(404).json({ error: 'game_not_found' });
+    const guidance = 'Атмосферный реалистичный фон сцены для приключенческой ролевой игры. Без текста и водяных знаков. Киношный свет, глубина, без персонажей крупным планом.';
+    const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), (game.worldRules || ''), (game.gameplayRules || '')]
+      .filter(Boolean).join('\n\n').slice(0, 1800);
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    const oaKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    const stabilityKey = process.env.STABILITY_API_KEY;
+    // eslint-disable-next-line no-console
+    console.log('[BGGEN] request', { locId: id, size, provider: provider || 'auto', promptLen: prompt.length, title: loc.title });
+    let b64 = '';
+    try {
+      // Provider selection: if provider specified, respect it; otherwise try Gemini then OpenAI
+      if (provider === 'gemini') {
+        if (!geminiKey) return res.status(400).json({ error: 'gemini_key_missing' });
+        try {
+          b64 = await generateViaGemini(prompt, size, geminiKey);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error('[BGGEN] gemini error', e);
+        }
+      } else if (provider === 'openai') {
+        if (!oaKey) return res.status(400).json({ error: 'openai_key_missing' });
+        try {
+          const client = createOpenAIClient(oaKey);
+          const img = await client.images.generate({ model: 'gpt-image-1', prompt, size, quality: 'high' } as any);
+          b64 = img?.data?.[0]?.b64_json || '';
+          const url = img?.data?.[0]?.url || '';
+          if (!b64 && url) {
+            const r = await undiciFetch(url);
+            const buf = Buffer.from(await r.arrayBuffer());
+            b64 = buf.toString('base64');
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error('[BGGEN] openai error', e);
+        }
+      } else if (provider === 'stability') {
+        if (!stabilityKey) return res.status(400).json({ error: 'stability_key_missing' });
+        try {
+          // Use SDXL 1024x1024 safe default
+          const r = await undiciFetch('https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${stabilityKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text_prompts: [{ text: prompt, weight: 1 }],
+              cfg_scale: 7,
+              height: 1024,
+              width: 1024,
+              samples: 1,
+              steps: 30,
+            }),
+          });
+          if (!r.ok) {
+            const body = await r.text();
+            // eslint-disable-next-line no-console
+            console.error('[BGGEN] stability http', r.status, body.slice(0, 200));
+          } else {
+            const j = await r.json();
+            b64 = j?.artifacts?.[0]?.base64 || '';
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error('[BGGEN] stability error', e);
+        }
+      } else {
+        // default: try gemini → openai
+        if (geminiKey) {
+          try { b64 = await generateViaGemini(prompt, size, geminiKey); } catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[BGGEN] gemini auto error', e);
+          }
+        }
+        if (!b64 && oaKey) {
+          try {
+            const client = createOpenAIClient(oaKey);
+            const img = await client.images.generate({ model: 'gpt-image-1', prompt, size, quality: 'high' } as any);
+            b64 = img?.data?.[0]?.b64_json || '';
+            const url = img?.data?.[0]?.url || '';
+            if (!b64 && url) {
+              const r = await undiciFetch(url);
+              const buf = Buffer.from(await r.arrayBuffer());
+              b64 = buf.toString('base64');
+            }
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[BGGEN] openai auto error', e);
+          }
+        }
+        if (!b64 && stabilityKey) {
+          try {
+            const r = await undiciFetch('https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${stabilityKey}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text_prompts: [{ text: prompt, weight: 1 }],
+                cfg_scale: 7,
+                height: 1024,
+                width: 1024,
+                samples: 1,
+                steps: 30,
+              }),
+            });
+            if (!r.ok) {
+              const body = await r.text();
+              // eslint-disable-next-line no-console
+              console.error('[BGGEN] stability auto http', r.status, body.slice(0, 200));
+            } else {
+              const j = await r.json();
+              b64 = j?.artifacts?.[0]?.base64 || '';
+            }
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[BGGEN] stability auto error', e);
+          }
+        }
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[BGGEN] error', e);
+    }
+    if (!b64) return res.status(502).json({ error: 'image_generation_failed', providerTried: provider || 'auto' });
+    const buf = Buffer.from(b64, 'base64');
+    const fname = `bg_${loc.gameId}_${loc.id}_${Date.now()}.png`;
+    const dir = path.join(UPLOAD_DIR, 'image');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    fs.writeFileSync(path.join(dir, fname), buf);
+    const url = `/uploads/image/${fname}`;
+    await prisma.location.update({ where: { id: loc.id }, data: { backgroundUrl: url } });
+    return res.json({ ok: true, url });
+  } catch (e) {
+    return res.status(500).json({ error: 'generate_background_failed', details: String(e) });
+  }
+});
+
+// -------------------- Admin: bulk scenario import (Game + Locations + Exits [+ Characters, Editions optional]) --------------------
+// Body shape:
+// {
+//   "game": { "title": "...", "description": "...", "author": "...", "coverUrl": "...", "tags": [], "rules": "...", "worldRules": "...", "gameplayRules": "...", "status": "PUBLISHED" },
+//   "locations": [ { "key": "guild", "order": 1, "title": "...", "description": "...", "backgroundUrl": "...", "musicUrl": "" }, ... ],
+//   "exits": [ { "fromKey": "guild", "type": "BUTTON", "buttonText": "Идти", "triggerText": null, "toKey": "temple", "isGameOver": false }, ... ],
+//   "characters": [ { "name":"...", "isPlayable":true, "race":"...", "gender":"...", "avatarUrl": null, "voiceId": null, "persona": null, "origin": null, "role": null, "abilities": null }, ... ],
+//   "editions": [ { "name":"Стандарт", "description":"...", "price":990, "badge": null }, ... ]
+// }
+app.post('/api/admin/scenario/import', async (req, res) => {
+  try {
+    const body = req.body as any;
+    if (!body || typeof body !== 'object') return res.status(400).json({ error: 'invalid_body' });
+    const g = body.game || {};
+    if (!g.title) return res.status(400).json({ error: 'title_required' });
+    const locs = Array.isArray(body.locations) ? body.locations : [];
+    const exs = Array.isArray(body.exits) ? body.exits : [];
+    const chars = Array.isArray(body.characters) ? body.characters : [];
+    const eds = Array.isArray(body.editions) ? body.editions : [];
+    const prisma = getPrisma();
+    // create game
+    const game = await prisma.game.create({
+      data: {
+        title: g.title,
+        description: g.description || '',
+        author: g.author || 'Автор',
+        coverUrl: g.coverUrl || '',
+        tags: g.tags || [],
+        rules: g.rules || '',
+        worldRules: g.worldRules || null,
+        gameplayRules: g.gameplayRules || null,
+        introduction: g.introduction || null,
+        backstory: g.backstory || null,
+        adventureHooks: g.adventureHooks || null,
+        promoDescription: g.promoDescription || null,
+        marketplaceLinks: g.marketplaceLinks || [],
+        shelfCategory: g.shelfCategory || null,
+        shelfPosition: typeof g.shelfPosition === 'number' ? g.shelfPosition : null,
+        bannerStyle: g.bannerStyle || null,
+        ageRating: g.ageRating || null,
+        status: g.status || 'DRAFT',
+      },
+    });
+    // create locations in specified order (fall back to index)
+    const keyToId = new Map<string, string>();
+    for (let i = 0; i < locs.length; i++) {
+      const l = locs[i] || {};
+      const order = Number(l.order || i + 1);
+      const created = await prisma.location.create({
+        data: {
+          gameId: game.id,
+          order,
+          title: l.title || `Локация ${order}`,
+          description: l.description || null,
+          rulesPrompt: l.rulesPrompt || null,
+          backgroundUrl: l.backgroundUrl || null,
+          layout: l.layout || null,
+          musicUrl: l.musicUrl || null,
+        },
+      });
+      if (l.key) keyToId.set(String(l.key), created.id);
+    }
+    // create exits
+    let createdExits = 0;
+    for (const e of exs) {
+      const fromId = keyToId.get(String(e.fromKey || ''));
+      const toId = e.toKey ? keyToId.get(String(e.toKey)) : null;
+      if (!fromId) continue;
+      await prisma.locationExit.create({
+        data: {
+          locationId: fromId,
+          type: (e.type || 'BUTTON') as any,
+          buttonText: e.buttonText || null,
+          triggerText: e.triggerText || null,
+          targetLocationId: toId || null,
+          isGameOver: Boolean(e.isGameOver),
+        },
+      });
+      createdExits++;
+    }
+    // create characters (optional)
+    let createdChars = 0;
+    for (const c of chars) {
+      const abilitiesValue =
+        Array.isArray(c.abilities) ? c.abilities.filter((s: any) => typeof s === 'string' && s.trim()).join('\n') :
+        (typeof c.abilities === 'string' ? c.abilities : null);
+      await prisma.character.create({
+        data: {
+          gameId: game.id,
+          name: c.name || 'Персонаж',
+          gender: c.gender || null,
+          race: c.race || null,
+          avatarUrl: c.avatarUrl || 'https://picsum.photos/seed/char_' + Math.random().toString(36).slice(2, 8) + '/80/80',
+          description: c.description || null,
+          rating: typeof c.rating === 'number' ? c.rating : null,
+          role: c.role || null,
+          voiceId: c.voiceId || null,
+          persona: c.persona || null,
+          origin: c.origin || null,
+          isPlayable: Boolean(c.isPlayable),
+          abilities: abilitiesValue,
+        },
+      });
+      createdChars++;
+    }
+    // create editions (optional)
+    let createdEds = 0;
+    for (const e of eds) {
+      await prisma.edition.create({
+        data: {
+          gameId: game.id,
+          name: e.name || 'Стандарт',
+          description: e.description || '',
+          price: typeof e.price === 'number' ? e.price : 0,
+          badge: e.badge || null,
+        },
+      });
+      createdEds++;
+    }
+    // Auto-generate backgrounds for locations (enabled by default; disable with ?bg=0).
+    // ВАЖНО: переносим в фон, чтобы не упираться в 100s таймаут прокси.
+    const enableBg = String((req.query.bg ?? '1')) !== '0';
+    if (enableBg) {
+      setImmediate(async () => {
+        try {
+          const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+          const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+          const locList = await prisma.location.findMany({ where: { gameId: game.id }, orderBy: { order: 'asc' } });
+          let done = 0;
+          for (const loc of locList) {
+            if (done >= 10) break; // safety
+            if (loc.backgroundUrl) continue;
+            const guidance = 'Сгенерируй атмосферный фон сцены (без текста и водяных знаков). Киношный свет, глубина, без персонажей крупным планом.';
+            const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), (game.worldRules || ''), (game.gameplayRules || '')].filter(Boolean).join('\n\n').slice(0, 1600);
+            let b64: string = '';
+            try {
+              if (geminiKey) {
+                b64 = await generateViaGemini(prompt, '1536x1024', geminiKey);
+              }
+              if (!b64 && apiKey) {
+                try {
+                  const client = createOpenAIClient(apiKey);
+                  const img = await client.images.generate({ model: 'gpt-image-1', prompt, size: '1536x1024', quality: 'high' } as any);
+                  b64 = img?.data?.[0]?.b64_json || '';
+                  const url = img?.data?.[0]?.url || '';
+                  if (!b64 && url) {
+                    const r = await undiciFetch(url);
+                    const buf = Buffer.from(await r.arrayBuffer());
+                    b64 = buf.toString('base64');
+                  }
+                } catch { /* ignore and try next */ }
+              }
+            } catch { /* ignore bg generation errors */ }
+            if (b64) {
+              try {
+                const buf = Buffer.from(b64, 'base64');
+                const fname = `bg_${game.id}_${loc.id}.png`;
+                const dir = path.join(UPLOAD_DIR, 'image');
+                try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+                fs.writeFileSync(path.join(dir, fname), buf);
+                await prisma.location.update({ where: { id: loc.id }, data: { backgroundUrl: `/uploads/image/${fname}` } });
+                done++;
+              } catch { /* ignore file save errors */ }
+            }
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error('bg_generation_async_error', e);
+        }
+      });
+    }
+    return res.status(201).json({ ok: true, gameId: game.id, locations: locs.length, exits: createdExits, characters: createdChars, editions: createdEds });
+  } catch (e) {
+    return res.status(500).json({ error: 'scenario_import_failed', details: String(e) });
+  }
+});
+
+const serverHttp = app.listen(port, () => {
+  // eslint-disable-next-line no-console
+  console.log(`Server listening on http://localhost:${port}`);
+});
+
+// -------------------- Realtime via WebSocket --------------------
+type WsClient = { socket: WebSocket; userId: string };
+const userIdToSockets = new Map<string, Set<WebSocket>>();
+// Порядок ходов в лобби
+const lobbyTurns = new Map<string, { order: string[]; idx: number }>();
+
+function wsNotifyUser(userId: string, event: unknown) {
+  const set = userIdToSockets.get(userId);
+  if (!set) return;
+  const payload = JSON.stringify(event);
+  for (const ws of set) {
+    if (ws.readyState === ws.OPEN) {
+      try { ws.send(payload); } catch {}
+    }
+  }
+}
+async function wsNotifyLobby(lobbyId: string, event: unknown) {
+  try {
+    const prisma = getPrisma();
+    const members = await prisma.lobbyMember.findMany({ where: { lobbyId } });
+    for (const m of members as any[]) wsNotifyUser(m.userId, event);
+  } catch {}
+}
+
+const wss = new WebSocketServer({ server: serverHttp, path: '/ws' });
+wss.on('connection', async (socket, req) => {
+  try {
+    const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+    const tgId = url.searchParams.get('tgId') || undefined;
+    const tgUsername = url.searchParams.get('tgUsername') || undefined;
+    const userId = url.searchParams.get('userId') || undefined;
+    const deviceId = url.searchParams.get('deviceId') || undefined;
+    const prisma = getPrisma();
+    const resolved = await (async () => {
+      // совпадает с приоритетом API: сначала Telegram, затем userId, затем deviceId
+      if (tgId || tgUsername) {
+        let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+        if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername: String(tgUsername).replace(/^@+/, '') } });
+        if (!u) u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername ? String(tgUsername).replace(/^@+/, '') : undefined, status: 'active' } });
+        return u.id;
+      }
+      if (userId) return userId;
+      if (deviceId) {
+        const devTgId = 'device:' + deviceId;
+        let u = await prisma.user.findFirst({ where: { tgId: devTgId } });
+        if (!u) u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: devTgId, status: 'active' } });
+        return u.id;
+      }
+      return null;
+    })();
+    if (!resolved) {
+      socket.close();
+      return;
+    }
+    if (!userIdToSockets.has(resolved)) userIdToSockets.set(resolved, new Set());
+    userIdToSockets.get(resolved)!.add(socket);
+    socket.on('close', () => {
+      const set = userIdToSockets.get(resolved);
+      if (set) {
+        set.delete(socket);
+        if (set.size === 0) userIdToSockets.delete(resolved);
+      }
+    });
+  } catch {
+    try { socket.close(); } catch {}
+  }
+});
+
+// Запуск Telegram-бота в этом же процессе (если указан BOT_TOKEN)
+if (process.env.BOT_TOKEN) {
+  import('./bot.js')
+    .then(() => {
+      // eslint-disable-next-line no-console
+      console.log('Telegram bot module loaded');
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('Failed to start Telegram bot:', err);
+    });
+}
+
+// Profile
+app.get('/api/profile', async (req, res) => {
+  const tgId = typeof req.query.tgId === 'string' ? req.query.tgId : undefined;
+  const tgUsername = typeof req.query.tgUsername === 'string' ? req.query.tgUsername : undefined;
+  const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+  const firstName = typeof req.query.firstName === 'string' ? req.query.firstName : undefined;
+  const lastName = typeof req.query.lastName === 'string' ? req.query.lastName : undefined;
+
+  try {
+    const prisma = getPrisma();
+    let u = userId ? await prisma.user.findUnique({ where: { id: userId } }) : null;
+    if (!u && tgId) u = await prisma.user.findFirst({ where: { tgId } });
+    if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+    // авто-досоздание если пришли из Telegram, а записи нет
+    if (!u && (tgId || tgUsername)) {
+      u = await prisma.user.create({
+        data: {
+          firstName: firstName || 'User',
+          lastName: lastName || '',
+          tgUsername,
+          tgId,
+          status: 'active',
+        },
+      });
+    }
+    if (u) {
+      return res.json({
+        id: u.id,
+        name: [u.firstName, u.lastName].filter(Boolean).join(' ') || (u.tgUsername ? '@' + u.tgUsername : 'User'),
+        avatarUrl: 'https://picsum.photos/seed/avatar_' + u.id + '/100/100',
+        subscriptionUntil: u.subscriptionUntil || new Date(Date.now() + 30 * 86400000).toISOString(),
+        totalEarned: u.balance || 0,
+        totalFriends: u.referralsCount || 0,
+        autoRenewal: true,
+        cardMasked: '',
+      } satisfies import('./types').Profile);
+    }
+  } catch {}
+
+  // fallback на память
+  let u = users.find((x) => x.id === userId);
+  if (!u && tgId) u = users.find((x) => x.tgId === tgId);
+  if (!u && tgUsername) u = users.find((x) => (x.tgUsername || '').toLowerCase() === String(tgUsername).toLowerCase());
+  if (!u && (tgId || tgUsername)) {
+    u = createUser({ firstName: firstName || 'User', lastName: lastName || '', tgUsername, tgId, status: 'active', balance: 0, referralsCount: 0, registeredAt: new Date().toISOString() });
+  }
+  if (u) {
+    return res.json({
+      id: u.id,
+      name: [u.firstName, u.lastName].filter(Boolean).join(' ') || (u.tgUsername ? '@' + u.tgUsername : 'User'),
+      avatarUrl: 'https://picsum.photos/seed/avatar_' + u.id + '/100/100',
+      subscriptionUntil: u.subscriptionUntil || new Date(Date.now() + 30 * 86400000).toISOString(),
+      totalEarned: u.balance || 0,
+      totalFriends: u.referralsCount || 0,
+      autoRenewal: true,
+      cardMasked: '',
+    } satisfies import('./types').Profile);
+  }
+  res.json({ ...profile, cardMasked: profile.cardMasked });
+});
+
+// Friends
+app.get('/api/friends', (_req, res) => {
+  res.json(friends);
+});
+
+// -------------------- Friends: real data via Prisma --------------------
+async function resolveUserIdFromQueryOrBody(req: express.Request, prisma: ReturnType<typeof getPrisma>): Promise<string | null> {
+  const q = req.method === 'GET' ? req.query : (req.body as any);
+  const userIdRaw = typeof q.userId === 'string' ? q.userId : undefined;
+  const tgId = typeof q.tgId === 'string' ? q.tgId : undefined;
+  const tgUsernameRaw = typeof q.tgUsername === 'string' ? q.tgUsername : undefined;
+  const deviceId = typeof q.deviceId === 'string' ? q.deviceId : undefined;
+  const normUsername = tgUsernameRaw ? String(tgUsernameRaw).replace(/^@+/, '') : undefined;
+
+  // 1) Приоритет Telegram-идентификации, чтобы дружба через бота всегда отображалась в app
+  if (tgId || normUsername) {
+    let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+    if (!u && normUsername) u = await prisma.user.findFirst({ where: { tgUsername: normUsername } });
+    if (!u) {
+      u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: normUsername || undefined, status: 'active' } });
+    }
+    return u.id;
+  }
+
+  // 2) Явный userId (напр., сохранённый в localStorage)
+  if (userIdRaw) return userIdRaw;
+
+  // 3) Fallback: deviceId → технический пользователь tgId = "device:<id>"
+  if (deviceId) {
+    const devTgId = 'device:' + deviceId;
+    let u = await prisma.user.findFirst({ where: { tgId: devTgId } });
+    if (!u) u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: devTgId, status: 'active' } });
+    return u.id;
+  }
+  return null;
+}
+
+function genInviteCode(len = 10): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(len);
+  let out = '';
+  for (let i = 0; i < len; i++) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
+
+// Список друзей текущего пользователя
+app.get('/api/friends/list', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const edges = await prisma.friendEdge.findMany({
+      where: { status: 'ACCEPTED' as any, OR: [{ userId: uid }, { friendId: uid }] },
+    });
+    const otherIds = Array.from(new Set(edges.map((e: any) => (e.userId === uid ? e.friendId : e.userId))));
+    const usersList = otherIds.length ? await prisma.user.findMany({ where: { id: { in: otherIds } } }) : [];
+    const list = otherIds.map((id) => {
+      const u = usersList.find((x) => x.id === id);
+      const name = u ? ([u.firstName, u.lastName].filter(Boolean).join(' ') || (u.tgUsername ? '@' + u.tgUsername : 'User')) : 'User';
+      return { id, name, avatarUrl: 'https://picsum.photos/seed/avatar_' + id + '/80/80' };
+    });
+    return res.json(list);
+  } catch (e) {
+    // fallback: статический список
+    return res.json(friends);
+  }
+});
+
+// Добавление в друзья по tgUsername
+app.post('/api/friends/addByUsername', async (req, res) => {
+  const targetRaw = typeof req.body?.username === 'string' ? req.body.username : '';
+  const username = targetRaw.replace(/^@+/, '').trim();
+  if (!username) return res.status(400).json({ error: 'username_required' });
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    let target = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { tgUsername: { equals: username, mode: 'insensitive' } },
+          { tgUsername: { equals: '@' + username, mode: 'insensitive' } },
+        ],
+      },
+    });
+    if (!target) {
+      // авто-создание карточки пользователя по нику, если ещё не был в системе
+      target = await prisma.user.create({
+        data: {
+          firstName: username,
+          lastName: '',
+          tgUsername: username.replace(/^@+/, ''),
+          status: 'active',
+        },
+      });
+    }
+    if (target.id === uid) return res.status(400).json({ error: 'cannot_add_self' });
+    // двунаправленные связи (упростит выборку)
+    await prisma.friendEdge.upsert({ where: { userId_friendId: { userId: uid, friendId: target.id } }, update: { status: 'ACCEPTED' as any }, create: { userId: uid, friendId: target.id, status: 'ACCEPTED' as any } });
+    await prisma.friendEdge.upsert({ where: { userId_friendId: { userId: target.id, friendId: uid } }, update: { status: 'ACCEPTED' as any }, create: { userId: target.id, friendId: uid, status: 'ACCEPTED' as any } });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_add' });
+  }
+});
+
+// Создание инвайта в друзья (для ссылки Telegram)
+app.post('/api/friends/invite/create', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const ttlHours = Math.max(1, Math.min(24 * 14, Number(req.body?.ttlHours || 24 * 7)));
+    const code = 'F' + genInviteCode(11);
+    const expiresAt = new Date(Date.now() + ttlHours * 3600_000);
+    await prisma.friendInvite.create({ data: { code, inviterId: uid, expiresAt } });
+    const bot = (process.env.BOT_USERNAME || process.env.TELEGRAM_BOT_USERNAME || process.env.BOT_NAME || process.env.BOT || '').replace(/^@+/, '');
+    let tgLink = '';
+    let tgAppLink = '';
+    if (bot) {
+      // Универсальная ссылка (работает для всех ботов): откроет чат и передаст параметр в /start
+      tgLink = `https://t.me/${bot}?start=${encodeURIComponent('friend_' + code)}`;
+      // Mini App (если в BotFather настроен Web App URL для бота)
+      tgAppLink = `https://t.me/${bot}?startapp=${encodeURIComponent('friend_' + code)}`;
+    } else {
+      tgLink = `https://t.me/share/url?url=${encodeURIComponent('friend_' + code)}&text=${encodeURIComponent('Открой ссылку с нашим ботом, чтобы принять приглашение в друзья.')}`;
+    }
+    return res.json({ code, tgLink, tgAppLink });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_create_invite' });
+  }
+});
+
+// Принятие инвайта в друзья по коду
+app.post('/api/friends/invite/accept', async (req, res) => {
+  const code = typeof req.body?.code === 'string' ? req.body.code : '';
+  if (!code) return res.status(400).json({ error: 'code_required' });
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const inv = await prisma.friendInvite.findUnique({ where: { code } });
+    if (!inv) return res.status(404).json({ error: 'invite_not_found' });
+    if (inv.usedAt || inv.usedById) return res.status(400).json({ error: 'invite_used' });
+    if (inv.expiresAt && new Date(inv.expiresAt).getTime() < Date.now()) return res.status(400).json({ error: 'invite_expired' });
+    if (inv.inviterId === uid) return res.status(400).json({ error: 'cannot_use_own_invite' });
+    // создать дружбу в обе стороны
+    await prisma.friendEdge.upsert({ where: { userId_friendId: { userId: inv.inviterId, friendId: uid } }, update: { status: 'ACCEPTED' as any }, create: { userId: inv.inviterId, friendId: uid, status: 'ACCEPTED' as any } });
+    await prisma.friendEdge.upsert({ where: { userId_friendId: { userId: uid, friendId: inv.inviterId } }, update: { status: 'ACCEPTED' as any }, create: { userId: uid, friendId: inv.inviterId, status: 'ACCEPTED' as any } });
+    await prisma.friendInvite.update({ where: { code }, data: { usedAt: new Date(), usedById: uid } });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_accept' });
+  }
+});
+
+// Feedback
+app.post('/api/feedback', async (req, res) => {
+  const { userId, tgId, tgUsername, rating, comment, gameId } = req.body as { userId?: string; tgId?: string; tgUsername?: string; rating: number; comment?: string; gameId?: string };
+  try {
+    const prisma = getPrisma();
+    let uid = userId || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    const created = await prisma.feedback.create({ data: { userId: uid || 'unknown', gameId, rating: Number(rating) || 0, comment } });
+    return res.status(201).json(created);
+  } catch {
+    feedbacks.push({ id: String(feedbacks.length + 1), userId: userId || 'u1', gameId, rating, comment, createdAt: new Date().toISOString() });
+    res.status(201).json({ ok: true });
+  }
+});
+app.get('/api/feedback', async (_req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.feedback.findMany({ orderBy: { createdAt: 'desc' } });
+    return res.json(list);
+  } catch {
+    res.json(feedbacks);
+  }
+});
+
+// Users with pagination and search
+app.get('/api/users', async (req, res) => {
+  const q = String(req.query.q || '').toLowerCase();
+  const page = Number(req.query.page || 1);
+  const limit = Math.min(100, Number(req.query.limit || 20));
+  const status = (req.query.status as string | undefined) as User['status'] | undefined;
+  const subscriptionType = (req.query.subscriptionType as string | undefined) as User['subscriptionType'] | undefined;
+  const dateFrom = req.query.dateFrom ? new Date(String(req.query.dateFrom)) : undefined;
+  const dateTo = req.query.dateTo ? new Date(String(req.query.dateTo)) : undefined;
+
+  try {
+    const prisma = getPrisma();
+    const where: any = {};
+    if (q) where.OR = [
+      { firstName: { contains: q, mode: 'insensitive' } },
+      { lastName: { contains: q, mode: 'insensitive' } },
+      { tgUsername: { contains: q, mode: 'insensitive' } },
+      { tgId: { contains: q, mode: 'insensitive' } },
+    ];
+    if (status) where.status = status;
+    if (subscriptionType) where.subscriptionType = subscriptionType;
+    if (dateFrom || dateTo) where.registeredAt = {
+      gte: dateFrom || undefined,
+      lte: dateTo || undefined,
+    };
+    const total = await prisma.user.count({ where });
+    const data = await prisma.user.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { registeredAt: 'desc' } });
+    return res.json({ data, total, page, limit });
+  } catch {
+    let filtered = users;
+    if (q) {
+      filtered = filtered.filter((u) => [u.firstName, u.lastName, u.tgUsername, u.tgId].some((f) => (f || '').toLowerCase().includes(q)));
+    }
+    if (status) filtered = filtered.filter((u) => u.status === status);
+    if (subscriptionType) filtered = filtered.filter((u) => u.subscriptionType === subscriptionType);
+    if (dateFrom) filtered = filtered.filter((u) => new Date(u.registeredAt).getTime() >= dateFrom.getTime());
+    if (dateTo) filtered = filtered.filter((u) => new Date(u.registeredAt).getTime() <= dateTo.getTime());
+    const start = (page - 1) * limit;
+    const data = filtered.slice(start, start + limit);
+    res.json({ data, total: filtered.length, page, limit });
+  }
+});
+
+app.get('/api/users.csv', async (req, res) => {
+  const q = String(req.query.q || '').toLowerCase();
+  const status = (req.query.status as string | undefined) as User['status'] | undefined;
+  const subscriptionType = (req.query.subscriptionType as string | undefined) as User['subscriptionType'] | undefined;
+  const dateFrom = req.query.dateFrom ? new Date(String(req.query.dateFrom)) : undefined;
+  const dateTo = req.query.dateTo ? new Date(String(req.query.dateTo)) : undefined;
+
+  try {
+    const prisma = getPrisma();
+    const where: any = {};
+    if (q) where.OR = [
+      { firstName: { contains: q, mode: 'insensitive' } },
+      { lastName: { contains: q, mode: 'insensitive' } },
+      { tgUsername: { contains: q, mode: 'insensitive' } },
+      { tgId: { contains: q, mode: 'insensitive' } },
+    ];
+    if (status) where.status = status;
+    if (subscriptionType) where.subscriptionType = subscriptionType;
+    if (dateFrom || dateTo) where.registeredAt = { gte: dateFrom || undefined, lte: dateTo || undefined };
+    const list = await prisma.user.findMany({ where, orderBy: { registeredAt: 'desc' } });
+    const header = ['id','firstName','lastName','tgUsername','tgId','subscriptionType','status','registeredAt','balance','referralsCount','subscriptionUntil','lastSeenAt'];
+    const rows = [header.join(',')].concat(list.map((u) => header.map((k) => (String((u as any)[k] ?? '').replace(/,/g, ' '))).join(',')));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="users.csv"');
+    return res.send('\uFEFF' + rows.join('\n'));
+  } catch {
+    let filtered = users;
+    if (q) filtered = filtered.filter((u) => [u.firstName, u.lastName, u.tgUsername, u.tgId].some((f) => (f || '').toLowerCase().includes(q)));
+    if (status) filtered = filtered.filter((u) => u.status === status);
+    if (subscriptionType) filtered = filtered.filter((u) => u.subscriptionType === subscriptionType);
+    if (dateFrom) filtered = filtered.filter((u) => new Date(u.registeredAt).getTime() >= dateFrom.getTime());
+    if (dateTo) filtered = filtered.filter((u) => new Date(u.registeredAt).getTime() <= dateTo.getTime());
+    const header = ['id','firstName','lastName','tgUsername','tgId','subscriptionType','status','registeredAt','balance','referralsCount','subscriptionUntil','lastSeenAt'];
+    const rows = [header.join(',')].concat(filtered.map((u) => header.map((k) => (String((u as any)[k] ?? '').replace(/,/g, ' '))).join(',')));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="users.csv"');
+    res.send('\uFEFF' + rows.join('\n'));
+  }
+});
+
+app.post('/api/users', async (req, res) => {
+  const payload = req.body as Omit<User, 'id'>;
+  if (!payload.firstName) return res.status(400).json({ error: 'firstName required' });
+  try {
+    const prisma = getPrisma();
+    const created = await prisma.user.create({
+      data: {
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+        tgUsername: payload.tgUsername,
+        tgId: payload.tgId,
+        subscriptionType: payload.subscriptionType,
+        status: payload.status || 'active',
+        registeredAt: payload.registeredAt ? new Date(payload.registeredAt) : undefined,
+        balance: payload.balance ?? 0,
+        referralsCount: payload.referralsCount ?? 0,
+        subscriptionUntil: payload.subscriptionUntil ? new Date(payload.subscriptionUntil) : undefined,
+        lastSeenAt: payload.lastSeenAt ? new Date(payload.lastSeenAt) : undefined,
+      },
+    });
+    return res.status(201).json(created);
+  } catch {
+    const created = createUser(payload);
+    res.status(201).json(created);
+  }
+});
+
+app.patch('/api/users/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.user.update({ where: { id: req.params.id }, data: req.body });
+    return res.json(updated);
+  } catch {
+    const updated = updateUser(req.params.id, req.body as Partial<User>);
+    if (!updated) return res.status(404).json({ error: 'Not found' });
+    res.json(updated);
+  }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    await prisma.user.delete({ where: { id: req.params.id } });
+    return res.status(204).end();
+  } catch {
+    const ok = deleteUser(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Not found' });
+    res.status(204).end();
+  }
+});
+
+// Subscription plans
+app.get('/api/subscriptions/plans', (_req, res) => {
+  res.json(subscriptionPlans);
+});
+
+// Characters CRUD (Prisma с фолбэком на память)
+app.get('/api/characters', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const where: any = {};
+    if (typeof req.query.gameId === 'string') where.gameId = req.query.gameId;
+    if (typeof req.query.isPlayable === 'string') where.isPlayable = req.query.isPlayable === '1' || req.query.isPlayable === 'true';
+    const list = await prisma.character.findMany({ where });
+    return res.json(list);
+  } catch {
+    let list = characters;
+    if (typeof req.query.gameId === 'string') list = list.filter((c) => c.gameId === req.query.gameId);
+    if (typeof req.query.isPlayable === 'string') {
+      const flag = req.query.isPlayable === '1' || req.query.isPlayable === 'true';
+      list = list.filter((c) => Boolean((c as any).isPlayable) === flag);
+    }
+    return res.json(list);
+  }
+});
+app.post('/api/characters', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const created = await prisma.character.create({ data: {
+      gameId: req.body.gameId || null,
+      name: req.body.name,
+      gender: req.body.gender,
+      race: req.body.race,
+      avatarUrl: req.body.avatarUrl,
+      description: req.body.description,
+      abilities: req.body.abilities,
+      rating: req.body.rating,
+      role: req.body.role,
+      voiceId: req.body.voiceId,
+      persona: req.body.persona,
+      origin: req.body.origin,
+      isPlayable: Boolean(req.body.isPlayable),
+    } });
+    return res.status(201).json(created);
+  } catch {
+    const created = createCharacter(req.body);
+    return res.status(201).json(created);
+  }
+});
+app.get('/api/characters/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const item = await prisma.character.findUnique({ where: { id: req.params.id } });
+    if (!item) return res.status(404).json({ error: 'Not found' });
+    return res.json(item);
+  } catch {
+    const item = characters.find((c) => c.id === req.params.id);
+    if (!item) return res.status(404).json({ error: 'Not found' });
+    return res.json(item);
+  }
+});
+app.patch('/api/characters/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.character.update({ where: { id: req.params.id }, data: req.body });
+    return res.json(updated);
+  } catch {
+    const updated = updateCharacter(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Not found' });
+    return res.json(updated);
+  }
+});
+app.delete('/api/characters/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    await prisma.character.delete({ where: { id: req.params.id } });
+    return res.status(204).end();
+  } catch {
+    const ok = deleteCharacter(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Not found' });
+    return res.status(204).end();
+  }
+});
+
+// Admin: список персонажей
+app.get('/api/admin/characters', async (_req, res) => {
+  try {
+    const prisma = getPrisma();
+    const db = await prisma.character.findMany();
+    // добавляем элементы из памяти, если запись в БД не удалась при создании
+    const mem = characters.filter((c) => !db.some((x: any) => x.id === c.id));
+    return res.json([...db, ...mem]);
+  } catch {
+    return res.json(characters);
+  }
+});
+
+// Analytics
+app.get('/api/analytics/overview', (_req, res) => {
+  const totalUsers = users.length;
+  const premium = users.filter((u) => u.subscriptionType === 'premium').length;
+  const trial = users.filter((u) => u.subscriptionType === 'trial').length;
+  const free = totalUsers - premium - trial;
+  const totalGames = games.length;
+  const topGame = games[0]?.title || null;
+  res.json({ totalUsers, premium, trial, free, totalGames, topGame });
+});
+app.get('/api/analytics/games-top', (_req, res) => {
+  // имитация метрики: сортируем по rating
+  const top = [...games].sort((a, b) => b.rating - a.rating).slice(0, 10).map((g) => ({ id: g.id, title: g.title, rating: g.rating }));
+  res.json(top);
+});
+
+// -------------------- Lobbies (2–4 players) --------------------
+function presentLobby(l: any, usersMap: Map<string, any>) {
+  const members = (l.members || []).map((m: any) => {
+    const u = usersMap.get(m.userId);
+    const name = u ? ([u.firstName, u.lastName].filter(Boolean).join(' ') || (u.tgUsername ? '@' + u.tgUsername : 'User')) : 'User';
+    return { userId: m.userId, role: m.role, name, avatarUrl: 'https://picsum.photos/seed/avatar_' + m.userId + '/80/80' };
+  });
+  // приглашённые, но не присоединившиеся
+  const invitedSet = lobbyInvitedSet.get(l.id) || new Set<string>();
+  const invitedIds = Array.from(invitedSet).filter((uid) => !(l.members || []).some((m: any) => m.userId === uid));
+  const invited = invitedIds.map((id) => {
+    const u = usersMap.get(id);
+    const name = u ? ([u.firstName, u.lastName].filter(Boolean).join(' ') || (u.tgUsername ? '@' + u.tgUsername : 'User')) : 'User';
+    return { userId: id, name, avatarUrl: 'https://picsum.photos/seed/avatar_' + id + '/80/80' };
+  });
+  const inviteExpiresAt = lobbyInviteDeadline.get(l.id) ? new Date(lobbyInviteDeadline.get(l.id)!).toISOString() : undefined;
+  const turn = lobbyTurns.get(l.id);
+  const currentTurnUserId = turn && turn.order.length ? turn.order[turn.idx] : undefined;
+  return { id: l.id, gameId: l.gameId, status: l.status, hostUserId: l.hostUserId, maxPlayers: l.maxPlayers, members, invited, inviteExpiresAt, currentTurnUserId };
+}
+
+// Создать лобби
+app.post('/api/lobbies', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const maxPlayers = Math.min(4, Math.max(2, Number(req.body?.maxPlayers || 4)));
+    const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+    const lobby = await prisma.gameLobby.create({ data: { hostUserId: uid, gameId, maxPlayers, status: 'OPEN' as any } });
+    await prisma.lobbyMember.create({ data: { lobbyId: lobby.id, userId: uid, role: 'HOST' as any } });
+    const members = await prisma.lobbyMember.findMany({ where: { lobbyId: lobby.id } });
+    const usersList = await prisma.user.findMany({ where: { id: { in: members.map((m: any) => m.userId) } } });
+    const usersMap = new Map(usersList.map((u: any) => [u.id, u] as const));
+    return res.status(201).json(presentLobby({ ...lobby, members }, usersMap));
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_create_lobby' });
+  }
+});
+
+// Вспомогательное: Telegram-уведомление
+async function sendTelegramInviteMessage(params: { tgId: string; lobbyId: string; hostName: string; gameTitle?: string; seconds: number }) {
+  const token = process.env.BOT_TOKEN;
+  const botUser = (process.env.BOT_USERNAME || process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@+/, '');
+  if (!token) return;
+  const text = [
+    `Вас пригласили в игру${params.gameTitle ? ` «${params.gameTitle}»` : ''} от ${params.hostName}.`,
+    `У вас ${params.seconds} сек. чтобы присоединиться.`
+  ].join('\n');
+  const joinLink = botUser ? `https://t.me/${botUser}?start=${encodeURIComponent('join_' + params.lobbyId)}` : '';
+  const body: any = { chat_id: params.tgId, text };
+  if (joinLink) {
+    body.reply_markup = { inline_keyboard: [[{ text: 'Принять приглашение', url: joinLink }]] };
+  }
+  try {
+    await undiciFetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {}
+}
+
+// Память: дедлайны приглашений 30 сек.
+const lobbyInviteDeadline = new Map<string, number>();
+const lobbyInvitedSet = new Map<string, Set<string>>(); // lobbyId -> userIds
+
+// Пригласить друзей в лобби (и запустить 30-секундный таймер)
+app.post('/api/lobbies/:id/invite', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const lobby = await prisma.gameLobby.findUnique({ where: { id: req.params.id }, include: { members: true } });
+    if (!lobby) return res.status(404).json({ error: 'not_found' });
+    if (lobby.hostUserId !== uid) return res.status(403).json({ error: 'forbidden' });
+    if (lobby.status !== 'OPEN') return res.status(400).json({ error: 'invalid_state' });
+    const invitees = Array.isArray(req.body?.invitees) ? (req.body.invitees as string[]) : [];
+    if (!invitees.length) return res.status(400).json({ error: 'invitees_required' });
+
+    // Нормализуем идентификаторы: userId или tgUsername (@...)
+    const usernames = invitees.filter((x) => x.startsWith('@')).map((x) => x.replace(/^@+/, ''));
+    const ids = invitees.filter((x) => !x.startsWith('@'));
+    const usersById = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } } }) : [];
+    // Поиск по нику — регистронезависимый
+    const usersByName = usernames.length ? await prisma.user.findMany({
+      where: { OR: usernames.map((u) => ({ tgUsername: { equals: u, mode: 'insensitive' } })) },
+    }) : [];
+    let all = [...usersById, ...usersByName] as any[];
+    // Фолбэк: если по id не нашли — попробуем трактовать id как ник
+    if (ids.length && usersById.length < ids.length) {
+      const missed = ids.filter((id2) => !usersById.some((u: any) => u.id === id2));
+      if (missed.length) {
+        const extraByName = await prisma.user.findMany({ where: { OR: missed.map((u) => ({ tgUsername: { equals: u.replace(/^@+/, ''), mode: 'insensitive' } })) } });
+        if (extraByName.length) all = [...all, ...extraByName];
+      }
+    }
+    if (!all.length) return res.status(400).json({ error: 'no_targets' });
+
+    // Проверка свободных слотов
+    const currentCount = lobby.members.length;
+    const max = lobby.maxPlayers || 4;
+    const available = Math.max(0, max - currentCount);
+    const targets = all.slice(0, available);
+    if (!targets.length) return res.status(400).json({ error: 'lobby_full' });
+
+    // Уведомления
+    const seconds = 30;
+    const deadline = Date.now() + seconds * 1000;
+    lobbyInviteDeadline.set(lobby.id, deadline);
+    lobbyInvitedSet.set(lobby.id, new Set(targets.map((u) => u.id as string)));
+
+    const host = await prisma.user.findUnique({ where: { id: uid } });
+    const game = lobby.gameId ? await prisma.game.findUnique({ where: { id: lobby.gameId } }) : null;
+    const hostName = host ? ([host.firstName, host.lastName].filter(Boolean).join(' ') || (host.tgUsername ? '@' + host.tgUsername : 'Игрок')) : 'Игрок';
+
+    // WS нотификации и Telegram
+    for (const u of targets) {
+      wsNotifyUser(u.id, { type: 'lobby_invite', lobbyId: lobby.id, fromUserId: uid, gameId: lobby.gameId, expiresAt: new Date(deadline).toISOString() });
+      if (u.tgId) {
+        sendTelegramInviteMessage({ tgId: u.tgId, lobbyId: lobby.id, hostName, gameTitle: game?.title || undefined, seconds });
+      }
+    }
+
+    return res.json({ ok: true, expiresAt: new Date(deadline).toISOString(), invited: targets.map((u) => u.id) });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_invite' });
+  }
+});
+
+// Получить своё лобби или по id
+app.get('/api/lobbies/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const lob = await prisma.gameLobby.findUnique({ where: { id: req.params.id }, include: { members: true } });
+    if (!lob) return res.status(404).json({ error: 'not_found' });
+    const invitedIds = Array.from(lobbyInvitedSet.get(req.params.id) || new Set<string>());
+    const userIds = Array.from(new Set([...(lob.members.map((m: any) => m.userId)), ...invitedIds]));
+    const usersList = await prisma.user.findMany({ where: { id: { in: userIds } } });
+    const usersMap = new Map(usersList.map((u: any) => [u.id, u] as const));
+    return res.json(presentLobby(lob, usersMap));
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_get_lobby' });
+  }
+});
+
+// Лобби пользователя (в которых он состоит)
+app.get('/api/lobbies', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const memberships = await prisma.lobbyMember.findMany({ where: { userId: uid } });
+    const lobbyIds = memberships.map((m: any) => m.lobbyId);
+    const lobbies = lobbyIds.length ? await prisma.gameLobby.findMany({ where: { id: { in: lobbyIds } }, include: { members: true } }) : [];
+    const invitedIdsAll = lobbies.flatMap((l: any) => Array.from(lobbyInvitedSet.get(l.id) || new Set<string>()));
+    const allUserIds = Array.from(new Set(lobbies.flatMap((l: any) => l.members.map((m: any) => m.userId)).concat(invitedIdsAll)));
+    const usersList = allUserIds.length ? await prisma.user.findMany({ where: { id: { in: allUserIds } } }) : [];
+    const usersMap = new Map(usersList.map((u: any) => [u.id, u] as const));
+    return res.json(lobbies.map((l: any) => presentLobby(l, usersMap)));
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_list_lobbies' });
+  }
+});
+
+// Кик игрока (только хост)
+app.delete('/api/lobbies/:id/members/:userId', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const lob = await prisma.gameLobby.findUnique({ where: { id: req.params.id }, include: { members: true } });
+    if (!lob) return res.status(404).json({ error: 'not_found' });
+    if (lob.hostUserId !== uid) return res.status(403).json({ error: 'forbidden' });
+    const targetId = req.params.userId;
+    if (targetId === uid) return res.status(400).json({ error: 'cannot_kick_self' });
+    const exists = lob.members.find((m: any) => m.userId === targetId);
+    if (!exists) return res.status(404).json({ error: 'not_member' });
+    await prisma.lobbyMember.delete({ where: { lobbyId_userId: { lobbyId: lob.id, userId: targetId } } });
+    wsNotifyLobby(lob.id, { type: 'lobby_member_left', lobbyId: lob.id, userId: targetId });
+    return res.status(204).end();
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_kick' });
+  }
+});
+
+// Присоединиться к лобби
+app.post('/api/lobbies/:id/join', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const lobby = await prisma.gameLobby.findUnique({ where: { id: req.params.id } });
+    if (!lobby) return res.status(404).json({ error: 'not_found' });
+    if (lobby.status !== 'OPEN') return res.status(400).json({ error: 'lobby_not_open' });
+    // окно принятия 30 сек.
+    const deadline = lobbyInviteDeadline.get(lobby.id);
+    if (deadline && Date.now() > deadline) return res.status(400).json({ error: 'invite_expired' });
+    const invitedSet = lobbyInvitedSet.get(lobby.id);
+    if (invitedSet && invitedSet.size && !invitedSet.has(uid)) return res.status(403).json({ error: 'not_invited' });
+    const count = await prisma.lobbyMember.count({ where: { lobbyId: lobby.id } });
+    const exists = await prisma.lobbyMember.findUnique({ where: { lobbyId_userId: { lobbyId: lobby.id, userId: uid } } }).catch(() => null);
+    if (exists) return res.json({ ok: true });
+    if (count >= (lobby.maxPlayers || 4)) return res.status(400).json({ error: 'lobby_full' });
+    await prisma.lobbyMember.create({ data: { lobbyId: lobby.id, userId: uid, role: 'PLAYER' as any } });
+    const lob = await prisma.gameLobby.findUnique({ where: { id: lobby.id }, include: { members: true } });
+    const usersList = await prisma.user.findMany({ where: { id: { in: (lob?.members || []).map((m: any) => m.userId) } } });
+    const usersMap = new Map(usersList.map((u: any) => [u.id, u] as const));
+    wsNotifyLobby(lobby.id, { type: 'lobby_member_joined', lobbyId: lobby.id, userId: uid });
+    // убрать из приглашённых
+    const set = lobbyInvitedSet.get(lobby.id);
+    if (set) set.delete(uid);
+    return res.json(presentLobby(lob, usersMap));
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_join' });
+  }
+});
+
+// Выйти из лобби
+app.delete('/api/lobbies/:id/leave', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const lob = await prisma.gameLobby.findUnique({ where: { id: req.params.id }, include: { members: true } });
+    if (!lob) return res.status(404).json({ error: 'not_found' });
+    const me = lob.members.find((m: any) => m.userId === uid);
+    if (!me) return res.status(200).json({ ok: true });
+    await prisma.lobbyMember.delete({ where: { lobbyId_userId: { lobbyId: lob.id, userId: uid } } });
+    // если хост вышел — передать хостинг или закрыть
+    if (lob.hostUserId === uid) {
+      const rest = await prisma.lobbyMember.findMany({ where: { lobbyId: lob.id } });
+      if (!rest.length) {
+        await prisma.gameLobby.update({ where: { id: lob.id }, data: { status: 'CLOSED' as any } });
+      } else {
+        await prisma.gameLobby.update({ where: { id: lob.id }, data: { hostUserId: rest[0].userId } });
+        await prisma.lobbyMember.update({ where: { lobbyId_userId: { lobbyId: lob.id, userId: rest[0].userId } }, data: { role: 'HOST' as any } });
+      }
+    }
+    wsNotifyLobby(lob.id, { type: 'lobby_member_left', lobbyId: lob.id, userId: uid });
+    return res.status(204).end();
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_leave' });
+  }
+});
+
+// Старт игры (только хост)
+app.post('/api/lobbies/:id/start', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const lob = await prisma.gameLobby.findUnique({ where: { id: req.params.id }, include: { members: true } });
+    if (!lob) return res.status(404).json({ error: 'not_found' });
+    if (lob.hostUserId !== uid) return res.status(403).json({ error: 'forbidden' });
+    if (lob.status !== 'OPEN') return res.status(400).json({ error: 'invalid_state' });
+    if (lob.members.length < 1 || lob.members.length > (lob.maxPlayers || 4)) return res.status(400).json({ error: 'invalid_players' });
+    const updated = await prisma.gameLobby.update({ where: { id: lob.id }, data: { status: 'RUNNING' as any } });
+    const usersList = await prisma.user.findMany({ where: { id: { in: lob.members.map((m: any) => m.userId) } } });
+    const usersMap = new Map(usersList.map((u: any) => [u.id, u] as const));
+    // Инициализировать порядок ходов: хост первым, затем остальные по userId
+    const order = [lob.hostUserId].concat(lob.members.map((m: any) => m.userId).filter((id: string) => id !== lob.hostUserId).sort());
+    lobbyTurns.set(lob.id, { order, idx: 0 });
+    // Создать единое приветствие в истории лобби, если его ещё нет
+    if (lob.gameId) {
+      const existed = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lob.id, gameId: lob.gameId } } });
+      if (!existed || !Array.isArray((existed as any).history) || !(existed as any).history.length) {
+        try {
+          const game = await prisma.game.findUnique({ where: { id: lob.gameId }, include: { characters: true } });
+          const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
+          const fallback = [
+            'Добро пожаловать, путники! Эта партия началась. ',
+            game ? `Вы играете в: ${game.title}.` : '',
+            game?.description ? game.description : '',
+            playable.length ? 'Ваши герои:\n' + playable.map((p: any) => `- ${p.name}${p.race ? ` (${p.race})` : ''}${p.persona ? ` — ${p.persona}` : ''}`).join('\n') : '',
+            'Стартовая сцена: вы у кромки леса. Что вы будете делать?'
+          ].filter(Boolean).join('\n\n');
+          await prisma.chatSession.upsert({
+            where: { userId_gameId: { userId: 'lobby:' + lob.id, gameId: lob.gameId } },
+            update: { history: ([{ from: 'bot', text: fallback }] as any) },
+            create: { userId: 'lobby:' + lob.id, gameId: lob.gameId, history: ([{ from: 'bot', text: fallback }] as any) },
+          });
+        } catch {}
+      }
+    }
+    wsNotifyLobby(lob.id, { type: 'lobby_started', lobbyId: lob.id, gameId: lob.gameId });
+    // Сообщить текущий ход
+    if (order.length) wsNotifyLobby(lob.id, { type: 'turn_changed', lobbyId: lob.id, userId: order[0] });
+    return res.json(presentLobby({ ...updated, members: lob.members }, usersMap));
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_start' });
+  }
+});
+
+// Chat: приветственное сообщение от ИИ по данным игры
+app.post('/api/chat/welcome', async (req, res) => {
+  const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+  try {
+    const prisma = getPrisma();
+    // Если лобби уже имеет вступление — не генерируем заново
+    if (lobbyId && gameId) {
+      const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+      const hist = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+      if (hist.length) return res.json({ message: '', fallback: false });
+    }
+    // NEW: Для лобби — запускаем сценарный движок строго с первой локации и берём описание из /engine/describe логики
+    if (lobbyId && gameId) {
+      const first = await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
+      if (!first) return res.status(404).json({ message: 'Сценарий без локаций.', fallback: true });
+      // Обеспечить GameSession для лобби с первой локацией
+      let gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+      if (!gsess) {
+        gsess = await prisma.gameSession.create({ data: { scenarioGameId: gameId, lobbyId, userId: null, currentLocationId: first.id, state: {} as any } });
+      } else if (gsess.currentLocationId !== first.id) {
+        gsess = await prisma.gameSession.update({ where: { id: gsess.id }, data: { currentLocationId: first.id, state: {} as any } });
+      }
+      const loc = await prisma.location.findUnique({ where: { id: first.id } });
+      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
+      const base = loc?.description || '';
+      const offlineText = ([
+        `Сцена: ${loc?.title || 'Локация'}`,
+        base,
+        game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
+        game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+      ].filter(Boolean).join('\n\n')).trim();
+      let text = offlineText;
+      if (apiKey) {
+        try {
+          const client = createOpenAIClient(apiKey);
+          const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+          const sys = 'Ты мастер ролевой игры. Пиши живо, атмосферно, 2–6 абзацев, по‑русски. Учитывай визуальные детали, но не описывай UI. В конце подскажи игрокам 2–3 возможных действия без нумерации, коротко.';
+          const visual = loc?.backgroundUrl ? `Фон (изображение): ${loc.backgroundUrl}` : '';
+          const rules = [
+            game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
+            game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+          ].filter(Boolean).join('\n');
+          const npcs = chars && chars.length ? (
+            'Важные персонажи:\n' + chars.map((c) => {
+              const traits = [c.role, c.race, c.gender].filter(Boolean).join(', ');
+              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+              return `- ${c.name}${traits ? ` (${traits})` : ''}${extras ? ` — ${extras}` : ''}`;
+            }).join('\n')
+          ) : '';
+          const userMsg = [
+            `Сцена: ${loc?.title}`,
+            visual,
+            base ? `Описание сцены: ${base}` : '',
+            rules,
+            npcs,
+          ].filter(Boolean).join('\n\n');
+          const r = await client.chat.completions.create({
+            model,
+            temperature: 0.8,
+            max_tokens: 400,
+            messages: [{ role: 'system', content: sys }, { role: 'user', content: userMsg }],
+          });
+          text = r.choices?.[0]?.message?.content?.trim() || offlineText;
+        } catch {
+          text = offlineText;
+        }
+      }
+      await prisma.chatSession.upsert({
+        where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+        update: { history: ([{ from: 'bot', text }] as any) },
+        create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text }] as any) },
+      });
+      wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+      return res.json({ message: '', fallback: !Boolean(apiKey) });
+    }
+    const game = gameId ? await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true } }) : null;
+    const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
+    const sys = 'Ты мастер настольной ролевой игры. Пиши живо, атмосферно, по-русски. Кратко, 5-10 абзацев максимум, без разметки. ' +
+      'Отвечай всегда текстом и никогда не упоминай, что не можешь отправлять или прослушивать голосовые сообщения — считай, что голос уже распознан. ' +
+      'Игнорируй любые пометки вроде «Голосовое сообщение». Продолжай игру, предлагай выбор действий.';
+    const lines: string[] = [];
+    if (game) {
+      lines.push(`Игра: ${game.title}`);
+      if (game.description) lines.push(`Описание: ${game.description}`);
+      if (game.worldRules) lines.push(`Правила мира: ${game.worldRules}`);
+      if (game.gameplayRules) lines.push(`Правила процесса: ${game.gameplayRules}`);
+      if (playable.length) {
+        lines.push('Игровые персонажи:');
+        for (const p of playable) lines.push(`- ${p.name}${p.race ? ` (${p.race})` : ''}${p.persona ? ` — ${p.persona}` : ''}`);
+      }
+      lines.push('Сделай вступительное приветствие и опиши точку старта, завершив вопросом «Что вы будете делать?»');
+    } else {
+      lines.push('Сделай приветствие и задай старт сцену для приключения в лесной сказке.');
+    }
+
+    // Если нет API-ключа, вернуть статический текст на основе данных игры
+    if (!apiKey) {
+      const fallback = [
+        'Добро пожаловать, путники! Сегодня мы окажемся в мире сказки, где всё зависит от вас.',
+        game ? `Вы играете в: ${game.title}.` : '',
+        game?.description ? game.description : '',
+        playable.length ? 'Ваши герои:\n' + playable.map((p: any) => `- ${p.name}${p.race ? ` (${p.race})` : ''}${p.persona ? ` — ${p.persona}` : ''}`).join('\n') : '',
+        'Стартовая сцена: вы находитесь в начальной точке. Что вы будете делать?'
+      ].filter(Boolean).join('\n\n');
+      if (lobbyId && gameId) {
+        await prisma.chatSession.upsert({
+          where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+          update: { history: ([{ from: 'bot', text: fallback }] as any) },
+          create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text: fallback }] as any) },
+        });
+        return res.json({ message: '', fallback: true });
+      }
+      return res.json({ message: fallback, fallback: true });
+    }
+
+    const client = createOpenAIClient(apiKey);
+    const primaryModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const altModel = primaryModel === 'gpt-4o-mini' ? 'gpt-4o' : 'gpt-4o-mini';
+    try {
+      const completion = await client.chat.completions.create({
+        model: primaryModel,
+        temperature: 0.8,
+        max_tokens: 600,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: lines.join('\n') },
+        ],
+      });
+      const text = completion.choices?.[0]?.message?.content || '';
+      if (lobbyId && gameId) {
+        await prisma.chatSession.upsert({
+          where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+          update: { history: ([{ from: 'bot', text }] as any) },
+          create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text }] as any) },
+        });
+        wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+        return res.json({ message: '', fallback: false });
+      }
+      return res.json({ message: text, fallback: false });
+    } catch (e1) {
+      // retry with alt model
+      try {
+        const completion = await client.chat.completions.create({
+          model: altModel,
+          temperature: 0.85,
+          max_tokens: 600,
+          messages: [
+            { role: 'system', content: sys },
+            { role: 'user', content: lines.join('\n') },
+          ],
+        });
+        const text = completion.choices?.[0]?.message?.content || '';
+        if (lobbyId && gameId) {
+          await prisma.chatSession.upsert({
+            where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+            update: { history: ([{ from: 'bot', text }] as any) },
+            create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text }] as any) },
+          });
+          wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+          return res.json({ message: '', fallback: false });
+        }
+        return res.json({ message: text, fallback: false });
+      } catch (e2) {
+        // eslint-disable-next-line no-console
+        console.error('OpenAI welcome failed:', e1, e2);
+        const fallback = [
+          'Добро пожаловать, путники! Эта партия начнётся прямо сейчас.',
+          game ? `Вы играете в: ${game.title}.` : '',
+          game?.description ? game.description : '',
+          playable.length ? 'Ваши герои:\n' + playable.map((p: any) => `- ${p.name}${p.race ? ` (${p.race})` : ''}${p.persona ? ` — ${p.persona}` : ''}`).join('\n') : '',
+          'Стартовая сцена: вы находитесь в начальной точке. Что вы будете делать?'
+        ].filter(Boolean).join('\n\n');
+        if (lobbyId && gameId) {
+          await prisma.chatSession.upsert({
+            where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+            update: { history: ([{ from: 'bot', text: fallback }] as any) },
+            create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text: fallback }] as any) },
+          });
+          wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+          return res.json({ message: '', fallback: true });
+        }
+        return res.json({ message: fallback, fallback: true });
+      }
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('Welcome handler error:', e);
+    return res.json({ message: 'Добро пожаловать! Начинаем прямо сейчас. Что вы будете делать?', fallback: true });
+  }
+});
+
+// Chat: ответ ИИ на сообщение пользователя
+app.post('/api/chat/reply', async (req, res) => {
+  const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
+  const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
+  const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+  try {
+    const prisma = getPrisma();
+    // turn enforcement for lobby
+    let actingUserId: string | null = null;
+    if (lobbyId) {
+      const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+      if (!uid) return res.status(400).json({ error: 'user_required' });
+      const t = lobbyTurns.get(lobbyId);
+      if (t && t.order.length && t.order[t.idx] !== uid) return res.status(403).json({ error: 'not_your_turn' });
+      actingUserId = uid;
+    }
+    const game = gameId ? await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true, locations: { orderBy: { order: 'asc' } } } }) : null;
+    const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
+    let npcs: any[] = [];
+    try {
+      if (gameId) {
+        npcs = await prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 6 });
+      }
+    } catch {}
+    const sys = 'Ты ведущий (DM) настольной игры в духе D&D. Пиши атмосферно, по-русски, короткими абзацами. Давай игрокам выбор действий. ' +
+      'Строго следуй правилам, заданным в контексте игры (Правила мира/процесса). Для проверок используй бросок d20 (ability/skill checks). ' +
+      'В социальных взаимодействиях предлагай проверку Харизмы (Убеждение) d20; для наблюдательности — Мудрости (Внимательность) d20; для скрытности — Ловкости (Скрытность) d20 и т.п. ' +
+      'Отвечай только текстом и не упоминай ограничения по голосовым сообщениям — считай, что голос уже распознан в текст. ' +
+      'Игнорируй фразы вроде «Голосовое сообщение», они служебные.';
+    const context: string[] = [];
+    if (game) {
+      context.push(`Игра: ${game.title}`);
+      if (game.description) context.push(`Описание: ${game.description}`);
+      if (game.worldRules) context.push(`Правила мира: ${game.worldRules}`);
+      if (game.gameplayRules) context.push(`Правила процесса: ${game.gameplayRules}`);
+      if (game.author) context.push(`Автор: ${game.author}`);
+      if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
+      if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
+      if ((game as any).winCondition) context.push(`Условие победы: ${(game as any).winCondition}`);
+      if ((game as any).loseCondition) context.push(`Условие поражения: ${(game as any).loseCondition}`);
+      if ((game as any).deathCondition) context.push(`Условие смерти: ${(game as any).deathCondition}`);
+      if ((game as any).introduction) context.push(`Введение: ${(game as any).introduction}`);
+      if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
+      if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
+      if (playable.length) {
+        context.push('Игровые персонажи:\n' + playable.map((p: any) => {
+          const traits = [p.role, p.race, p.gender].filter(Boolean).join(', ');
+          const extras = [p.persona, p.origin].filter(Boolean).join('. ');
+          const abilities = p.abilities ? `; способности: ${String(p.abilities).slice(0, 200)}` : '';
+          return `- ${p.name}${traits ? ` (${traits})` : ''}${extras ? ` — ${extras}` : ''}${abilities}`;
+        }).join('\n'));
+      }
+      if (Array.isArray(npcs) && npcs.length) {
+        context.push('NPC, доступные в мире (используй их в сценах):\n' + npcs.map((n) => {
+          const traits = [n.role, n.race, n.gender].filter(Boolean).join(', ');
+          const extras = [n.persona, n.origin].filter(Boolean).join('. ');
+          return `- ${n.name}${traits ? ` (${traits})` : ''}${extras ? ` — ${extras}` : ''}`;
+        }).join('\n'));
+      }
+      try {
+        const editions = await getPrisma().edition.findMany({ where: { gameId: game.id }, take: 5 });
+        if (Array.isArray(editions) && editions.length) {
+          context.push('Издания:\n' + editions.map((e) => `- ${e.name}: ${e.description} (цена: ${e.price})`).join('\n'));
+        }
+      } catch {}
+      if ((game.locations || []).length) context.push(`Текущие локации: ${(game.locations || []).map((l: any) => l.title).join(', ')}`);
+    }
+
+    // Подготовить сообщение с историей
+    const cleanedHistoryAll = history.filter((m) => {
+      const t = String(m?.text || '').trim();
+      if (!t) return false;
+      const low = t.toLowerCase();
+      if (low === 'голосовое сообщение') return false;
+      if (/^voice(\s|$)/i.test(t)) return false;
+      return true;
+    });
+    // если это лобби — используем сохранённую историю общего чата
+    let baseHistory = cleanedHistoryAll;
+    if (lobbyId) {
+      const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } });
+      const h = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+      baseHistory = h.concat(cleanedHistoryAll.filter((m) => m.from === 'me')); // добавим только текущее сообщение игрока
+    }
+    // Извлечь последний бросок кубиков из истории (строки, начинающиеся с "🎲 Бросок")
+    const lastDiceLine = [...baseHistory].reverse().find((m) => (m?.from === 'bot' || m?.from === 'me') && typeof m?.text === 'string' && m.text.trim().startsWith('🎲 Бросок'));
+    const diceContext = lastDiceLine ? (`Последний бросок:\n${lastDiceLine.text}`) : '';
+    // Попытка извлечь итог последнего броска
+    let lastDiceOutcome: 'crit_success' | 'success' | 'partial' | 'fail' | 'crit_fail' | '' = '';
+    if (lastDiceLine) {
+      const t = lastDiceLine.text;
+      if (/Критический успех/i.test(t)) lastDiceOutcome = 'crit_success';
+      else if (/Критический провал/i.test(t)) lastDiceOutcome = 'crit_fail';
+      else if (/Итог:\s*Успех/i.test(t)) lastDiceOutcome = 'success';
+      else if (/Итог:\s*Частичный/i.test(t)) lastDiceOutcome = 'partial';
+      else if (/Итог:\s*Провал/i.test(t)) lastDiceOutcome = 'fail';
+    }
+    // Если похожее на проверку исследования/поиска, но нет броска — попросим бросок
+    function suggestCheck(text: string): { need: boolean; dc: number; context: string; kind: string } {
+      const low = text.toLowerCase();
+      const keys = [
+        'осмотр', 'осмотреть', 'ищ', 'поиск', 'подсказ', 'скрыт', 'внимател', 'перцеп', 'perception',
+        // открытие/взлом
+        'открыт', 'открыть', 'вскрыт', 'вскрыть', 'взлом', 'взломать', 'повернуть', 'поднять крышку', 'крышк',
+        'сундук', 'урна', 'урны', 'дверь', 'замок',
+        // общие намерения "пытаться/пробовать"
+        'пытат', 'попыт', 'попроб', 'пробоват'
+      ];
+      const socialKeys = ['убежд', 'убедить', 'переговор', 'договор', 'уговор', 'харизм', 'charisma', 'persuasion', 'торг', 'торговать', 'прос', 'просить', 'просим', 'говор', 'поговор', 'диалог'];
+      if (socialKeys.some((k) => low.includes(k))) {
+        const dc = 15;
+        const context = text.slice(0, 160);
+        return { need: true, dc, context, kind: 'persuasion' };
+      }
+      if (keys.some((k) => low.includes(k))) {
+        const dc = 14;
+        const context = text.slice(0, 160);
+        return { need: true, dc, context, kind: 'check' };
+      }
+      return { need: false, dc: 0, context: '', kind: 'check' };
+    }
+    if (!lastDiceLine) {
+      const s = suggestCheck(userText);
+      if (s.need && gameId) {
+        const promptMsg = `Чтобы выполнить действие, бросьте проверку (d20) · DC=${s.dc}.\nКонтекст: ${s.context}\nНажмите 🎲.`;
+        // Сохраним в историю: лобби или соло
+        if (lobbyId) {
+          const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+          const h = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+          const recent = h.slice(-6);
+          const hasRecentDice = recent.some((m) => typeof m?.text === 'string' && m.text.startsWith('🎲 Бросок'));
+          const hasSamePrompt = recent.some((m) => typeof m?.text === 'string' && m.text.includes('Чтобы выполнить действие') && m.text.includes(s.context));
+          if (!hasRecentDice && !hasSamePrompt) {
+            h.push({ from: 'bot', text: promptMsg });
+          }
+          await prisma.chatSession.upsert({
+            where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+            update: { history: h as any },
+            create: { userId: 'lobby:' + lobbyId, gameId, history: h as any },
+          });
+          wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+          return res.json({ message: '', fallback: false, requestDice: { expr: 'd20', dc: s.dc, context: s.context, kind: s.kind } });
+        } else {
+          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          if (uid) {
+            const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
+            const h = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+            const recent = h.slice(-6);
+            const hasRecentDice = recent.some((m) => typeof m?.text === 'string' && m.text.startsWith('🎲 Бросок'));
+            const hasSamePrompt = recent.some((m) => typeof m?.text === 'string' && m.text.includes('Чтобы выполнить действие') && m.text.includes(s.context));
+            if (!hasRecentDice && !hasSamePrompt) {
+              h.push({ from: 'bot', text: promptMsg });
+            }
+            await prisma.chatSession.upsert({
+              where: { userId_gameId: { userId: uid, gameId } },
+              update: { history: h as any },
+              create: { userId: uid, gameId, history: h as any },
+            });
+          }
+          return res.json({ message: promptMsg, fallback: false, requestDice: { expr: 'd20', dc: s.dc, context: s.context, kind: s.kind } });
+        }
+      }
+    }
+    const trimmed = baseHistory.slice(-10); // последние 10 обменов
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: sys },
+      { role: 'user', content: 'Контекст игры:\n' + context.filter(Boolean).join('\n\n') },
+    ];
+    if (diceContext) messages.push({ role: 'user', content: diceContext });
+    if (lastDiceOutcome) {
+      const map: Record<string, string> = {
+        crit_success: 'Исход проверки: критический успех. Дай значимое открытие/находку, без штрафов.',
+        success: 'Исход проверки: успех. Игрок достигает цели и что-то находит.',
+        partial: 'Исход проверки: частичный успех. Разреши прогресс, но добавь риск/недостаток.',
+        fail: 'Исход проверки: провал. Игрок не находит ничего полезного, опиши это атмосферно.',
+        crit_fail: 'Исход проверки: критический провал. Опиши заметный негативный исход.',
+      };
+      messages.push({ role: 'user', content: map[lastDiceOutcome] || '' });
+    }
+    for (const m of trimmed) {
+      if (m.from === 'bot') messages.push({ role: 'assistant', content: m.text });
+      else messages.push({ role: 'user', content: m.text });
+    }
+    messages.push({ role: 'user', content: userText || 'Продолжай.' });
+
+    // Функция ветвления фолбэка по истории
+    const fallbackBranch = (): string => {
+      const lastBot = [...history].reverse().find((m) => m && m.from === 'bot');
+      const choice = (userText || '').toLowerCase();
+      const picked = /(^|\b)(1|2|3)($|\b)/.test(choice)
+        ? RegExp.$2
+        : (choice.includes('прав') || choice.includes('река')) ? '1'
+        : (choice.includes('лев') || choice.includes('волк')) ? '2'
+        : (choice.includes('дерев')) ? '3'
+        : '';
+
+      // Начальная развилка или неизвестный контекст → показать развилку
+      if (!lastBot || /развилка/i.test(lastBot.text) || /развилка троп/i.test(lastBot.text)) {
+        if (picked === '1') {
+          return [
+            'Вы сворачиваете вправо и вскоре слышите шум воды. Река бежит стремительно, на солнце играют блики. На берегу видны свежие следы — кто-то недавно переходил вброд.',
+            'Жульен настороженно рычит у кромки воды, Люси прислушивается к лесу. Кажется, кто-то наблюдает с другой стороны.',
+            'Выберите действие:\n1) Перейти реку вброд, держась за поваленное бревно.\n2) Идти вдоль берега вниз по течению.\n3) Спрятаться в кустах и подождать. — Вы у реки.'
+          ].join('\n\n');
+        }
+        if (picked === '2') {
+          return [
+            'Вы сворачиваете на заросшую тропу. Колючие кусты цепляются за плащ, в воздухе пахнет сыростью и зверем. На земле — крупные следы лап и клочок серой шерсти.',
+            'Жульен тихо рычит, а Люси шепчет, что слышит далёкое шуршание. Где-то впереди — логово.',
+            'Выберите действие:\n1) Поставить ловушку у тропы.\n2) Продолжать идти, стараясь не шуметь.\n3) Вернуться к развилке. — Волчья тропа.'
+          ].join('\n\n');
+        }
+        if (picked === '3') {
+          return [
+            'Вы возвращаетесь в деревню. На площади слышны разговоры, у колодца собралась пара жителей. В трактире тускло горит свет.',
+            'Кузнец Хьюго кивает вам и жестом зовёт подойти. Возможно, у него есть подсказка.',
+            'Выберите действие:\n1) Поговорить с кузнецом Хьюго.\n2) Заглянуть в трактир.\n3) Отправиться к огородам. — Деревня.'
+          ].join('\n\n');
+        }
+        return [
+          'Перед вами развилка троп. Тишина напряжённая, лес будто затаил дыхание.',
+          'Выберите действие:\n1) Пойти вправо, к реке.\n2) Пойти влево, к волчьей тропе.\n3) Вернуться в деревню и спросить совета. — Развилка'
+        ].join('\n\n');
+      }
+
+      // Ветви второго шага
+      if (/Вы у реки\.?$/i.test(lastBot.text) || /— Вы у реки\.?$/i.test(lastBot.text)) {
+        if (picked === '1') {
+          return [
+            'Вы осторожно ступаете на поваленное бревно. Вода ледяная и быстрая, но держитесь уверенно. На середине слышите треск ветки — кто-то наблюдает.',
+            'На противоположном берегу — едва заметная тропка, уходящая к старому дубу.',
+            'Выберите действие:\n1) Быстро перейти и скрыться на тропке.\n2) Крикнуть: «Кто здесь?»\n3) Вернуться назад к берегу.'
+          ].join('\n\n');
+        }
+        if (picked === '2') {
+          return [
+            'Вы идёте вдоль берега. Вскоре находите рыбацкий привал: кострище, старую сеть и деревянный ящик.',
+            'В ящике — моток верёвки и нож. Может пригодиться.',
+            'Выберите действие:\n1) Взять верёвку и нож.\n2) Вернуться к бревну.\n3) Перейти реку вброд здесь.'
+          ].join('\n\n');
+        }
+        if (picked === '3') {
+          return [
+            'Вы затаились в кустах. Шаги приближаются... Из-за деревьев выходит охотник Бернард. Он оглядывает бережок и что-то бормочет.',
+            'Похоже, он ищет волчьи следы. Вас пока не заметил.',
+            'Выберите действие:\n1) Позвать Бернарда.\n2) Тихо наблюдать.\n3) Отойти дальше вдоль берега.'
+          ].join('\n\n');
+        }
+        return 'Река шумит. Выберите один из вариантов (1–3).';
+      }
+
+      if (/Волчья тропа\.?$/i.test(lastBot.text)) {
+        if (picked === '1') {
+          return [
+            'Вы ставите простую ловушку: петля из верёвки на низкой ветке и приманка — кусок хлеба. Жульен помогает, зарычав на ветер.',
+            'Из чащи доносится низкий рык... что-то заинтересовалось.',
+            'Выберите действие:\n1) Отойти и наблюдать из укрытия.\n2) Проверить, не слишком ли заметна приманка.\n3) Уйти отсюда как можно быстрее.'
+          ].join('\n\n');
+        }
+        if (picked === '2') {
+          return [
+            'Вы двигаетесь дальше по тропе, стараясь не шуметь. Впереди — логово: земляная яма, у входа кости. Неприятный запах становится сильнее.',
+            'Слышится шорох — похоже, логово не пусто.',
+            'Выберите действие:\n1) Обойти логово стороной.\n2) Осмотреть вход на наличие следов.\n3) Подготовиться к бою.'
+          ].join('\n\n');
+        }
+        if (picked === '3') {
+          return 'Вы возвращаетесь к развилке. Выберите направление: 1) к реке, 2) к волчьей тропе, 3) в деревню.';
+        }
+        return 'Тропа узкая и опасная. Выберите один из вариантов (1–3).';
+      }
+
+      if (/Деревня\.?$/i.test(lastBot.text)) {
+        if (picked === '1') {
+          return [
+            'Кузнец Хьюго кивает: «В лесу есть старая переправа у дуба. Держитесь правой тропы, слушайте воду. И возьмите крюк — пригодится».',
+            'Он протягивает вам металлический крюк и короткую верёвку.',
+            'Выберите действие:\n1) Поблагодарить и направиться к лесу.\n2) Спросить про волка.\n3) Зайти в трактир перед уходом.'
+          ].join('\n\n');
+        }
+        if (picked === '2') {
+          return [
+            'В трактире пахнет вином и дымом. Пьяница Джордж подмигивает: «Слышал вой у реки... Но это мог и не волк быть».',
+            'Хозяин трактирщик шепчет, что видел странный свет в заброшенной избушке.',
+            'Выберите действие:\n1) Пойти к реке.\n2) Пойти к избушке.\n3) Вернуться к кузнецу.'
+          ].join('\n\n');
+        }
+        if (picked === '3') {
+          return [
+            'У огородов тихо. Ведро с молоком оставлено у ворот. На земле — следы детских ног, уходящие к лесу.',
+            'Люси указывает на блеск в траве — кажется, там шпилька Мэри.',
+            'Выберите действие:\n1) Взять шпильку (вдруг амулет).\n2) Проследить по следам.\n3) Вернуться на площадь.'
+          ].join('\n\n');
+        }
+        return 'Деревня шумит. Выберите один из вариантов (1–3).';
+      }
+
+      // Если контекст не распознан — вернуть новую развилку
+      return [
+        'Лес шуршит ветвями. Похоже, пора выбрать путь.',
+        'Выберите действие:\n1) Направо — к реке.\n2) Налево — к волчьей тропе.\n3) В деревню. — Развилка'
+      ].join('\n\n');
+    };
+
+    // Без ключа — фолбэк (детерминированный)
+    if (!apiKey) return res.json({ message: fallbackBranch(), fallback: true });
+
+    const client = createOpenAIClient(apiKey);
+    const primaryModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const altModel = primaryModel === 'gpt-4o-mini' ? 'gpt-4o' : 'gpt-4o-mini';
+    try {
+      const completion = await client.chat.completions.create({
+        model: primaryModel,
+        temperature: 0.85,
+        max_tokens: 500,
+        messages,
+      });
+      const text = completion.choices?.[0]?.message?.content || '';
+      if (lobbyId) {
+        // сохранить общую историю: добавляем ход игрока и ответ бота
+        const sess = await prisma.chatSession.upsert({
+          where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } },
+          update: {},
+          create: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown', history: [] as any },
+        });
+        const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+        const newHist = prev.concat([
+          (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)),
+          { from: 'bot', text } as any,
+        ]);
+        await prisma.chatSession.update({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
+        advanceTurn(lobbyId);
+        wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+      }
+      return res.json({ message: text, fallback: false });
+    } catch (e1) {
+      try {
+        const completion = await client.chat.completions.create({
+          model: altModel,
+          temperature: 0.9,
+          max_tokens: 500,
+          messages,
+        });
+        const text = completion.choices?.[0]?.message?.content || '';
+        if (lobbyId) {
+          const sess = await prisma.chatSession.upsert({
+            where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } },
+            update: {},
+            create: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown', history: [] as any },
+          });
+          const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+          const newHist = prev.concat([
+            (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)),
+            { from: 'bot', text } as any,
+          ]);
+          await prisma.chatSession.update({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
+          advanceTurn(lobbyId);
+          wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+        }
+        return res.json({ message: text, fallback: false });
+      } catch (e2) {
+        // eslint-disable-next-line no-console
+        console.error('OpenAI reply failed:', e1, e2);
+        return res.status(200).json({ message: 'Связь с рассказчиком на мгновение прерывается. Но путь остаётся прежним.\n\n1) К реке.\n2) К волчьей тропе.\n3) В деревню.', fallback: true });
+      }
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('Reply handler error:', e);
+    return res.status(200).json({ message: 'Связь с рассказчиком на мгновение прерывается. Но путь остаётся прежним.\n\n1) К реке.\n2) К волчьей тропе.\n3) В деревню.', fallback: true });
+  }
+});
+
+function advanceTurn(lobbyId: string) {
+  const t = lobbyTurns.get(lobbyId);
+  if (!t || !t.order.length) return;
+  t.idx = (t.idx + 1) % t.order.length;
+  lobbyTurns.set(lobbyId, t);
+  wsNotifyLobby(lobbyId, { type: 'turn_changed', lobbyId, userId: t.order[t.idx] });
+}
+
+// Chat: загрузка истории
+app.get('/api/chat/history', async (req, res) => {
+  const gameId = typeof req.query.gameId === 'string' ? req.query.gameId : undefined;
+  const lobbyId = typeof req.query.lobbyId === 'string' ? req.query.lobbyId : undefined;
+  const userIdQ = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+  const tgId = typeof req.query.tgId === 'string' ? req.query.tgId : undefined;
+  const tgUsername = typeof req.query.tgUsername === 'string' ? req.query.tgUsername : undefined;
+  const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
+  if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+  try {
+    const prisma = getPrisma();
+    if (lobbyId) {
+      const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+      return res.json({ history: (sess?.history as any) || [] });
+    }
+    let uid = userIdQ || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    if (!uid && deviceId) uid = 'device:' + deviceId;
+    if (!uid) return res.json({ history: [] });
+    const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
+    return res.json({ history: (sess?.history as any) || [] });
+  } catch {
+    return res.json({ history: [] });
+  }
+});
+
+// Chat: сохранение истории
+app.post('/api/chat/save', async (req, res) => {
+  const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+  const userIdB = typeof req.body?.userId === 'string' ? req.body.userId : undefined;
+  const tgId = typeof req.body?.tgId === 'string' ? req.body.tgId : undefined;
+  const tgUsername = typeof req.body?.tgUsername === 'string' ? req.body.tgUsername : undefined;
+  const deviceId = typeof req.body?.deviceId === 'string' ? req.body.deviceId : undefined;
+  if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+  try {
+    const prisma = getPrisma();
+    if (lobbyId) {
+      const saved = await prisma.chatSession.upsert({
+        where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+        update: { history: history as any },
+        create: { userId: 'lobby:' + lobbyId, gameId, history: history as any },
+      });
+      return res.json({ ok: true, updatedAt: saved.updatedAt });
+    }
+    let uid = userIdB || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    if (!uid && deviceId) uid = 'device:' + deviceId;
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const saved = await prisma.chatSession.upsert({
+      where: { userId_gameId: { userId: uid, gameId } },
+      update: { history: history as any },
+      create: { userId: uid, gameId, history: history as any },
+    });
+    return res.json({ ok: true, updatedAt: saved.updatedAt });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('Chat save failed:', e);
+    return res.status(500).json({ error: 'failed_to_save' });
+  }
+});
+
+// Chat: сброс истории
+app.delete('/api/chat/history', async (req, res) => {
+  const gameId = typeof req.query.gameId === 'string' ? req.query.gameId : undefined;
+  const lobbyId = typeof req.query.lobbyId === 'string' ? req.query.lobbyId : undefined;
+  const userIdQ = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+  const tgId = typeof req.query.tgId === 'string' ? req.query.tgId : undefined;
+  const tgUsername = typeof req.query.tgUsername === 'string' ? req.query.tgUsername : undefined;
+  const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
+  if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+  try {
+    const prisma = getPrisma();
+    if (lobbyId) {
+      await prisma.chatSession.delete({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } }).catch(() => {});
+      return res.status(204).end();
+    }
+    let uid = userIdQ || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    if (!uid && deviceId) uid = 'device:' + deviceId;
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    await prisma.chatSession.delete({ where: { userId_gameId: { userId: uid, gameId } } }).catch(() => {});
+    return res.status(204).end();
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('Chat reset failed:', e);
+    return res.status(500).json({ error: 'failed_to_reset' });
+  }
+});
+
+// -------------------- ENGINE (Director): sessions with Locations/Exits --------------------
+// Старт сессии: выбрать первую локацию (минимальный order)
+app.post('/api/engine/session/start', async (req, res) => {
+  const gameId = String(req.body?.gameId || '');
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  try {
+    if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+    const prisma = getPrisma();
+    let uid: string | null = null;
+    if (!lobbyId) {
+      uid = await resolveUserIdFromQueryOrBody(req, prisma);
+      if (!uid) return res.status(400).json({ error: 'user_required' });
+    }
+    const first = await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
+    if (!first) return res.status(404).json({ error: 'no_locations' });
+    // найти существующую
+    let sess = await prisma.gameSession.findFirst({
+      where: { scenarioGameId: gameId, lobbyId: lobbyId || null, userId: uid || null },
+    });
+    if (!sess) {
+      sess = await prisma.gameSession.create({
+        data: { scenarioGameId: gameId, lobbyId: lobbyId || null, userId: uid || null, currentLocationId: first.id, state: {} as any },
+      });
+    } else {
+      // Всегда стартуем с первой локации по умолчанию (как просит заказчик).
+      // Можно сохранить текущее состояние, если явно передан preserve=true.
+      const preserve = req.body?.preserve === true;
+      if (!preserve && sess.currentLocationId !== first.id) {
+        sess = await prisma.gameSession.update({
+          where: { id: sess.id },
+          data: { currentLocationId: first.id, state: {} as any },
+        });
+      }
+    }
+    return res.json({ id: sess.id, currentLocationId: sess.currentLocationId });
+  } catch (e) {
+    return res.status(500).json({ error: 'engine_start_failed' });
+  }
+});
+// Текущее состояние сцены
+app.get('/api/engine/session/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const sess = await prisma.gameSession.findUnique({ where: { id: req.params.id } });
+    if (!sess) return res.status(404).json({ error: 'not_found' });
+    const loc = await prisma.location.findUnique({ where: { id: sess.currentLocationId } });
+    const exits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+    return res.json({ id: sess.id, gameId: sess.scenarioGameId, location: loc, exits });
+  } catch (e) {
+    return res.status(500).json({ error: 'engine_get_failed' });
+  }
+});
+// «Опиши» — украшенное описание сцены
+app.post('/api/engine/session/:id/describe', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const sess = await prisma.gameSession.findUnique({ where: { id: req.params.id } });
+    if (!sess) return res.status(404).json({ error: 'not_found' });
+    const loc = await prisma.location.findUnique({ where: { id: sess.currentLocationId } });
+    const game = await prisma.game.findUnique({ where: { id: sess.scenarioGameId } });
+    const chars = await prisma.character.findMany({ where: { gameId: sess.scenarioGameId }, take: 6 });
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    const base = loc?.description || '';
+    // Общий офлайн‑текст (фолбэк на любой случай)
+    const offlineText = ([
+      `Сцена: ${loc?.title || 'Локация'}`,
+      base,
+      game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
+      game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+      (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
+      (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
+      (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
+    ].filter(Boolean).join('\n\n')).trim();
+    // Если нет ключа — сразу офлайн
+    if (!apiKey) {
+      return res.json({ text: offlineText, fallback: true });
+    }
+    const client = createOpenAIClient(apiKey);
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const sys = 'Ты мастер ролевой игры. Пиши живо, атмосферно, 2–6 абзацев, по‑русски. Учитывай визуальные детали, но не описывай UI. В конце подскажи игрокам 2–3 возможных действия без нумерации, коротко.';
+    const visual = [
+      loc?.backgroundUrl ? `Фон (изображение): ${loc.backgroundUrl}` : '',
+      loc?.musicUrl ? `Музыка (URL): ${loc.musicUrl}` : '',
+    ].filter(Boolean).join('\n');
+    const rules = [
+      game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
+      game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+      (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
+      (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
+      (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
+      (game as any)?.author ? `Автор: ${(game as any).author}` : '',
+      game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
+      (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
+      (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
+      (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
+    ].filter(Boolean).join('\n');
+    const npcs = chars && chars.length ? (
+      'Важные персонажи:\n' + chars.map((c) => {
+        const traits = [c.role, c.race, c.gender].filter(Boolean).join(', ');
+        const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+        return `- ${c.name}${traits ? ` (${traits})` : ''}${extras ? ` — ${extras}` : ''}`;
+      }).join('\n')
+    ) : '';
+    const user = [
+      `Сцена: ${loc?.title}`,
+      visual,
+      base ? `Описание сцены: ${base}` : '',
+      rules,
+      npcs,
+    ].filter(Boolean).join('\n\n');
+    let text = '';
+    let usedAi = false;
+    try {
+      const r = await client.chat.completions.create({
+        model,
+        temperature: 0.8,
+        max_tokens: 400,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: user },
+        ],
+      });
+      text = r.choices?.[0]?.message?.content?.trim() || (base || '');
+      usedAi = Boolean(text);
+    } catch (err) {
+      // Любая ошибка ИИ → офлайн‑описание, без 500
+      text = offlineText || (base || 'Здесь начинается ваше приключение.');
+    }
+    // обновим состояние сессии (последнее описание)
+    try {
+      const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+      state.lastDescribeAt = new Date().toISOString();
+      state.lastLocationId = sess.currentLocationId;
+      await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+    } catch {}
+    return res.json({ text, fallback: !usedAi });
+  } catch {
+    return res.status(500).json({ error: 'engine_describe_failed' });
+  }
+});
+// «Пойми/Действие» — кнопка или текст → выбрать выход и перейти
+app.post('/api/engine/session/:id/act', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const sess = await prisma.gameSession.findUnique({ where: { id: req.params.id } });
+    if (!sess) return res.status(404).json({ error: 'not_found' });
+    const locId = sess.currentLocationId;
+    const exits = await prisma.locationExit.findMany({ where: { locationId: locId } });
+    const loc = await prisma.location.findUnique({ where: { id: locId } });
+    // 1) Явный выбор кнопки/exitId
+    const pickedId = typeof req.body?.exitId === 'string' ? req.body.exitId : undefined;
+    const userText = typeof req.body?.text === 'string' ? req.body.text : '';
+    let chosen: any = pickedId ? exits.find((e: any) => e.id === pickedId) : null;
+    // 2) Наивное сопоставление по триггерам (без ИИ для первой версии)
+    if (!chosen && userText) {
+      const low = userText.toLowerCase();
+      chosen = exits.find((e: any) => (e.triggerText || '').toLowerCase() && low.includes((e.triggerText || '').toLowerCase()));
+    }
+    // 3) ИИ-сопоставление намерения → выбор выхода
+    if (!chosen && userText) {
+      const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+      if (apiKey && exits.length) {
+        try {
+          const client = createOpenAIClient(apiKey);
+          const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+          const prompt = [
+            'Ты помощник Директора игры. Тебе дано сообщение игрока и список возможных выходов из сцены.',
+            'Если доступны "Правила Локации" — учитывай их. Твоя задача: выбрать уместный выход (или вернуть none).',
+            'Возвращай строго JSON: {"exitId":"..."} или {"exitId":"none"}.',
+            `Сообщение игрока: "${userText}"`,
+            loc?.rulesPrompt ? `Правила Локации:\n${loc.rulesPrompt}` : '',
+            'Возможные выходы:',
+            ...exits.map((e: any, i: number) => {
+              const label = e.type === 'TRIGGER' ? (e.triggerText || '') : (e.buttonText || '');
+              return `- id=${e.id} [${e.type}] ${label}`;
+            }),
+          ].join('\n');
+          const r = await client.chat.completions.create({
+            model,
+            temperature: 0.0,
+            max_tokens: 50,
+            response_format: { type: 'json_object' } as any,
+            messages: [
+              { role: 'system', content: 'Отвечай только валидным JSON.' },
+              { role: 'user', content: prompt },
+            ],
+          });
+          const content = r.choices?.[0]?.message?.content || '{}';
+          const parsed = JSON.parse(content) as { exitId?: string };
+          const picked = parsed.exitId && parsed.exitId !== 'none' ? exits.find((e: any) => e.id === parsed.exitId) : null;
+          if (picked) chosen = picked;
+        } catch {}
+      }
+    }
+    if (!chosen) return res.status(200).json({ ok: false, reason: 'no_match' });
+    if (chosen.isGameOver || chosen.type === 'GAMEOVER') {
+      // финал — не меняем локацию, а сообщаем о завершении
+      try {
+        const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+        state.finishedAt = new Date().toISOString();
+        state.finishReason = 'game_over';
+        await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+      } catch {}
+      return res.json({ ok: true, gameOver: true });
+    }
+    const nextId = chosen.targetLocationId as string | null;
+    if (!nextId) return res.status(200).json({ ok: false, reason: 'no_target' });
+    await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: nextId } });
+    const nextLoc = await prisma.location.findUnique({ where: { id: nextId } });
+    const nextExits = await prisma.locationExit.findMany({ where: { locationId: nextId } });
+    // обновим состояние
+    try {
+      const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+      state.lastAction = userText || '';
+      state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([locId, nextId]))) : [locId, nextId];
+      await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+    } catch {}
+    return res.json({ ok: true, location: nextLoc, exits: nextExits });
+  } catch (e) {
+    return res.status(500).json({ error: 'engine_act_failed' });
+  }
+});
+
+// Chat: транскрибация аудио в текст (голосовой ввод)
+app.post('/api/chat/transcribe', upload.single('audio'), async (req, res) => {
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    if (!req.file || !req.file.buffer) return res.status(200).json({ text: '', error: 'no_audio' });
+    // 1) Попытка через Yandex SpeechKit (Api-Key)
+    const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
+    if (yandexKey) {
+      try {
+        const ytext = await transcribeYandex(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/ogg', yandexKey);
+        if (ytext && ytext.trim()) return res.json({ text: ytext });
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('Yandex STT failed:', e);
+      }
+    }
+    if (!apiKey) return res.status(200).json({ text: '', error: 'no_api_key' });
+    const client = createOpenAIClient(apiKey);
+    const tryModels = [
+      'whisper-1',
+      process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
+      'gpt-4o-transcribe',
+    ];
+    const file = await toFile(req.file.buffer, req.file.originalname || 'audio', { type: req.file.mimetype || 'audio/webm' });
+    let lastErr: unknown = null;
+    for (const model of tryModels) {
+      try {
+        const r = await client.audio.transcriptions.create({ model, file, language: 'ru', response_format: 'json' as any });
+        const text = (r as any)?.text || '';
+        if (text && String(text).trim()) return res.json({ text });
+      } catch (e) {
+        lastErr = e;
+        // eslint-disable-next-line no-console
+        console.error('Transcribe attempt failed:', model, e);
+      }
+    }
+    // raw HTTP fallback via undici
+    try {
+      const raw = await transcribeViaHttp(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', apiKey);
+      if (raw && raw.trim()) return res.json({ text: raw });
+    } catch {}
+    // eslint-disable-next-line no-console
+    console.error('Transcribe failed (all models):', lastErr);
+    const detail = (lastErr && typeof lastErr === 'object' ? JSON.stringify(lastErr) : String(lastErr || ''));
+    return res.status(200).json({ text: '', error: 'transcribe_failed', detail });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('Transcribe failed:', e);
+    return res.status(200).json({ text: '', error: 'transcribe_failed' });
+  }
+});
+
+async function transcribeViaHttp(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
+  const proxies = parseProxies();
+  const attempts = proxies.length ? proxies : ['__direct__'];
+  const endpoint = 'https://api.openai.com/v1/audio/transcriptions';
+  let lastErr: unknown = null;
+  for (const p of attempts) {
+    try {
+      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+      const form = new FormData();
+      form.append('model', 'whisper-1');
+      const file = new File([buffer], filename || 'audio', { type: mime || 'audio/webm' });
+      form.append('file', file);
+      const res = await undiciFetch(endpoint, {
+        method: 'POST',
+        dispatcher,
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form as any,
+      });
+      const data = await res.json() as any;
+      const text = typeof data?.text === 'string' ? data.text : '';
+      if (res.ok && text && text.trim()) return text;
+      lastErr = data || await res.text().catch(() => 'bad_response');
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  // eslint-disable-next-line no-console
+  console.error('HTTP fallback transcription failed:', lastErr);
+  return '';
+}
+
+async function transcribeYandex(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
+  const form = new FormData();
+  form.append('lang', 'ru-RU');
+  form.append('topic', 'general');
+  // Yandex лучше принимает ogg/opus; но пробуем как есть
+  const file = new File([buffer], filename || 'audio', { type: mime || 'audio/ogg' });
+  form.append('file', file);
+  const resp = await undiciFetch('https://stt.api.cloud.yandex.net/speech/v1/stt:recognize', {
+    method: 'POST',
+    headers: { Authorization: `Api-Key ${apiKey}` },
+    body: form as any,
+  });
+  const ct = resp.headers.get('content-type') || '';
+  if (!resp.ok) throw new Error(await resp.text().catch(() => 'yandex_stt_failed'));
+  if (ct.includes('application/json')) {
+    const data = await resp.json() as any;
+    const text = (data && (data.result || data.text)) ? String(data.result || data.text) : '';
+    return text;
+  }
+  const raw = await resp.text();
+  // иногда API возвращает plain text result=<text>
+  const m = /result\s*=\s*(.*)/i.exec(raw);
+  return m ? m[1] : raw;
+}
+
+// -------------------- Yandex SpeechKit TTS --------------------
+app.post('/api/tts', async (req, res) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const voice = typeof req.body?.voice === 'string' ? req.body.voice : 'oksana';
+    const format = typeof req.body?.format === 'string' ? req.body.format : 'mp3'; // mp3 | oggopus
+    if (!text.trim()) return res.status(400).json({ error: 'text_required' });
+    const apiKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'tts_key_missing' });
+
+    const form = new FormData();
+    form.append('text', text);
+    form.append('lang', 'ru-RU');
+    form.append('voice', voice); // популярные: oksana (f), ermil/filipp (m)
+    form.append('format', format);
+
+    const r = await undiciFetch('https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize', {
+      method: 'POST',
+      headers: { Authorization: `Api-Key ${apiKey}` },
+      body: form as any,
+    });
+    if (!r.ok) {
+      const err = await r.text().catch(() => '');
+      return res.status(502).json({ error: 'tts_failed', details: err });
+    }
+    const arrayBuf = await r.arrayBuffer();
+    const buf = Buffer.from(arrayBuf);
+    res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg' : 'audio/mpeg');
+    res.setHeader('Content-Length', String(buf.length));
+    return res.send(buf);
+  } catch (e) {
+    return res.status(500).json({ error: 'tts_error' });
+  }
+});
+
+// -------------------- Background image generation (OpenAI Images) --------------------
+app.post('/api/image/generate', async (req, res) => {
+  try {
+    const promptRaw = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
+    const width = Math.max(1, Number(req.body?.width || 1280));
+    const height = Math.max(1, Number(req.body?.height || 720));
+    const provider = typeof req.body?.provider === 'string' ? String(req.body.provider).toLowerCase() : '';
+    if (!promptRaw.trim()) return res.status(400).json({ error: 'prompt_required' });
+
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    if (!apiKey) {
+      // eslint-disable-next-line no-console
+      console.warn('[IMG] no OPENAI_API_KEY, skip generation');
+      return res.status(200).json({ dataUrl: '' });
+    }
+
+    const client = createOpenAIClient(apiKey);
+    // Допустимые размеры для gpt-image-1 на текущий момент
+    //  - 1024x1024
+    //  - 1024x1536 (портрет)
+    //  - 1536x1024 (альбом)
+    // Выбираем ближайший по ориентации
+    let size = '1536x1024';
+    if (width === height) size = '1024x1024';
+    else if (width > height) size = '1536x1024';
+    else size = '1024x1536';
+    const guidance = 'Сгенерируй атмосферный реалистичный фон по описанию сцены для приключенческой ролевой игры. Без текста, без надписей, без людей крупным планом, без UI. Киношный свет, глубокая перспектива.';
+    const fullPrompt = `${guidance}\n\nСцена: ${promptRaw}`.slice(0, 1800);
+    // eslint-disable-next-line no-console
+    console.log('[IMG] request', { size, providerReq: provider || 'auto', promptLen: fullPrompt.length, promptHead: fullPrompt.slice(0, 120) });
+    // 0) Попытка через Gemini (если указан ключ) или принудительно по provider
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (geminiKey && (provider === 'gemini' || !provider)) {
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[IMG] gemini try');
+        const gB64 = await generateViaGemini(fullPrompt, size, geminiKey);
+        if (gB64) {
+          // eslint-disable-next-line no-console
+          console.log('[IMG] gemini success', { bytes: Math.round(gB64.length * 0.75), size });
+          return res.json({ dataUrl: `data:image/png;base64,${gB64}` });
+        }
+        if (provider === 'gemini') {
+          // eslint-disable-next-line no-console
+          console.warn('[IMG] gemini returned empty');
+          return res.status(200).json({ dataUrl: '' });
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('[IMG] gemini failed:', e);
+        if (provider === 'gemini') return res.status(200).json({ dataUrl: '' });
+      }
+    }
+    if (provider === 'gemini' && !geminiKey) {
+      // eslint-disable-next-line no-console
+      console.warn('[IMG] gemini key missing');
+      return res.status(200).json({ dataUrl: '' });
+    }
+    try {
+      const img = await client.images.generate({
+        model: 'gpt-image-1',
+        prompt: fullPrompt,
+        size,
+        quality: 'high',
+      } as any);
+      let b64 = img?.data?.[0]?.b64_json || '';
+      const url = img?.data?.[0]?.url || '';
+      if (!b64 && url) {
+        // скачать и вернуть как data URL
+        try {
+          const r = await undiciFetch(url);
+          const buf = Buffer.from(await r.arrayBuffer());
+          b64 = buf.toString('base64');
+        } catch {}
+      }
+      if (!b64) return res.status(200).json({ dataUrl: '' });
+      // eslint-disable-next-line no-console
+      console.log('[IMG] success', { bytes: Math.round(b64.length * 0.75), size });
+      return res.json({ dataUrl: `data:image/png;base64,${b64}` });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[IMG] failed:', e);
+      // Fallback: Stability AI SDXL
+      const stabKey = process.env.STABILITY_API_KEY || process.env.STABILITY_KEY;
+      if (stabKey) {
+        try {
+          // Приведём размер под SDXL (<=1024, кратно 64)
+          let w = 1024; let h = 1024;
+          if (size === '1536x1024') { w = 1024; h = 704; }
+          else if (size === '1024x1536') { w = 704; h = 1024; }
+          const b64 = await generateViaStability(fullPrompt, w, h, stabKey);
+          if (b64) {
+            // eslint-disable-next-line no-console
+            console.log('[IMG] stability success', { bytes: Math.round(b64.length * 0.75), w, h });
+            return res.json({ dataUrl: `data:image/png;base64,${b64}` });
+          }
+        } catch (e2) {
+          // eslint-disable-next-line no-console
+          console.error('[IMG] stability failed:', e2);
+        }
+      }
+      return res.status(200).json({ dataUrl: '' });
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[IMG] error:', e);
+    return res.status(500).json({ error: 'image_error' });
+  }
+});
+
+async function generateViaStability(prompt: string, width: number, height: number, apiKey: string): Promise<string> {
+  const endpoint = 'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image';
+  const body = {
+    width,
+    height,
+    steps: 30,
+    cfg_scale: 7,
+    samples: 1,
+    text_prompts: [
+      { text: 'high quality, atmospheric, cinematic lighting, detailed environment, no text, no watermark, background only' },
+      { text: prompt },
+    ],
+  } as any;
+  const r = await undiciFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'Accept': 'image/png',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`stability_bad_status_${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  return buf.toString('base64');
+}
+
+async function generateViaGemini(prompt: string, size: string, apiKey: string): Promise<string> {
+  const proxies = parseProxies();
+  const attempts = proxies.length ? proxies : ['__direct__'];
+  const [wStr, hStr] = size.split('x');
+  const w = Number(wStr); const h = Number(hStr);
+
+  for (const p of attempts) {
+    try {
+      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
+      const body = {
+        contents: [ { parts: [ { text: `Сгенерируй фоновое изображение сцены, без текста, без водяных знаков. ${prompt}` } ] } ],
+        tools: [ { image_generation: {} } ],
+        tool_config: {
+          image_generation_config: {
+            number_of_images: 1,
+            mime_types: [ 'image/png' ],
+            width_px: Math.min(1024, Math.max(256, w)),
+            height_px: Math.min(1024, Math.max(256, h))
+          }
+        }
+      } as any;
+      const r = await undiciFetch(url, {
+        method: 'POST',
+        dispatcher,
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        console.warn('[IMG] gemini http', r.status, t.slice(0, 200));
+        continue;
+      }
+      const data = await r.json() as any;
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const imgPart = parts.find((x: any) => x?.inline_data?.data || x?.inlineData?.data);
+      const b64 = imgPart?.inline_data?.data || imgPart?.inlineData?.data || '';
+      if (b64) return b64;
+    } catch (e) {
+
+      console.warn('[IMG] gemini attempt failed:', e);
+    }
+  }
+
+  for (const p of attempts) {
+    try {
+      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+      const url = 'https://generativelanguage.googleapis.com/v1beta/images:generate';
+      const body = {
+        prompt: { text: prompt },
+        imageGenerationConfig: {
+          numberOfImages: 1,
+          imageFormat: 'PNG'
+        }
+      } as any;
+      const r = await undiciFetch(url, {
+        method: 'POST',
+        dispatcher,
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+
+        console.warn('[IMG] gemini http', r.status, t.slice(0, 200));
+        continue;
+      }
+      const data = await r.json() as any;
+      const gi = Array.isArray(data?.generatedImages) ? data.generatedImages[0] : null;
+      const b64a = gi?.image?.base64 || gi?.image?.bytesBase64Encoded || gi?.bytesBase64Encoded || gi?.base64;
+      if (b64a) return b64a;
+    } catch (e) {
+
+      console.warn('[IMG] gemini attempt2 failed:', e);
+    }
+  }
+  return '';
+}
+
+
+async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameId: string, context: string, outcomeText: string): Promise<{ text: string; fallback: boolean }> {
+  const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+  const game = await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true } }).catch(() => null);
+  const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
+  const baseLines: string[] = [];
+  if (game) {
+    baseLines.push(`Игра: ${game.title}`);
+    if (game.worldRules) baseLines.push(`Правила мира: ${game.worldRules}`);
+    if (game.gameplayRules) baseLines.push(`Правила процесса: ${game.gameplayRules}`);
+  }
+  if (playable.length) baseLines.push('Игровые персонажи:\n' + playable.map((p: any) => `- ${p.name}${p.race ? ` (${p.race})` : ''}${p.persona ? ` — ${p.persona}` : ''}`).join('\n'));
+  const sys = 'Ты ведущий настольной ролевой игры. Кратко и атмосферно продолжи сцену по-русски, 2–4 абзаца. Не проси бросков. Не давай мета-комментариев. Заверши вопросом или выбором игрока.';
+  const user = [
+    baseLines.length ? ('Контекст игры:\n' + baseLines.join('\n')) : '',
+    context ? `Действие игрока: ${context}` : '',
+    outcomeText ? `Исход проверки: ${outcomeText}` : '',
+    'Продолжи сцену согласно исходу. Опиши обнаруженное/последствия/альтернативы. В конце задай, что герой делает дальше.'
+  ].filter(Boolean).join('\n\n');
+  if (!apiKey) {
+    const low = outcomeText.toLowerCase();
+    const successText = 'Вы замечаете важную деталь: в стене едва виден шов, холодный поток воздуха указывает направление. За каменной плитой скрывается узкий проход. Что вы сделаете дальше?';
+    const critSuccessText = 'Ваши действия идеальны: скрытый механизм щёлкает, плита мягко отъезжает, открывая проход с еле заметной голубой подсветкой. Внутри слышится дальний шёпот. Куда направитесь?';
+    const partialText = 'Вы находите следы старого механизма, но он заедает. Дверь приоткрывается лишь на ладонь, из щели веет сыростью. Можно попытаться расширить проход или поискать иной способ. Что выберете?';
+    const failText = 'Несмотря на усилия, стена кажется монолитной, а следы уходят в темноту. Где-то рядом скрипит камень — возможно, сработала ловушка, но вы успели отпрянуть. Как поступите?';
+    const critFailText = 'Механизм срабатывает грубо: камни осыпаются, воздух свистит, где-то щёлкают зубцы. Вы едва избегаете травмы. Путь закрывается. Попробуете обойти или искать другой подход?';
+    const pick = low.includes('критический успех') ? critSuccessText
+      : low.includes('успех') ? successText
+      : low.includes('частичный') ? partialText
+      : low.includes('критический провал') ? critFailText
+      : failText;
+    return { text: pick, fallback: true };
+  }
+  try {
+    const client = createOpenAIClient(apiKey);
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const r = await client.chat.completions.create({
+      model,
+      temperature: 0.8,
+      max_tokens: 300,
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: user },
+      ],
+    });
+    const text = r.choices?.[0]?.message?.content?.trim() || '';
+    if (text) return { text, fallback: false };
+    return { text: 'Сцена продолжается. Что вы сделаете дальше?', fallback: true };
+  } catch {
+    return { text: 'Сцена продолжается. Что вы сделаете дальше?', fallback: true };
+  }
+}
+
+
+function rollSingleDie(sides: number): number {
+  const s = Math.max(2, Math.floor(sides));
+  try {
+    // Use cryptographically strong RNG when available
+    if (typeof (crypto as any).randomInt === 'function') {
+      return (crypto as any).randomInt(1, s + 1);
+    }
+  } catch {  }
+  return Math.floor(Math.random() * s) + 1;
+}
+function rollMultiple(count: number, sides: number): number[] {
+  const rolls: number[] = [];
+  const c = Math.max(1, Math.floor(count));
+  const s = Math.max(2, Math.floor(sides));
+  for (let i = 0; i < c; i++) rolls.push(rollSingleDie(s));
+  return rolls;
+}
+function parseDiceExpression(exprRaw: string): { count: number; sides: number; mod: number; adv: boolean; dis: boolean } | null {
+  const expr = String(exprRaw || '').toLowerCase().replace(/\s+/g, '');
+  if (!expr) return null;
+
+  const m = expr.match(/^(\d*)d(\d+|%)((?:\+|-)\d+)?(adv|dis)?$/);
+  if (!m) return null;
+  const count = m[1] ? Math.max(1, parseInt(m[1], 10)) : 1;
+  const sides = m[2] === '%' ? 100 : Math.max(2, parseInt(m[2], 10));
+  const mod = m[3] ? parseInt(m[3], 10) : 0;
+  const adv = m[4] === 'adv';
+  const dis = m[4] === 'dis';
+  return { count, sides, mod, adv, dis };
+}
+function rollDiceDnd(params: { expr?: string; count?: number; sides?: number; mod?: number; adv?: boolean; dis?: boolean }) {
+  const byExpr = params.expr ? parseDiceExpression(params.expr) : null;
+  const count = byExpr ? byExpr.count : Math.max(1, Math.floor(Number(params.count || 1)));
+  const sides = byExpr ? byExpr.sides : Math.max(2, Math.floor(Number(params.sides || 20)));
+  const mod = byExpr ? byExpr.mod : Math.floor(Number(params.mod || 0));
+  const adv = byExpr ? byExpr.adv : Boolean(params.adv);
+  const dis = byExpr ? byExpr.dis : Boolean(params.dis);
+
+  if ((adv || dis) && sides === 20) {
+    const a = rollSingleDie(20);
+    const b = rollSingleDie(20);
+    const picked = adv ? Math.max(a, b) : Math.min(a, b);
+    const total = picked + mod;
+    return {
+      notation: `${adv ? 'adv' : 'dis'} d20${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`,
+      sides: 20,
+      adv,
+      dis,
+      rolls: [a, b],
+      picked,
+      mod,
+      total,
+    };
+  }
+  const rolls = rollMultiple(count, sides);
+  const sum = rolls.reduce((acc, n) => acc + n, 0);
+  const total = sum + mod;
+  const notation = `${count}d${sides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+  return { notation, sides, adv: false, dis: false, rolls, sum, mod, total };
+}
+app.post('/api/dice/roll', async (req, res) => {
+  try {
+    const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
+    const count = req.body?.count;
+    const sides = req.body?.sides;
+    const mod = req.body?.mod;
+    const adv = req.body?.adv === true;
+    const dis = req.body?.dis === true;
+    const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    const times = Math.max(1, Math.min(100, Number(req.body?.times || 1)));
+    const results: any[] = [];
+    for (let i = 0; i < times; i++) {
+      if (manual.length) {
+        const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
+        const nSides = Number(sides || (expr.includes('d') ? Number(expr.split('d')[1]) || 20 : 20));
+        const rolls = manual.slice(0, nCount);
+        const sum = rolls.reduce((a, b) => a + b, 0);
+        const total = sum + (Number(mod) || 0);
+        const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+        results.push({ notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total });
+      } else {
+        results.push(rollDiceDnd({ expr, count, sides, mod, adv, dis }));
+      }
+    }
+    return res.json({ ok: true, results });
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_error' });
+  }
+});
+
+
+app.post('/api/lobbies/:id/dice', async (req, res) => {
+  try {
+    const lobbyId = String(req.params.id);
+    const prisma = getPrisma();
+    const lob = await prisma.gameLobby.findUnique({ where: { id: lobbyId } });
+    if (!lob) return res.status(404).json({ error: 'lobby_not_found' });
+    const gameId = lob.gameId || String(req.body?.gameId || '');
+    if (!gameId) return res.status(400).json({ error: 'game_required' });
+    const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
+    const count = req.body?.count;
+    const sides = req.body?.sides;
+    const mod = req.body?.mod;
+    const adv = req.body?.adv === true;
+    const dis = req.body?.dis === true;
+    const dc = Number.isFinite(req.body?.dc) ? Number(req.body.dc) : undefined;
+    const context = typeof req.body?.context === 'string' ? String(req.body.context).slice(0, 200) : '';
+    const kind = typeof req.body?.kind === 'string' ? String(req.body.kind) : '';
+    const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    const r = (manual.length
+      ? (() => {
+          const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
+          const nSides = Number(sides || (expr.includes('d') ? Number(expr.split('d')[1]) || 20 : 20));
+          const rolls = manual.slice(0, nCount);
+          const sum = rolls.reduce((a, b) => a + b, 0);
+          const total = sum + (Number(mod) || 0);
+          const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total };
+        })()
+      : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
+    let outcome = '';
+    if ((r.sides === 20 || kind === 'check') && typeof dc === 'number') {
+
+      const nat = ('picked' in r) ? r.picked : (r.rolls?.[0] || 0);
+      if (nat === 20) outcome = 'Критический успех';
+      else if (nat === 1) outcome = 'Критический провал';
+      else {
+        const total = r.total;
+        if (total >= dc) outcome = 'Успех';
+        else if (total >= dc - 2) outcome = 'Частичный успех / с риском';
+        else outcome = 'Провал';
+      }
+    }
+
+    const fmt = (() => {
+      const head = context ? `Контекст: ${context}\n` : '';
+      const dcStr = typeof dc === 'number' ? ` · DC=${dc}` : '';
+      if ('picked' in r) {
+        return `🎲 Бросок\n${head}${r.notation}${dcStr} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+      }
+      return `🎲 Бросок\n${head}${r.notation}${dcStr} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+    })();
+
+    const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+    const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+    history.push({ from: 'bot', text: fmt });
+
+    const narr = await generateDiceNarrative(prisma, gameId, context || '', outcome || fmt);
+    history.push({ from: 'bot', text: narr.text });
+    await prisma.chatSession.upsert({
+      where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+      update: { history: history as any },
+      create: { userId: 'lobby:' + lobbyId, gameId, history: history as any },
+    });
+    wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+    return res.json({ ok: true, messages: [fmt, narr.text] });
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_lobby_error' });
+  }
+});
+
+
+app.post('/api/chat/dice', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const gameId = String(req.body?.gameId || '');
+    if (!gameId) return res.status(400).json({ error: 'game_required' });
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
+    const count = req.body?.count;
+    const sides = req.body?.sides;
+    const mod = req.body?.mod;
+    const adv = req.body?.adv === true;
+    const dis = req.body?.dis === true;
+    const dc = Number.isFinite(req.body?.dc) ? Number(req.body.dc) : undefined;
+    const context = typeof req.body?.context === 'string' ? String(req.body.context).slice(0, 200) : '';
+    const kind = typeof req.body?.kind === 'string' ? String(req.body.kind) : '';
+    const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    const r = (manual.length
+      ? (() => {
+          const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
+          const nSides = Number(sides || (expr.includes('d') ? Number(expr.split('d')[1]) || 20 : 20));
+          const rolls = manual.slice(0, nCount);
+          const sum = rolls.reduce((a, b) => a + b, 0);
+          const total = sum + (Number(mod) || 0);
+          const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total };
+        })()
+      : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
+    let outcome = '';
+    if ((r.sides === 20 || kind === 'check') && typeof dc === 'number') {
+      const nat = ('picked' in r) ? r.picked : (r.rolls?.[0] || 0);
+      if (nat === 20) outcome = 'Критический успех';
+      else if (nat === 1) outcome = 'Критический провал';
+      else {
+        const total = r.total;
+        if (total >= dc) outcome = 'Успех';
+        else if (total >= dc - 2) outcome = 'Частичный успех / с риском';
+        else outcome = 'Провал';
+      }
+    }
+    const fmt = (() => {
+      const head = context ? `Контекст: ${context}\n` : '';
+      const dcStr = typeof dc === 'number' ? ` · DC=${dc}` : '';
+      if ('picked' in r) {
+        return `🎲 Бросок\n${head}${r.notation}${dcStr} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+      }
+      return `🎲 Бросок\n${head}${r.notation}${dcStr} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+    })();
+    const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
+    const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+    history.push({ from: 'bot', text: fmt });
+    const narr = await generateDiceNarrative(prisma, gameId, context || '', outcome || fmt);
+    history.push({ from: 'bot', text: narr.text });
+    await prisma.chatSession.upsert({
+      where: { userId_gameId: { userId: uid, gameId } },
+      update: { history: history as any },
+      create: { userId: uid, gameId, history: history as any },
+    });
+    return res.json({ ok: true, messages: [fmt, narr.text] });
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_chat_error' });
+  }
+});
