@@ -5,7 +5,6 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import { games, createGame, updateGame, deleteGame, profile, friends, users, createUser, updateUser, deleteUser, feedbacks, subscriptionPlans, characters, createCharacter, updateCharacter, deleteCharacter } from './db.js';
 import OpenAI from 'openai';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
 import pdfParse from 'pdf-parse';
 import fs from 'fs';
@@ -29,17 +28,42 @@ process.on('uncaughtException', (err) => {
   try { console.error('[uncaughtException]', err); } catch {}
 });
 
-function parseProxies(): string[] {
-  const listEnvRaw = process.env.OPENAI_PROXIES || '';
-  const singleRaw = process.env.OPENAI_PROXY || process.env.HTTPS_PROXY || '';
+function normalizeProxyUrl(raw: string): string {
+  const strip = (s: string) => s.trim().replace(/^['"]+|['"]+$/g, '');
+  const s = strip(raw);
+  if (!s) return '';
+  if (/^[a-zA-Z]+:\/\//.test(s)) return s;
+  const parts = s.split(':');
+  if (parts.length >= 4) {
+    const [host, port, user, ...passParts] = parts;
+    const pass = passParts.join(':');
+    return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+  }
+  if (parts.length === 2) return `http://${s}`;
+  return s;
+}
+
+function parseProxyList(listEnvRaw: string, singleRaw: string): string[] {
   const strip = (s: string) => s.trim().replace(/^['"]+|['"]+$/g, '');
   const listEnv = strip(listEnvRaw);
   const single = strip(singleRaw);
   const parts = [listEnv, single].filter(Boolean).join(',');
   return parts
     .split(',')
-    .map((s) => strip(s))
+    .map((s) => normalizeProxyUrl(strip(s)))
     .filter(Boolean);
+}
+
+function parseProxies(): string[] {
+  const listEnvRaw = process.env.OPENAI_PROXIES || '';
+  const singleRaw = process.env.OPENAI_PROXY || process.env.HTTPS_PROXY || '';
+  return parseProxyList(listEnvRaw, singleRaw);
+}
+
+function parseGeminiProxies(): string[] {
+  const listEnvRaw = process.env.GEMINI_PROXIES || process.env.GOOGLE_PROXIES || '';
+  const singleRaw = process.env.GEMINI_PROXY || process.env.GOOGLE_PROXY || process.env.HTTPS_PROXY || '';
+  return parseProxyList(listEnvRaw, singleRaw);
 }
 
 function createProxiedFetchForOpenAI(proxies: string[], timeoutMs: number) {
@@ -91,13 +115,15 @@ const DEFAULT_SYSTEM_PROMPT =
   '1. МИР: Не воспринимай локации как изолированные комнаты. Это части одного большого мира. Переходы между ними должны быть плавными и описываться как движение персонажа. ' +
   '2. ПРАВИЛА: Строго соблюдай правила D&D 5e. Используй характеристики персонажей (STR, DEX, CON, INT, WIS, CHA), классы и навыки. ' +
   '3. ПРОВЕРКИ: Для любых действий, исход которых не очевиден, запрашивай проверки характеристик (d20 + модификатор). Модификатор = (характеристика-10)/2. ' +
-  '4. БОЙ: В случае конфликта инициируй бросок инициативы, рассчитывай попадания (бросок атаки против AC цели) и урон (согласно оружию/заклинанию). ' +
-  '5. ПАМЯТЬ: Ты работаешь с расширенным контекстом Gemini — помни всё состояние мира, инвентарь, HP и предысторию персонажей. ' +
-  '6. СТИЛЬ: Пиши атмосферно, кинематографично и живо. Описывай звуки, запахи и ощущения. ' +
-  '7. ОГРАНИЧЕНИЯ: Не создавай новые ключевые локации, если их нет в сценарии, но можешь описывать путь между ними. ' +
-  '8. ФОРМАТ: Отвечай короткими абзацами (3-7 строк). В конце выводи доступные действия.\n' +
-  '9. ПРОВЕРКИ: Если ситуация требует броска кубиков, добавь в самый конец сообщения скрытый тег формата: [[ROLL: skill_name, DC: 15]]. Это вызовет окно броска у игрока.\n' +
-  '10. ГРУППА: В игре всегда 5 персонажей. Если живых игроков меньше, ты сам управляешь остальными персонажами как союзными NPC, делая за них ходы, броски и принимая решения в бою.';
+  '4. СПАСБРОСКИ: При опасностях запрашивай спасброски (STR/DEX/CON/INT/WIS/CHA) и учитывай их результат. ' +
+  '5. ПРЕИМУЩЕСТВО/ПОМЕХА: Если условия дают преимущество или помеху, явно указывай это при броске d20. ' +
+  '6. БОЙ: В случае конфликта инициируй бросок инициативы, рассчитывай попадания (бросок атаки против AC цели) и урон (согласно оружию/заклинанию). Учитывай крит на нат.20. ' +
+  '7. ПАМЯТЬ: Ты работаешь с расширенным контекстом Gemini — помни всё состояние мира, инвентарь, HP и предысторию персонажей. ' +
+  '8. СТИЛЬ: Пиши атмосферно, кинематографично и живо. Описывай звуки, запахи и ощущения. ' +
+  '9. ОГРАНИЧЕНИЯ: Не создавай новые ключевые локации, если их нет в сценарии, но можешь описывать путь между ними. ' +
+  '10. ФОРМАТ: Отвечай короткими абзацами (3-7 строк). В конце выводи доступные действия.\n' +
+  '11. ПРОВЕРКИ: Если ситуация требует броска кубиков, добавь в самый конец сообщения скрытый тег формата: [[ROLL: skill_or_attack_or_save, DC: 15]]. Это вызовет окно броска у игрока (для атаки DC=AC).\n' +
+  '12. ГРУППА: В игре всегда 5 персонажей. Если живых игроков меньше, ты сам управляешь остальными персонажами как союзными NPC, делая за них ходы, броски и принимая решения в бою.';
 let aiPrompts: AiPrompts = { system: DEFAULT_SYSTEM_PROMPT };
 try {
   if (fs.existsSync(AI_PROMPTS_FILE)) {
@@ -537,8 +563,8 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
     if ((geminiKey || apiKey) && !fast) {
       try {
         const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON-схему полного сценария для нашей игры без комментариев и лишнего текста.';
-        const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
-        const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, осмысленные названия сцен и короткие (2-3 предложения) описания.`;
+        const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
+        const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, осмысленные названия сцен и короткие (2-3 предложения) описания. Опирайся на D&D 5e и единый мир.`;
         
         const { text: generatedText } = await generateChatCompletion({
           systemPrompt: sys,
@@ -715,8 +741,8 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
         const tryAI = async () => {
           try {
             const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON полного сценария нашей игры без комментариев.';
-            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
-            const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, короткие описания (2–3 предложения), базовые персонажи (NPC).`;
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
+            const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, короткие описания (2–3 предложения), базовые персонажи (NPC). Опирайся на D&D 5e и единый мир.`;
             
             const { text: content } = await generateChatCompletion({
               systemPrompt: sys,
@@ -920,6 +946,21 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
               origin: c.origin || null,
               isPlayable: Boolean(c.isPlayable),
               abilities: abilitiesValue,
+              level: Number.isFinite(c.level) ? Number(c.level) : undefined,
+              class: c.class || null,
+              hp: Number.isFinite(c.hp) ? Number(c.hp) : undefined,
+              maxHp: Number.isFinite(c.maxHp) ? Number(c.maxHp) : undefined,
+              ac: Number.isFinite(c.ac) ? Number(c.ac) : undefined,
+              str: Number.isFinite(c.str) ? Number(c.str) : undefined,
+              dex: Number.isFinite(c.dex) ? Number(c.dex) : undefined,
+              con: Number.isFinite(c.con) ? Number(c.con) : undefined,
+              int: Number.isFinite(c.int) ? Number(c.int) : undefined,
+              wis: Number.isFinite(c.wis) ? Number(c.wis) : undefined,
+              cha: Number.isFinite(c.cha) ? Number(c.cha) : undefined,
+              skills: c.skills || null,
+              inventory: c.inventory || null,
+              spells: c.spells || null,
+              equipment: c.equipment || null,
             },
           });
         }
@@ -2585,9 +2626,10 @@ app.post('/api/chat/reply', async (req, res) => {
     const diceTagRegex = /\[\[ROLL:\s*(.*?),\s*DC:\s*(\d+)\]\]/i;
     const match = text.match(diceTagRegex);
     if (match) {
-      const kind = match[1].trim();
+      const kindRaw = match[1].trim();
       const dc = parseInt(match[2], 10);
-      aiRequestDice = { expr: 'd20', dc, context: `Проверка: ${kind}`, kind };
+      const kindNorm = normalizeRollKind(kindRaw);
+      aiRequestDice = { expr: 'd20', dc, context: `Проверка: ${kindRaw}`, kind: kindNorm, skill: kindRaw };
       text = text.replace(diceTagRegex, '').trim();
     }
 
@@ -3284,8 +3326,9 @@ async function generateViaStability(prompt: string, width: number, height: numbe
 }
 
 async function generateViaGemini(prompt: string, size: string, apiKey: string): Promise<string> {
-  const proxies = parseProxies();
-  const attempts = proxies.length ? proxies : ['__direct__'];
+  const geminiProxies = parseGeminiProxies();
+  const openaiProxies = parseProxies();
+  const attempts = geminiProxies.length ? geminiProxies : (openaiProxies.length ? openaiProxies : ['__direct__']);
   const [wStr, hStr] = size.split('x');
   const w = Number(wStr); const h = Number(hStr);
 
@@ -3375,34 +3418,57 @@ async function generateViaGeminiText(params: {
 }): Promise<string> {
   const { systemPrompt, userPrompt, history = [], apiKey, modelName = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest' } = params;
   
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ 
-      model: modelName,
-      systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined
-    });
+  const proxies = parseGeminiProxies();
+  const attempts = proxies.length ? proxies : ['__direct__'];
+  const timeoutMs = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 20000);
+  const contents = history.map(h => ({
+    role: h.role === 'assistant' || h.role === 'model' ? 'model' : 'user',
+    parts: [{ text: h.content }]
+  }));
+  contents.push({ role: 'user', parts: [{ text: userPrompt }] });
 
-    const chatHistory = history.map(h => ({
-      role: h.role === 'assistant' || h.role === 'model' ? 'model' : 'user',
-      parts: [{ text: h.content }]
-    }));
-
-    const chat = model.startChat({
-      history: chatHistory,
-      generationConfig: {
-        temperature: 0.45,
-        maxOutputTokens: 1024,
-      },
-    });
-
-    const result = await chat.sendMessage(userPrompt);
-    const response = await result.response;
-    const text = response.text();
-    return text || '';
-  } catch (e) {
-    console.error('[GEMINI-TEXT] Error:', e);
-    throw e;
+  const body: any = {
+    contents,
+    generationConfig: {
+      temperature: 0.45,
+      maxOutputTokens: 1024,
+    },
+  };
+  if (systemPrompt) {
+    body.systemInstruction = { parts: [{ text: systemPrompt }] };
   }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+  let lastErr: unknown = null;
+  for (const p of attempts) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(5000, timeoutMs));
+      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+      const r = await undiciFetch(url, {
+        method: 'POST',
+        dispatcher,
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+        body: JSON.stringify(body),
+      });
+      clearTimeout(timer);
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        console.error('[GEMINI-TEXT] HTTP', r.status, t.slice(0, 200));
+        lastErr = t || r.statusText;
+        continue;
+      }
+      const data = await r.json() as any;
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+      if (text) return text;
+      lastErr = 'empty_text';
+    } catch (e) {
+      lastErr = e;
+      console.error('[GEMINI-TEXT] Error:', e);
+    }
+  }
+  throw lastErr || new Error('gemini_text_failed');
 }
 
 /**
@@ -3483,7 +3549,7 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
       return `- ${p.name} (Ур.${p.level} ${p.class || 'Путешественник'}, ${p.race || 'Человек'}) — ${stats}. ${p.persona ? `Характер: ${p.persona}` : ''}`;
     }).join('\n'));
   }
-    const sys = 'Ты — мастер (DM) приключения D&D 5e. Пиши атмосферно и кратко: 2–4 абзаца, максимум 700 символов. ' +
+  const sys = 'Ты — мастер (DM) приключения D&D 5e. Пиши атмосферно и кратко: 2–4 абзаца. ' +
       'Опирайся на правила 5-й редакции, характеристики персонажей и контекст сцены. ' +
       'Не добавляй новых объектов, если их нет в сценарии. ' +
       'Учитывай исход проверки d20: модификаторы, бонусы мастерства и сложность (DC). ' +
@@ -3700,6 +3766,7 @@ function rollDiceDnd(params: { expr?: string; count?: number; sides?: number; mo
       dis,
       rolls: [a, b],
       picked,
+      natural: picked,
       mod,
       total,
     };
@@ -3708,7 +3775,49 @@ function rollDiceDnd(params: { expr?: string; count?: number; sides?: number; mo
   const sum = rolls.reduce((acc, n) => acc + n, 0);
   const total = sum + mod;
   const notation = `${count}d${sides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
-  return { notation, sides, adv: false, dis: false, rolls, sum, mod, total };
+  const natural = sides === 20 ? (rolls[0] || 0) : undefined;
+  return { notation, sides, adv: false, dis: false, rolls, sum, mod, total, natural };
+}
+
+function normalizeRollKind(raw: string): 'attack' | 'save' | 'damage' | 'check' {
+  const low = String(raw || '').toLowerCase();
+  if (/(attack|atk|hit|атака|атак|удар|strike)/.test(low)) return 'attack';
+  if (/(save|saving|сейв|спас|спасбросок|saving throw|спасброс)/.test(low)) return 'save';
+  if (/(damage|dmg|урон)/.test(low)) return 'damage';
+  return 'check';
+}
+
+function getNaturalD20(r: any): number | null {
+  if (!r || r.sides !== 20) return null;
+  if (typeof r.natural === 'number') return r.natural;
+  if ('picked' in r) return r.picked;
+  const first = Array.isArray(r.rolls) ? r.rolls[0] : null;
+  return typeof first === 'number' ? first : null;
+}
+
+function evaluateDndOutcome(params: { roll: any; dc?: number; kind?: string }): { outcome: string; outcomeCode: '' | 'crit_success' | 'crit_fail' | 'success' | 'partial' | 'fail' } {
+  const kind = normalizeRollKind(params.kind || '');
+  const dc = typeof params.dc === 'number' ? params.dc : undefined;
+  if (kind === 'damage') return { outcome: '', outcomeCode: '' };
+  if (typeof dc !== 'number' && params.roll?.sides !== 20) return { outcome: '', outcomeCode: '' };
+  const nat = getNaturalD20(params.roll);
+  if (nat === 20) return { outcome: 'Критический успех', outcomeCode: 'crit_success' };
+  if (nat === 1) return { outcome: 'Критический провал', outcomeCode: 'crit_fail' };
+  if (typeof dc === 'number') {
+    const total = Number(params.roll?.total || 0);
+    if (total >= dc) return { outcome: 'Успех', outcomeCode: 'success' };
+    if (total >= dc - 2) return { outcome: 'Частичный успех / с риском', outcomeCode: 'partial' };
+    return { outcome: 'Провал', outcomeCode: 'fail' };
+  }
+  return { outcome: '', outcomeCode: '' };
+}
+
+function formatKindLabel(kind: string): string {
+  const k = normalizeRollKind(kind);
+  if (k === 'attack') return 'Атака';
+  if (k === 'save') return 'Спасбросок';
+  if (k === 'damage') return 'Урон';
+  return 'Проверка';
 }
 app.post('/api/dice/roll', async (req, res) => {
   try {
@@ -3767,26 +3876,21 @@ app.post('/api/lobbies/:id/dice', async (req, res) => {
           const sum = rolls.reduce((a, b) => a + b, 0);
           const total = sum + (Number(mod) || 0);
           const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
-          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total };
+          const natural = nSides === 20 ? (rolls[0] || 0) : undefined;
+          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total, natural };
         })()
       : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
-    let outcome = '';
-    if ((r.sides === 20 || kind === 'check') && typeof dc === 'number') {
-
-      const nat = ('picked' in r) ? r.picked : (r.rolls?.[0] || 0);
-      if (nat === 20) outcome = 'Критический успех';
-      else if (nat === 1) outcome = 'Критический провал';
-      else {
-        const total = r.total;
-        if (total >= dc) outcome = 'Успех';
-        else if (total >= dc - 2) outcome = 'Частичный успех / с риском';
-        else outcome = 'Провал';
-      }
-    }
-
+    const kindNorm = normalizeRollKind(kind);
+    const kindLabel = formatKindLabel(kind);
+    const dcLabel = kindNorm === 'attack' ? 'AC' : 'DC';
+    const { outcome } = evaluateDndOutcome({ roll: r, dc, kind });
     const fmt = (() => {
-      const head = context ? `Контекст: ${context}\n` : '';
-      const dcStr = typeof dc === 'number' ? ` · DC=${dc}` : '';
+      const headLines = [
+        kindLabel ? `Тип: ${kindLabel}` : '',
+        context ? `Контекст: ${context}` : '',
+      ].filter(Boolean);
+      const head = headLines.length ? `${headLines.join('\n')}\n` : '';
+      const dcStr = typeof dc === 'number' ? ` · ${dcLabel}=${dc}` : '';
       if ('picked' in r) {
         return `🎲 Бросок\n${head}${r.notation}${dcStr} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
       }
@@ -3838,24 +3942,21 @@ app.post('/api/chat/dice', async (req, res) => {
           const sum = rolls.reduce((a, b) => a + b, 0);
           const total = sum + (Number(mod) || 0);
           const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
-          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total };
+          const natural = nSides === 20 ? (rolls[0] || 0) : undefined;
+          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total, natural };
         })()
       : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
-    let outcome = '';
-    if ((r.sides === 20 || kind === 'check') && typeof dc === 'number') {
-      const nat = ('picked' in r) ? r.picked : (r.rolls?.[0] || 0);
-      if (nat === 20) outcome = 'Критический успех';
-      else if (nat === 1) outcome = 'Критический провал';
-      else {
-        const total = r.total;
-        if (total >= dc) outcome = 'Успех';
-        else if (total >= dc - 2) outcome = 'Частичный успех / с риском';
-        else outcome = 'Провал';
-      }
-    }
+    const kindNorm = normalizeRollKind(kind);
+    const kindLabel = formatKindLabel(kind);
+    const dcLabel = kindNorm === 'attack' ? 'AC' : 'DC';
+    const { outcome } = evaluateDndOutcome({ roll: r, dc, kind });
     const fmt = (() => {
-      const head = context ? `Контекст: ${context}\n` : '';
-      const dcStr = typeof dc === 'number' ? ` · DC=${dc}` : '';
+      const headLines = [
+        kindLabel ? `Тип: ${kindLabel}` : '',
+        context ? `Контекст: ${context}` : '',
+      ].filter(Boolean);
+      const head = headLines.length ? `${headLines.join('\n')}\n` : '';
+      const dcStr = typeof dc === 'number' ? ` · ${dcLabel}=${dc}` : '';
       if ('picked' in r) {
         return `🎲 Бросок\n${head}${r.notation}${dcStr} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
       }

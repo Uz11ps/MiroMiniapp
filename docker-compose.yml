@@ -21,6 +21,8 @@ services:
       dockerfile: server/Dockerfile
     env_file:
       - ./server/.env
+    volumes:
+      - ./server/.env:/app/server/.env:ro
     environment:
       DATABASE_URL: postgresql://mira:mira@db:5432/mira?schema=public
       NODE_ENV: production
