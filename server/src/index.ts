@@ -3416,7 +3416,7 @@ async function generateViaGeminiText(params: {
   apiKey: string;
   modelName?: string;
 }): Promise<string> {
-  const { systemPrompt, userPrompt, history = [], apiKey, modelName = process.env.GEMINI_MODEL || 'gemini-1.5-pro-latest' } = params;
+  const { systemPrompt, userPrompt, history = [], apiKey, modelName = process.env.GEMINI_MODEL || 'gemini-2.5-pro' } = params;
   
   const proxies = parseGeminiProxies();
   const attempts = proxies.length ? proxies : ['__direct__'];
@@ -3496,7 +3496,7 @@ async function generateChatCompletion(params: {
         systemPrompt: params.systemPrompt,
         userPrompt: params.userPrompt,
         history: chatHistory,
-        modelName: 'gemini-1.5-pro-latest' // Используем Pro для 2M окна контекста
+        modelName: process.env.GEMINI_MODEL || 'gemini-2.5-pro'
       });
       if (text) return { text, provider: 'gemini' };
     } catch (e) {
@@ -3570,7 +3570,7 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
         apiKey: geminiKey,
         systemPrompt: sys,
         userPrompt: user,
-        modelName: 'gemini-1.5-pro-latest'
+        modelName: process.env.GEMINI_MODEL || 'gemini-2.5-pro'
       });
       if (text) return { text, fallback: false };
     } catch (e) {
