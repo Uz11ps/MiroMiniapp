@@ -112,9 +112,43 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
           <input placeholder="Название (опц.)" value={title} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)} />
           <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
           <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
-          <label className="btn">
-            {busy ? 'Обработка...' : 'Выбрать PDF'}
-            <input type="file" accept="application/pdf" style={{ display: 'none' }} disabled={busy} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value=''; if (f) void onIngest(f); }} />
+          <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
+            <input type="file" accept="application/pdf" style={{ display: 'none' }} disabled={busy} onChange={(e: React.ChangeEvent<HTMLInputElement>) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value=''; if (f) void onIngest(f); }} />
+            <div
+              style={{ 
+                width: '100%', 
+                padding: '14px 24px', 
+                fontSize: '16px', 
+                fontWeight: 600,
+                backgroundColor: busy ? '#6c757d' : '#1f6feb',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '10px',
+                cursor: busy ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s ease',
+                opacity: busy ? 0.7 : 1,
+                textAlign: 'center',
+                boxShadow: busy ? 'none' : '0 2px 8px rgba(31, 111, 235, 0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}
+              onMouseEnter={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1557b0'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(31, 111, 235, 0.4)'; e.currentTarget.style.transform = 'translateY(-1px)'; } }}
+              onMouseLeave={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1f6feb'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(31, 111, 235, 0.3)'; e.currentTarget.style.transform = 'translateY(0)'; } }}
+            >
+              {busy ? (
+                <>
+                  <span>⏳</span>
+                  <span>Обработка PDF...</span>
+                </>
+              ) : (
+                <>
+                  <span style={{ fontSize: '20px' }}>📄</span>
+                  <span>Выбрать PDF файл</span>
+                </>
+              )}
+            </div>
           </label>
         </div>
       )}
