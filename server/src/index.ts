@@ -75,7 +75,7 @@ function createProxiedFetchForOpenAI(proxies: string[], timeoutMs: number) {
       try {
         const controller = new AbortController();
         controllers.push(controller);
-        const timer = setTimeout(() => controller.abort(), Math.max(30000, timeoutMs));
+        const timer = setTimeout(() => controller.abort(), Math.max(60000, timeoutMs));
         const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
         const res = await undiciFetch(input as any, { ...(init as any), dispatcher, signal: controller.signal });
         clearTimeout(timer);
@@ -1174,25 +1174,40 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           console.log('[INGEST-IMPORT] Rules text preview:', cleanRulesText.slice(0, 200));
           console.log('[INGEST-IMPORT] Scenario text preview:', cleanScenarioText.slice(0, 200));
           
-          // ЭТАП 1: Анализ правил игры
+          // ЭТАП 1: Анализ правил игры (обрабатываем весь файл по частям)
           console.log('[INGEST-IMPORT] Stage 1: Analyzing rules...');
-          try {
-            const rulesSys = `Ты интеллектуальный ассистент для анализа правил настольных ролевых игр D&D 5e.
-Твоя задача - извлечь из файла правил два типа информации:
+          const chunkSize = 250000; // Размер чанка для обработки
+          const rulesChunks: string[] = [];
+          for (let i = 0; i < cleanRulesText.length; i += chunkSize) {
+            rulesChunks.push(cleanRulesText.slice(i, i + chunkSize));
+          }
+          console.log(`[INGEST-IMPORT] Stage 1: Processing ${rulesChunks.length} chunks of rules`);
+          
+          let worldRulesParts: string[] = [];
+          let gameplayRulesParts: string[] = [];
+          
+          for (let chunkIdx = 0; chunkIdx < rulesChunks.length; chunkIdx++) {
+            try {
+              const rulesSys = `Ты интеллектуальный ассистент для анализа правил настольных ролевых игр D&D 5e.
+Твоя задача - извлечь из ЧАСТИ файла правил два типа информации:
 1. ПРАВИЛА МИРА (worldRules) - описание сеттинга, мира, вселенной
-2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules) - механики игры, как играть`;
+2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules) - механики игры, как играть
 
-            const rulesShape = '{ "worldRules": "...", "gameplayRules": "..." }';
-            const rulesPrompt = `Проанализируй файл ПРАВИЛ ИГРЫ для настольной ролевой игры D&D 5e:
+ВАЖНО: Это часть ${chunkIdx + 1} из ${rulesChunks.length} файла правил. Извлекай информацию из этой части.`;
+
+              const rulesShape = '{ "worldRules": "...", "gameplayRules": "..." }';
+              const chunk = rulesChunks[chunkIdx];
+              
+              const rulesPrompt = `Проанализируй ЧАСТЬ ${chunkIdx + 1} из ${rulesChunks.length} файла ПРАВИЛ ИГРЫ для настольной ролевой игры D&D 5e:
 
 ═══════════════════════════════════════════════════════════════════════════════
-ФАЙЛ: ПРАВИЛА ИГРЫ
+ЧАСТЬ ${chunkIdx + 1}/${rulesChunks.length}: ПРАВИЛА ИГРЫ
 ═══════════════════════════════════════════════════════════════════════════════
 ---
-${cleanRulesText}
+${chunk}
 ---
 
-ИЗВЛЕКИ:
+ИЗВЛЕКИ из ЭТОЙ ЧАСТИ:
 
 1. ПРАВИЛА МИРА (worldRules):
    - Описание сеттинга, мира, вселенной
@@ -1211,35 +1226,49 @@ ${cleanRulesText}
 Верни только JSON без комментариев, строго формы:
 ${rulesShape}
 
-ВАЖНО: Извлекай полностью, не обрезай текст!`;
+ВАЖНО: Извлекай полностью из этой части, не обрезай текст!`;
 
-            const rulesResult = await generateChatCompletion({
-              systemPrompt: rulesSys,
-              userPrompt: rulesPrompt,
-              history: []
-            });
-            
-            if (rulesResult?.text) {
-              let rulesContent = rulesResult.text.trim();
-              if (rulesContent.includes('{')) {
-                const startIdx = rulesContent.indexOf('{');
-                const endIdx = rulesContent.lastIndexOf('}');
-                if (startIdx >= 0 && endIdx >= 0) {
-                  rulesContent = rulesContent.slice(startIdx, endIdx + 1);
-                  try {
-                    const rulesData = JSON.parse(rulesContent);
-                    if (rulesData.worldRules) scenario.game.worldRules = rulesData.worldRules;
-                    if (rulesData.gameplayRules) scenario.game.gameplayRules = rulesData.gameplayRules;
-                    console.log('[INGEST-IMPORT] Stage 1 complete: Rules extracted');
-                  } catch (e) {
-                    console.error('[INGEST-IMPORT] Stage 1: Failed to parse rules JSON:', e);
+              console.log(`[INGEST-IMPORT] Stage 1: Processing chunk ${chunkIdx + 1}/${rulesChunks.length}...`);
+              const rulesResult = await generateChatCompletion({
+                systemPrompt: rulesSys,
+                userPrompt: rulesPrompt,
+                history: []
+              });
+              
+              if (rulesResult?.text) {
+                let rulesContent = rulesResult.text.trim();
+                if (rulesContent.includes('{')) {
+                  const startIdx = rulesContent.indexOf('{');
+                  const endIdx = rulesContent.lastIndexOf('}');
+                  if (startIdx >= 0 && endIdx >= 0) {
+                    rulesContent = rulesContent.slice(startIdx, endIdx + 1);
+                    try {
+                      const rulesData = JSON.parse(rulesContent);
+                      if (rulesData.worldRules && rulesData.worldRules.trim()) {
+                        worldRulesParts.push(rulesData.worldRules);
+                      }
+                      if (rulesData.gameplayRules && rulesData.gameplayRules.trim()) {
+                        gameplayRulesParts.push(rulesData.gameplayRules);
+                      }
+                    } catch (e) {
+                      console.error(`[INGEST-IMPORT] Stage 1: Failed to parse rules JSON for chunk ${chunkIdx + 1}:`, e);
+                    }
                   }
                 }
               }
+            } catch (e) {
+              console.error(`[INGEST-IMPORT] Stage 1: Chunk ${chunkIdx + 1} analysis failed:`, e);
             }
-          } catch (e) {
-            console.error('[INGEST-IMPORT] Stage 1: Rules analysis failed:', e);
           }
+          
+          // Объединяем результаты из всех чанков
+          if (worldRulesParts.length > 0) {
+            scenario.game.worldRules = worldRulesParts.join('\n\n---\n\n');
+          }
+          if (gameplayRulesParts.length > 0) {
+            scenario.game.gameplayRules = gameplayRulesParts.join('\n\n---\n\n');
+          }
+          console.log(`[INGEST-IMPORT] Stage 1 complete: Rules extracted from ${rulesChunks.length} chunks`);
           
           // ЭТАП 2: Анализ сценария игры
           console.log('[INGEST-IMPORT] Stage 2: Analyzing scenario...');
@@ -1261,16 +1290,42 @@ ${rulesShape}
 
             const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","parentKey":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":"фраза для перехода","toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","role":"...","origin":"...","persona":"...","abilities":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
             
-            const prompt = `Проанализируй файл СЦЕНАРИЯ ИГРЫ для настольной ролевой игры D&D 5e:
+            // Обрабатываем весь сценарий (может быть разбит на части)
+            const scenarioChunkSize = 150000;
+            const scenarioChunks: string[] = [];
+            for (let i = 0; i < cleanScenarioText.length; i += scenarioChunkSize) {
+              scenarioChunks.push(cleanScenarioText.slice(i, i + scenarioChunkSize));
+            }
+            console.log(`[INGEST-IMPORT] Stage 2: Processing ${scenarioChunks.length} chunks of scenario`);
+            
+            // Для сценария обрабатываем все части, но первую часть используем для основных полей игры
+            let allLocations: any[] = [];
+            let allExits: any[] = [];
+            let allCharacters: any[] = [];
+            let gameDataFromFirstChunk: any = null;
+            
+            for (let chunkIdx = 0; chunkIdx < scenarioChunks.length; chunkIdx++) {
+              const chunk = scenarioChunks[chunkIdx];
+              const isFirstChunk = chunkIdx === 0;
+              
+              const chunkSys = isFirstChunk ? sys : `Ты анализируешь ЧАСТЬ ${chunkIdx + 1} из ${scenarioChunks.length} файла сценария.
+Из этой части извлеки ТОЛЬКО локации, персонажей и выходы (если они есть).
+Основные поля игры (промо, введение, предыстория) уже извлечены из первой части.`;
+              
+              const chunkShape = isFirstChunk ? shape : '{ "locations":[...], "exits":[...], "characters":[...] }';
+              
+              const chunkPrompt = isFirstChunk 
+                ? `Проанализируй файл СЦЕНАРИЯ ИГРЫ для настольной ролевой игры D&D 5e:
 
 ═══════════════════════════════════════════════════════════════════════════════
-ФАЙЛ: СЦЕНАРИЙ ИГРЫ
+ФАЙЛ: СЦЕНАРИЙ ИГРЫ${scenarioChunks.length > 1 ? ` (часть 1 из ${scenarioChunks.length})` : ''}
 ═══════════════════════════════════════════════════════════════════════════════
 ---
-${cleanScenarioText}
+${chunk}
 ---
 
 Верни только JSON без комментариев, строго формы:
+${shape}
 ${shape}
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -1355,96 +1410,105 @@ ${shape}
 3. ИЗВЛЕКАЙ ВСЁ: Не обрезай текст, извлекай полностью
 4. НЕ ПРИДУМЫВАЙ: Только реальные данные, если нет - верни null
 
-Верни ТОЛЬКО JSON, никаких комментариев!`;
-            
-            console.log('[INGEST-IMPORT] Sending scenario to AI, scenarioText length:', cleanScenarioText.length);
-            const result = await generateChatCompletion({
-              systemPrompt: sys,
-              userPrompt: prompt,
-              history: []
-            });
-            const content = result?.text || '';
-            console.log('[INGEST-IMPORT] AI provider:', result?.provider || 'unknown');
-            
-            console.log('[INGEST-IMPORT] AI response received, length:', content?.length || 0);
-            console.log('[INGEST-IMPORT] AI response preview:', content?.slice(0, 500) || 'empty');
-            
-            if (content && content.trim().includes('{')) {
-              // Убираем markdown обертку (```json ... ```)
-              let cleaned = content.trim();
-              if (cleaned.startsWith('```')) {
-                const jsonStart = cleaned.indexOf('{');
-                const jsonEnd = cleaned.lastIndexOf('}');
-                if (jsonStart >= 0 && jsonEnd >= 0 && jsonEnd > jsonStart) {
-                  cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+Верни ТОЛЬКО JSON, никаких комментариев!`
+                : `Проанализируй ЧАСТЬ ${chunkIdx + 1} из ${scenarioChunks.length} файла СЦЕНАРИЯ ИГРЫ:
+
+═══════════════════════════════════════════════════════════════════════════════
+ЧАСТЬ ${chunkIdx + 1}/${scenarioChunks.length}: СЦЕНАРИЙ ИГРЫ
+═══════════════════════════════════════════════════════════════════════════════
+---
+${chunk}
+---
+
+Из ЭТОЙ ЧАСТИ извлеки ТОЛЬКО:
+- locations[] (если есть локации в этой части)
+- characters[] (если есть персонажи в этой части)
+- exits[] (если есть выходы в этой части)
+
+Верни только JSON без комментариев, строго формы:
+${chunkShape}`;
+              
+              console.log(`[INGEST-IMPORT] Stage 2: Processing chunk ${chunkIdx + 1}/${scenarioChunks.length}...`);
+              const result = await generateChatCompletion({
+                systemPrompt: chunkSys,
+                userPrompt: chunkPrompt,
+                history: []
+              });
+              
+              const content = result?.text || '';
+              if (content && content.trim().includes('{')) {
+                // Убираем markdown обертку (```json ... ```)
+                let cleaned = content.trim();
+                if (cleaned.startsWith('```')) {
+                  const jsonStart = cleaned.indexOf('{');
+                  const jsonEnd = cleaned.lastIndexOf('}');
+                  if (jsonStart >= 0 && jsonEnd >= 0 && jsonEnd > jsonStart) {
+                    cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+                  } else {
+                    const codeBlockMatch = cleaned.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+                    if (codeBlockMatch && codeBlockMatch[1]) {
+                      cleaned = codeBlockMatch[1];
+                    }
+                  }
                 } else {
-                  // Пытаемся найти JSON внутри markdown
-                  const codeBlockMatch = cleaned.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
-                  if (codeBlockMatch && codeBlockMatch[1]) {
-                    cleaned = codeBlockMatch[1];
+                  const startIdx = cleaned.indexOf('{');
+                  const endIdx = cleaned.lastIndexOf('}');
+                  if (startIdx >= 0 && endIdx >= 0 && endIdx > startIdx) {
+                    cleaned = cleaned.slice(startIdx, endIdx + 1);
                   }
                 }
-              } else {
-                const startIdx = cleaned.indexOf('{');
-                const endIdx = cleaned.lastIndexOf('}');
-                if (startIdx >= 0 && endIdx >= 0 && endIdx > startIdx) {
-                  cleaned = cleaned.slice(startIdx, endIdx + 1);
-                }
-              }
-              
-              console.log('[INGEST-IMPORT] Extracted JSON, length:', cleaned.length);
-              
-              try {
-                const gameData = JSON.parse(cleaned);
-                console.log('[INGEST-IMPORT] Parsed JSON successfully:', {
-                  hasGame: !!gameData.game,
-                  gameKeys: gameData.game ? Object.keys(gameData.game) : [],
-                  locationsCount: gameData.locations?.length || 0,
-                  exitsCount: gameData.exits?.length || 0,
-                  charactersCount: gameData.characters?.length || 0
-                });
                 
-                // Объединяем данные игры (не перезаписываем правила, которые уже извлечены на этапе 1)
-                if (gameData.game) {
-                  const existingRules = {
-                    worldRules: scenario.game.worldRules,
-                    gameplayRules: scenario.game.gameplayRules
-                  };
-                  Object.assign(scenario.game, gameData.game);
-                  // Восстанавливаем правила из этапа 1, если они были извлечены
-                  if (existingRules.worldRules) scenario.game.worldRules = existingRules.worldRules;
-                  if (existingRules.gameplayRules) scenario.game.gameplayRules = existingRules.gameplayRules;
-                  console.log('[INGEST-IMPORT] Game data assigned:', {
-                    title: scenario.game.title,
-                    hasIntroduction: !!scenario.game.introduction,
-                    hasBackstory: !!scenario.game.backstory,
-                    hasAdventureHooks: !!scenario.game.adventureHooks,
-                    hasPromoDescription: !!scenario.game.promoDescription,
-                    hasWorldRules: !!scenario.game.worldRules,
-                    hasGameplayRules: !!scenario.game.gameplayRules
-                  });
+                try {
+                  const chunkData = JSON.parse(cleaned);
+                  
+                  // Для первого чанка сохраняем данные игры
+                  if (isFirstChunk && chunkData.game) {
+                    gameDataFromFirstChunk = chunkData.game;
+                  }
+                  
+                  // Собираем локации, выходы и персонажей из всех чанков
+                  if (Array.isArray(chunkData.locations) && chunkData.locations.length > 0) {
+                    allLocations.push(...chunkData.locations);
+                  }
+                  if (Array.isArray(chunkData.exits) && chunkData.exits.length > 0) {
+                    allExits.push(...chunkData.exits);
+                  }
+                  if (Array.isArray(chunkData.characters) && chunkData.characters.length > 0) {
+                    allCharacters.push(...chunkData.characters);
+                  }
+                  
+                  console.log(`[INGEST-IMPORT] Stage 2: Chunk ${chunkIdx + 1} processed - locations: ${chunkData.locations?.length || 0}, exits: ${chunkData.exits?.length || 0}, characters: ${chunkData.characters?.length || 0}`);
+                } catch (parseError) {
+                  console.error(`[INGEST-IMPORT] Stage 2: Failed to parse JSON for chunk ${chunkIdx + 1}:`, parseError);
                 }
-                if (Array.isArray(gameData.locations) && gameData.locations.length > 0) {
-                  scenario.locations = gameData.locations;
-                  console.log('[INGEST-IMPORT] Locations assigned:', gameData.locations.length);
-                }
-                if (Array.isArray(gameData.exits) && gameData.exits.length > 0) {
-                  scenario.exits = gameData.exits;
-                  console.log('[INGEST-IMPORT] Exits assigned:', gameData.exits.length);
-                }
-                // Добавляем персонажей из игры (обычно NPC)
-                if (Array.isArray(gameData.characters) && gameData.characters.length > 0) {
-                  scenario.characters.push(...gameData.characters);
-                  console.log('[INGEST-IMPORT] NPCs extracted from game:', gameData.characters.length);
-                }
-              } catch (parseError) {
-                console.error('[INGEST-IMPORT] JSON parse error:', parseError);
-                console.error('[INGEST-IMPORT] Failed JSON content:', cleaned.slice(0, 1000));
               }
-            } else {
-              console.error('[INGEST-IMPORT] AI response does not contain JSON or is empty');
-              console.error('[INGEST-IMPORT] Full response:', content);
             }
+            
+            // Объединяем результаты из всех чанков
+            if (gameDataFromFirstChunk) {
+              const existingRules = {
+                worldRules: scenario.game.worldRules,
+                gameplayRules: scenario.game.gameplayRules
+              };
+              Object.assign(scenario.game, gameDataFromFirstChunk);
+              if (existingRules.worldRules) scenario.game.worldRules = existingRules.worldRules;
+              if (existingRules.gameplayRules) scenario.game.gameplayRules = existingRules.gameplayRules;
+            }
+            
+            if (allLocations.length > 0) {
+              scenario.locations = allLocations;
+              console.log(`[INGEST-IMPORT] Stage 2: Total locations from all chunks: ${allLocations.length}`);
+            }
+            if (allExits.length > 0) {
+              scenario.exits = allExits;
+              console.log(`[INGEST-IMPORT] Stage 2: Total exits from all chunks: ${allExits.length}`);
+            }
+            if (allCharacters.length > 0) {
+              scenario.characters.push(...allCharacters);
+              console.log(`[INGEST-IMPORT] Stage 2: Total characters from all chunks: ${allCharacters.length}`);
+            }
+            
+            console.log(`[INGEST-IMPORT] Stage 2 complete: Scenario processed from ${scenarioChunks.length} chunks`);
           } catch (e) {
             console.error('[INGEST-IMPORT] Game analysis failed:', e);
             console.error('[INGEST-IMPORT] Error stack:', (e as Error).stack);
@@ -4425,8 +4489,8 @@ async function generateViaGeminiText(params: {
   
   const proxies = parseGeminiProxies();
   const attempts = proxies.length ? proxies : ['__direct__'];
-  // Для импорта нужен больший таймаут, так как обрабатываются большие файлы (до 5 минут)
-  const timeoutMs = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 300000);
+  // Для импорта нужен больший таймаут, так как обрабатываются большие файлы (до 10 минут)
+  const timeoutMs = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 600000);
   const contents = history.map(h => ({
     role: h.role === 'assistant' || h.role === 'model' ? 'model' : 'user',
     parts: [{ text: h.content }]
@@ -4458,7 +4522,7 @@ async function generateViaGeminiText(params: {
         }
         
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), Math.max(30000, timeoutMs));
+        const timer = setTimeout(() => controller.abort(), Math.max(60000, timeoutMs));
         const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
         const r = await undiciFetch(url, {
           method: 'POST',
