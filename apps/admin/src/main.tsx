@@ -166,76 +166,6 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>
-          <div style={{ 
-            padding: '16px', 
-            backgroundColor: '#e7f3ff', 
-            borderRadius: '8px', 
-            border: '1px solid #b3d9ff',
-            marginBottom: '8px'
-          }}>
-            <div style={{ fontSize: '15px', fontWeight: 600, color: '#0056b3', marginBottom: '12px' }}>
-              📋 ВАЖНО: Порядок загрузки файлов
-            </div>
-            <div style={{ display: 'grid', gap: '10px', fontSize: '14px', color: '#212529' }}>
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                <span style={{ 
-                  display: 'inline-flex', 
-                  alignItems: 'center', 
-                  justifyContent: 'center',
-                  width: '24px', 
-                  height: '24px', 
-                  backgroundColor: '#0056b3', 
-                  color: '#fff', 
-                  borderRadius: '50%', 
-                  fontSize: '12px', 
-                  fontWeight: 700,
-                  flexShrink: 0
-                }}>1</span>
-                <div>
-                  <strong>Первый файл:</strong> ПРАВИЛА ИГРЫ (правила мира, игровой процесс)
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                <span style={{ 
-                  display: 'inline-flex', 
-                  alignItems: 'center', 
-                  justifyContent: 'center',
-                  width: '24px', 
-                  height: '24px', 
-                  backgroundColor: '#0056b3', 
-                  color: '#fff', 
-                  borderRadius: '50%', 
-                  fontSize: '12px', 
-                  fontWeight: 700,
-                  flexShrink: 0
-                }}>2</span>
-                <div>
-                  <strong>Второй файл:</strong> ИГРА И СЦЕНАРИЙ (сюжет, локации, раздел "Приложение В. Статистика НИП")
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                <span style={{ 
-                  display: 'inline-flex', 
-                  alignItems: 'center', 
-                  justifyContent: 'center',
-                  width: '24px', 
-                  height: '24px', 
-                  backgroundColor: '#0056b3', 
-                  color: '#fff', 
-                  borderRadius: '50%', 
-                  fontSize: '12px', 
-                  fontWeight: 700,
-                  flexShrink: 0
-                }}>3+</span>
-                <div>
-                  <strong>Третий и далее:</strong> ПЕРСОНАЖИ (карточки формата Long Story Short, неограниченное количество)
-                </div>
-              </div>
-            </div>
-            <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #b3d9ff', fontSize: '13px', color: '#6c757d' }}>
-              💡 Все файлы объединятся в одну игру. ИИ автоматически извлечёт правила, локации, персонажей и их характеристики.
-            </div>
-          </div>
           <div className="muted">При желании заполните поля ниже для перезаписи метаданных.</div>
           <input placeholder="Название (опц.)" value={title} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)} />
           <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
@@ -266,7 +196,7 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
               onMouseLeave={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1f6feb'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(31, 111, 235, 0.3)'; e.currentTarget.style.transform = 'translateY(0)'; } }}
             >
               <span style={{ fontSize: '20px' }}>📄</span>
-              <span>Выбрать PDF или TXT файлы (правила, игра, персонажи)</span>
+              <span>Выбрать PDF или TXT файл сценария</span>
             </div>
           </label>
           
@@ -276,76 +206,58 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
                 Выбранные файлы ({selectedFiles.length}):
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
-                {selectedFiles.map((file, index) => {
-                  let fileLabel = '';
-                  let labelColor = '#6c757d';
-                  if (index === 0) {
-                    fileLabel = 'ПРАВИЛА ИГРЫ';
-                    labelColor = '#0056b3';
-                  } else if (index === 1) {
-                    fileLabel = 'ИГРА И СЦЕНАРИЙ';
-                    labelColor = '#0056b3';
-                  } else {
-                    fileLabel = 'ПЕРСОНАЖ';
-                    labelColor = '#28a745';
-                  }
-                  
-                  return (
-                    <div key={`${file.name}-${index}`} style={{ 
-                      display: 'flex', 
+                {selectedFiles.map((file, index) => (
+                  <div key={`${file.name}-${index}`} style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: 10, 
+                    padding: '12px 14px', 
+                    backgroundColor: '#ffffff', 
+                    borderRadius: '6px',
+                    border: '1px solid #ced4da',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                  }}>
+                    <span style={{ 
+                      display: 'inline-flex', 
                       alignItems: 'center', 
-                      gap: 10, 
-                      padding: '12px 14px', 
-                      backgroundColor: '#ffffff', 
-                      borderRadius: '6px',
-                      border: '1px solid #ced4da',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                      justifyContent: 'center',
+                      width: '28px', 
+                      height: '28px', 
+                      backgroundColor: '#0056b3', 
+                      color: '#fff', 
+                      borderRadius: '50%', 
+                      fontSize: '13px', 
+                      fontWeight: 700,
+                      flexShrink: 0
                     }}>
-                      <span style={{ 
-                        display: 'inline-flex', 
-                        alignItems: 'center', 
-                        justifyContent: 'center',
-                        width: '28px', 
-                        height: '28px', 
-                        backgroundColor: labelColor, 
-                        color: '#fff', 
-                        borderRadius: '50%', 
-                        fontSize: '13px', 
-                        fontWeight: 700,
-                        flexShrink: 0
-                      }}>
-                        {index + 1}
-                      </span>
-                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <span style={{ fontSize: '14px', color: '#212529', fontWeight: 500, wordBreak: 'break-word' }}>{file.name}</span>
-                        <span style={{ fontSize: '11px', color: labelColor, fontWeight: 600 }}>{fileLabel}</span>
-                      </div>
-                      <span style={{ fontSize: '12px', color: '#6c757d', whiteSpace: 'nowrap', marginLeft: '8px' }}>
-                        {(file.size / 1024 / 1024).toFixed(2)} MB
-                      </span>
-                      {!busy && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); removeFile(index); }}
-                          style={{
-                            padding: '6px 12px',
-                            fontSize: '12px',
-                            backgroundColor: '#dc3545',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontWeight: 500,
-                            whiteSpace: 'nowrap'
-                          }}
-                          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#c82333'; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#dc3545'; }}
-                        >
-                          ✕ Удалить
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+                      {index + 1}
+                    </span>
+                    <span style={{ flex: 1, fontSize: '14px', color: '#212529', fontWeight: 500, wordBreak: 'break-word' }}>{file.name}</span>
+                    <span style={{ fontSize: '12px', color: '#6c757d', whiteSpace: 'nowrap', marginLeft: '8px' }}>
+                      {(file.size / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                    {!busy && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeFile(index); }}
+                        style={{
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          backgroundColor: '#dc3545',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontWeight: 500,
+                          whiteSpace: 'nowrap'
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#c82333'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#dc3545'; }}
+                      >
+                        ✕ Удалить
+                      </button>
+                    )}
+                  </div>
+                ))}
               </div>
               {!busy && (
                 <button
