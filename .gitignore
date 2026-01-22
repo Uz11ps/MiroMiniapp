@@ -6,3 +6,4 @@ server/.env
 .DS_Store
 *.md
 *.pdf
+tools/find-unmatched-braces.cjs
