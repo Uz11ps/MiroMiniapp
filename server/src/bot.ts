@@ -7,7 +7,7 @@ const token = process.env.BOT_TOKEN;
 if (!token) {
   // eslint-disable-next-line no-console
   console.error('BOT_TOKEN not set in .env');
-  process.exit(1);
+  throw new Error('BOT_TOKEN not set in .env');
 }
 const miniAppUrl = String(process.env.MINIAPP_URL || 'https://app.miraplay.ru');
 const ozonUrl = String(process.env.OZON_URL || 'https://ozon.ru/seller');
@@ -100,6 +100,10 @@ bot.start(async (ctx) => {
 bot.launch().then(() => {
   // eslint-disable-next-line no-console
   console.log('Bot started');
+}).catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error('Failed to launch bot:', err);
+  // Don't exit the process, let the server continue running
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));

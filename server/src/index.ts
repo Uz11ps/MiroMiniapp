@@ -1823,6 +1823,9 @@ app.post('/api/admin/scenario/import', async (req, res) => {
 
 const serverHttp = app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
+}).on('error', (err: Error) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
 
 type WsClient = { socket: WebSocket; userId: string };
@@ -1897,7 +1900,10 @@ if (process.env.BOT_TOKEN) {
     })
     .catch((err) => {
       console.error('Failed to start Telegram bot:', err);
+      // Don't exit - let the server continue running without the bot
     });
+} else {
+  console.log('BOT_TOKEN not set, skipping bot initialization');
 }
 
 app.get('/api/profile', async (req, res) => {
