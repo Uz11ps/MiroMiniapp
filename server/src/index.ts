@@ -4729,9 +4729,4 @@ app.post('/api/chat/dice', async (req, res) => {
   } catch {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
   }
-});
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Server is running on http://0.0.0.0:${port}`);
-});
-
+});}
