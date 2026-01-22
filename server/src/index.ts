@@ -1,37 +1,9 @@
 // @ts-nocheck
-// Set up error handlers FIRST, before any imports that might fail
-process.on('unhandledRejection', (err) => {
-  try { 
-    console.error('[unhandledRejection]', err);
-    if (err instanceof Error) {
-      console.error('[unhandledRejection] Stack:', err.stack);
-    }
-  } catch {}
-});
-process.on('uncaughtException', (err) => {
-  try { 
-    console.error('[uncaughtException]', err);
-    if (err instanceof Error) {
-      console.error('[uncaughtException] Stack:', err.stack);
-    }
-    // Don't exit on uncaught exception - let the server try to continue
-    // process.exit(1);
-  } catch {}
-});
-
-console.log('[SERVER] Starting server initialization...');
 import 'dotenv/config';
-console.log('[SERVER] dotenv loaded');
-
-console.log('[SERVER] Importing dependencies...');
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
-console.log('[SERVER] Basic imports done');
-
 import { games, createGame, updateGame, deleteGame, profile, friends, users, createUser, updateUser, deleteUser, feedbacks, subscriptionPlans, characters, createCharacter, updateCharacter, deleteCharacter } from './db.js';
-console.log('[SERVER] db.js imported');
-
 import OpenAI from 'openai';
 import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
 import pdfParse from 'pdf-parse';
@@ -43,20 +15,18 @@ import type { Game } from './types';
 import multer from 'multer';
 import { toFile } from 'openai/uploads';
 import crypto from 'crypto';
-console.log('[SERVER] All imports completed');
 
 const app = express();
 const port = process.env.PORT ? Number(process.env.PORT) : 4000;
-console.log(`[SERVER] Express app created, port: ${port}`);
 
-try {
-  app.use(cors());
-  app.use(express.json());
-  console.log('[SERVER] Middleware configured');
-} catch (e) {
-  console.error('[SERVER] Error configuring middleware:', e);
-  throw e;
-}
+app.use(cors());
+app.use(express.json());
+process.on('unhandledRejection', (err) => {
+  try { console.error('[unhandledRejection]', err); } catch {}
+});
+process.on('uncaughtException', (err) => {
+  try { console.error('[uncaughtException]', err); } catch {}
+});
 
 function normalizeProxyUrl(raw: string): string {
   const strip = (s: string) => s.trim().replace(/^['"]+|['"]+$/g, '');
@@ -128,7 +98,6 @@ function createOpenAIClient(apiKey: string) {
   return new OpenAI({ apiKey });
 }
 
-console.log('[SERVER] Initializing multer...');
 const upload = multer({ 
   storage: multer.memoryStorage(), 
   limits: { 
@@ -136,18 +105,9 @@ const upload = multer({
     files: 10 // max 10 files
   } 
 });
-console.log('[SERVER] Multer initialized');
-
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
-console.log(`[SERVER] Upload directory: ${UPLOAD_DIR}`);
-try { 
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true }); 
-  console.log('[SERVER] Upload directory created/verified');
-} catch (e) {
-  console.error('[SERVER] Failed to create upload directory:', e);
-}
+try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
 app.use('/uploads', express.static(UPLOAD_DIR));
-console.log('[SERVER] Static file serving configured');
 
 // -------------------- AI Prompts (runtime editable) --------------------
 type AiPrompts = {
@@ -170,7 +130,6 @@ const DEFAULT_SYSTEM_PROMPT =
   '10. ФОРМАТ: Отвечай короткими абзацами (3-7 строк). В конце выводи доступные действия.\n' +
   '11. ПРОВЕРКИ: Если ситуация требует броска кубиков, добавь в самый конец сообщения скрытый тег формата: [[ROLL: skill_or_attack_or_save, DC: 15]]. Это вызовет окно броска у игрока (для атаки DC=AC).\n' +
   '12. ГРУППА: В игре всегда 5 персонажей. Если живых игроков меньше, ты сам управляешь остальными персонажами как союзными NPC, делая за них ходы, броски и принимая решения в бою.';
-console.log('[SERVER] Loading AI prompts...');
 let aiPrompts: AiPrompts = { system: DEFAULT_SYSTEM_PROMPT };
 try {
   if (fs.existsSync(AI_PROMPTS_FILE)) {
@@ -178,55 +137,33 @@ try {
     const json = JSON.parse(raw);
     if (json && typeof json.system === 'string' && json.system.trim()) {
       aiPrompts.system = json.system;
-      console.log('[SERVER] AI prompts loaded from file');
     }
-  } else {
-    console.log('[SERVER] AI prompts file not found, using defaults');
   }
-} catch (e) {
-  console.error('[SERVER] Failed to load AI prompts:', e);
-}
-console.log('[SERVER] AI prompts initialized');
-process.stdout.write('[SERVER] About to define getSysPrompt function...\n');
-process.stdout.flush && process.stdout.flush();
+} catch {}
 function getSysPrompt(): string {
   return aiPrompts.system || DEFAULT_SYSTEM_PROMPT;
 }
-console.log('[SERVER] getSysPrompt function defined');
-console.log('[SERVER] Registering AI prompts routes...');
-try {
-  app.get('/api/admin/ai-prompts', async (_req, res) => {
-    return res.json({ system: getSysPrompt() });
-  });
-  app.post('/api/admin/ai-prompts', async (req, res) => {
+app.get('/api/admin/ai-prompts', async (_req, res) => {
+  return res.json({ system: getSysPrompt() });
+});
+app.post('/api/admin/ai-prompts', async (req, res) => {
+  try {
+    const system = typeof req.body?.system === 'string' ? req.body.system.trim() : '';
+    if (!system || system.length < 20) return res.status(400).json({ error: 'system_prompt_too_short' });
+    aiPrompts.system = system;
     try {
-      const system = typeof req.body?.system === 'string' ? req.body.system.trim() : '';
-      if (!system || system.length < 20) return res.status(400).json({ error: 'system_prompt_too_short' });
-      aiPrompts.system = system;
-      try {
-        fs.mkdirSync(path.dirname(AI_PROMPTS_FILE), { recursive: true });
-        fs.writeFileSync(AI_PROMPTS_FILE, JSON.stringify({ system }, null, 2), 'utf8');
-      } catch {}
-      return res.json({ ok: true });
-    } catch {
-      return res.status(500).json({ error: 'failed_to_save_prompts' });
-    }
-  });
-  console.log('[SERVER] AI prompts routes registered');
-} catch (e) {
-  console.error('[SERVER] Error registering AI prompts routes:', e);
-  if (e instanceof Error) {
-    console.error('[SERVER] Error stack:', e.stack);
+      fs.mkdirSync(path.dirname(AI_PROMPTS_FILE), { recursive: true });
+      fs.writeFileSync(AI_PROMPTS_FILE, JSON.stringify({ system }, null, 2), 'utf8');
+    } catch {}
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: 'failed_to_save_prompts' });
   }
-  throw e;
-}
-
+});
 app.get('/', (_req, res) => {
   res.type('text/plain').send('MIRA API. Health: /api/health, Games: /api/games, Profile: /api/profile');
 });
-console.log('[SERVER] Root route registered');
 
-console.log('[SERVER] Registering debug route...');
 app.post('/api/debug/openai', async (req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
@@ -255,35 +192,20 @@ app.post('/api/debug/openai', async (req, res) => {
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
-console.log('[SERVER] Health route registered');
-process.stdout.write && process.stdout.write('');
-process.stderr.write && process.stderr.write('');
 
-console.log('[SERVER] About to register /api/games route...');
-try {
-  console.log('[SERVER] Registering /api/games route...');
-  app.get('/api/games', async (_req, res) => {
-    try {
-      const prisma = getPrisma();
-      const list = await prisma.game.findMany({
-        where: { status: 'PUBLISHED' as any },
-        select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true }
-      });
-      res.json(list);
-    } catch {
-      res.json(games.map(({ rules, gallery, editions, ...short }) => short));
-    }
-  });
-  console.log('[SERVER] /api/games route registered');
-} catch (e) {
-  console.error('[SERVER] Error registering /api/games route:', e);
-  if (e instanceof Error) {
-    console.error('[SERVER] Error stack:', e.stack);
+app.get('/api/games', async (_req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.game.findMany({
+      where: { status: 'PUBLISHED' as any },
+      select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true }
+    });
+    res.json(list);
+  } catch {
+    res.json(games.map(({ rules, gallery, editions, ...short }) => short));
   }
-  throw e;
-}
+});
 
-console.log('[SERVER] Registering /api/games/:id route...');
 app.get('/api/games/:id', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -357,80 +279,48 @@ app.delete('/api/games/:id', async (req, res) => {
     res.status(204).end();
   }
 });
-console.log('[SERVER] DELETE /api/games/:id route registered');
 
-console.log('[SERVER] Registering admin games routes...');
-try {
-  app.get('/api/admin/games', async (_req, res) => {
-    try {
-      const prisma = getPrisma();
-      const list = await prisma.game.findMany({ select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true, status: true, createdAt: true } });
-      return res.json(list);
-    } catch {
-      return res.json(games.map(({ rules, gallery, editions, ...short }) => ({ ...short, status: 'PUBLISHED', createdAt: new Date().toISOString() })));
-    }
-  });
-  console.log('[SERVER] GET /api/admin/games route registered');
-} catch (e) {
-  console.error('[SERVER] Error registering GET /api/admin/games route:', e);
-  if (e instanceof Error) {
-    console.error('[SERVER] Error stack:', e.stack);
+app.get('/api/admin/games', async (_req, res) => {
+  try {
+    const prisma = getPrisma();
+    const list = await prisma.game.findMany({ select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true, status: true, createdAt: true } });
+    return res.json(list);
+  } catch {
+    return res.json(games.map(({ rules, gallery, editions, ...short }) => ({ ...short, status: 'PUBLISHED', createdAt: new Date().toISOString() })));
   }
-  throw e;
-}
+});
 
-console.log('[SERVER] Registering GET /api/admin/games/:id/full route...');
-try {
-  app.get('/api/admin/games/:id/full', async (req, res) => {
-    try {
-      const prisma = getPrisma();
-      const game = await prisma.game.findUnique({
-        where: { id: req.params.id },
-        include: {
-          editions: true,
-          locations: {
-            orderBy: { order: 'asc' },
-            include: { exits: true },
-          },
-          characters: true,
+app.get('/api/admin/games/:id/full', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({
+      where: { id: req.params.id },
+      include: {
+        editions: true,
+        locations: {
+          orderBy: { order: 'asc' },
+          include: { exits: true },
         },
-      });
-      if (!game) return res.status(404).json({ error: 'Not found' });
-      return res.json(game);
-    } catch (e) {
-      return res.status(500).json({ error: 'failed_to_load', details: String(e) });
-    }
-  });
-  console.log('[SERVER] GET /api/admin/games/:id/full route registered');
-} catch (e) {
-  console.error('[SERVER] Error registering GET /api/admin/games/:id/full route:', e);
-  if (e instanceof Error) {
-    console.error('[SERVER] Error stack:', e.stack);
+        characters: true,
+      },
+    });
+    if (!game) return res.status(404).json({ error: 'Not found' });
+    return res.json(game);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_load', details: String(e) });
   }
-  throw e;
-}
+});
 
-console.log('[SERVER] Registering PATCH /api/admin/games/:id route...');
-try {
-  app.patch('/api/admin/games/:id', async (req, res) => {
-    try {
-      const prisma = getPrisma();
-      const updated = await prisma.game.update({ where: { id: req.params.id }, data: req.body });
-      return res.json(updated);
-    } catch (e) {
-      return res.status(500).json({ error: 'failed_to_update', details: String(e) });
-    }
-  });
-  console.log('[SERVER] PATCH /api/admin/games/:id route registered');
-} catch (e) {
-  console.error('[SERVER] Error registering PATCH /api/admin/games/:id route:', e);
-  if (e instanceof Error) {
-    console.error('[SERVER] Error stack:', e.stack);
+app.patch('/api/admin/games/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const updated = await prisma.game.update({ where: { id: req.params.id }, data: req.body });
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: 'failed_to_update', details: String(e) });
   }
-  throw e;
-}
+});
 
-console.log('[SERVER] Registering locations routes...');
 app.get('/api/games/:id/locations', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -479,9 +369,7 @@ app.delete('/api/locations/:locId', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_delete', details: String(e) });
   }
 });
-console.log('[SERVER] Locations routes registered');
 
-console.log('[SERVER] Registering exits routes...');
 app.get('/api/locations/:locId/exits', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -554,9 +442,7 @@ app.delete('/api/exits/:exitId', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_delete_exit', details: String(e) });
   }
 });
-console.log('[SERVER] Exits routes registered');
 
-console.log('[SERVER] Registering editions routes...');
 app.get('/api/games/:id/editions', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -609,9 +495,7 @@ app.delete('/api/editions/:id', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_delete_edition' });
   }
 });
-console.log('[SERVER] Editions routes registered');
 
-console.log('[SERVER] Registering upload route...');
 app.post('/api/admin/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
@@ -778,6 +662,7 @@ function parseCharacterCards(srcText: string): Array<any> {
     }
     if (chars.length > 0) break; // Если нашли хотя бы одного персонажа, используем этот формат
   }
+}
   
   // Вариант 2: Поиск в блоке "Статистика НИП" или "Персонажи" с построчным парсингом
   if (chars.length === 0) {
@@ -1640,9 +1525,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
     return res.status(500).json({ error: 'ingest_start_failed', details: errorMsg });
   }
 });
-console.log('[SERVER] Ingest-import route registered');
 
-console.log('[SERVER] Registering ingest-import status route...');
 app.get('/api/admin/ingest-import/:id', async (req, res) => {
   const j = ingestJobs.get(req.params.id);
   if (!j) return res.status(404).json({ error: 'not_found' });
@@ -1939,25 +1822,9 @@ app.post('/api/admin/scenario/import', async (req, res) => {
   }
 });
 
-console.log('[SERVER] All routes registered');
-console.log('[SERVER] Starting HTTP server...');
-let serverHttp: any;
-try {
-  serverHttp = app.listen(port, () => {
-    console.log(`[SERVER] Server listening on http://localhost:${port}`);
-  }).on('error', (err: Error) => {
-    console.error('[SERVER] Failed to start server:', err);
-    console.error('[SERVER] Error stack:', err.stack);
-    process.exit(1);
-  });
-  console.log('[SERVER] HTTP server setup completed');
-} catch (err) {
-  console.error('[SERVER] Fatal error during server startup:', err);
-  if (err instanceof Error) {
-    console.error('[SERVER] Error stack:', err.stack);
-  }
-  process.exit(1);
-}
+const serverHttp = app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Server is running on http://0.0.0.0:${port}`);
+});
 
 type WsClient = { socket: WebSocket; userId: string };
 const userIdToSockets = new Map<string, Set<WebSocket>>();
@@ -1981,9 +1848,7 @@ async function wsNotifyLobby(lobbyId: string, event: unknown) {
   } catch {}
 }
 
-console.log('[SERVER] Setting up WebSocket server...');
 const wss = new WebSocketServer({ server: serverHttp, path: '/ws' });
-console.log('[SERVER] WebSocket server setup completed');
 wss.on('connection', async (socket, req) => {
   try {
     const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
@@ -2033,10 +1898,7 @@ if (process.env.BOT_TOKEN) {
     })
     .catch((err) => {
       console.error('Failed to start Telegram bot:', err);
-      // Don't exit - let the server continue running without the bot
     });
-} else {
-  console.log('BOT_TOKEN not set, skipping bot initialization');
 }
 
 app.get('/api/profile', async (req, res) => {
@@ -2267,9 +2129,7 @@ app.get('/api/feedback', async (_req, res) => {
     res.json(feedbacks);
   }
 });
-console.log('[SERVER] Feedback routes registered');
 
-console.log('[SERVER] Registering users routes...');
 app.get('/api/users', async (req, res) => {
   const q = String(req.query.q || '').toLowerCase();
   const page = Number(req.query.page || 1);
@@ -3428,9 +3288,7 @@ app.delete('/api/chat/history', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_reset' });
   }
 });
-console.log('[SERVER] Chat routes registered');
 
-console.log('[SERVER] Registering engine routes...');
 app.post('/api/engine/session/start', async (req, res) => {
   const gameId = String(req.body?.gameId || '');
   const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
@@ -4873,5 +4731,3 @@ app.post('/api/chat/dice', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
   }
 });
-console.log('[SERVER] Chat dice route registered');
-}
