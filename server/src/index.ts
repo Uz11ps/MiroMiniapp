@@ -75,7 +75,7 @@ function createProxiedFetchForOpenAI(proxies: string[], timeoutMs: number) {
       try {
         const controller = new AbortController();
         controllers.push(controller);
-        const timer = setTimeout(() => controller.abort(), Math.max(5000, timeoutMs));
+        const timer = setTimeout(() => controller.abort(), Math.max(30000, timeoutMs));
         const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
         const res = await undiciFetch(input as any, { ...(init as any), dispatcher, signal: controller.signal });
         clearTimeout(timer);
@@ -1199,14 +1199,14 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
 ФАЙЛ 1: ПРАВИЛА ИГРЫ
 ═══════════════════════════════════════════════════════════════════════════════
 ---
-${cleanRulesText.slice(0, 50000)}
+${cleanRulesText}
 ---
 
 ═══════════════════════════════════════════════════════════════════════════════
 ФАЙЛ 2: СЦЕНАРИЙ ИГРЫ
 ═══════════════════════════════════════════════════════════════════════════════
 ---
-${cleanScenarioText.slice(0, 100000)}
+${cleanScenarioText}
 ---
 
 Верни только JSON без комментариев, строго формы:
@@ -4287,7 +4287,8 @@ async function generateViaGeminiText(params: {
   
   const proxies = parseGeminiProxies();
   const attempts = proxies.length ? proxies : ['__direct__'];
-  const timeoutMs = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 20000);
+  // Для импорта нужен больший таймаут, так как обрабатываются большие файлы (до 5 минут)
+  const timeoutMs = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 300000);
   const contents = history.map(h => ({
     role: h.role === 'assistant' || h.role === 'model' ? 'model' : 'user',
     parts: [{ text: h.content }]
@@ -4309,7 +4310,7 @@ async function generateViaGeminiText(params: {
   for (const p of attempts) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Math.max(5000, timeoutMs));
+      const timer = setTimeout(() => controller.abort(), Math.max(30000, timeoutMs));
       const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
       const r = await undiciFetch(url, {
         method: 'POST',
