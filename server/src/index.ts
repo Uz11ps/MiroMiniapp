@@ -1219,7 +1219,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           try {
             const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО сценарий игры. Верни строго JSON без комментариев.';
             const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
-            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${gameText.slice(0, 100000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nИНСТРУКЦИИ:\n1. Извлеки название игры из заголовка или начала документа → game.title\n2. Извлеки описание игры → game.description\n3. Извлеки разделы "Введение", "Предыстория", "Зацепки приключения" → game.introduction, game.backstory, game.adventureHooks\n4. Извлеки условия победы/поражения/смерти (если есть) → game.winCondition, game.loseCondition, game.deathCondition\n5. Найди ВСЕ локации/сцены/главы (8-14 локаций) → locations[] с title, description, rulesPrompt\n6. Создай переходы между локациями (последовательная цепочка) → exits[]\n7. Если есть раздел "Приложение В. Статистика НИП" или "Статистика НИП" - извлеки ВСЕХ NPC с полной статистикой D&D 5e → characters[] (isPlayable: false для NPC)\n8. Опирайся на D&D 5e и единый мир\n9. Верни только JSON, никаких комментариев`;
+            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${gameText.slice(0, 100000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nКРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ ПО ИЗВЛЕЧЕНИЮ РАЗДЕЛОВ:\n\n1. НАЗВАНИЕ И ОПИСАНИЕ:\n   - game.title: извлеки из заголовка документа или первой строки (НЕ придумывай!)\n   - game.description: краткое описание игры (2-3 предложения)\n\n2. РАЗДЕЛ "ВВЕДЕНИЕ" (game.introduction):\n   - ИЩИ ТОЧНО: "Введение", "ВВЕДЕНИЕ", "Introduction", "Вступление"\n   - Это может быть отдельная глава или раздел\n   - Извлеки ВЕСЬ текст этого раздела от заголовка до следующего раздела\n   - Если раздела нет - верни null, НЕ придумывай!\n\n3. РАЗДЕЛ "ПРЕДЫСТОРИЯ" (game.backstory):\n   - ИЩИ ТОЧНО: "Предыстория", "ПРЕДЫСТОРИЯ", "Backstory", "История", "История мира"\n   - Это может быть отдельная глава или раздел\n   - Извлеки ВЕСЬ текст этого раздела от заголовка до следующего раздела\n   - Если раздела нет - верни null, НЕ придумывай!\n\n4. РАЗДЕЛ "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ" (game.adventureHooks):\n   - ИЩИ ТОЧНО: "Зацепки приключения", "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ", "Adventure Hooks", "Крючки", "Зацепки"\n   - Это может быть отдельная глава или раздел\n   - Извлеки ВЕСЬ текст этого раздела от заголовка до следующего раздела\n   - Если раздела нет - верни null, НЕ придумывай!\n\n5. УСЛОВИЯ ФИНАЛА:\n   - game.winCondition: "Условия победы" или "Победа"\n   - game.loseCondition: "Условия поражения" или "Поражение"\n   - game.deathCondition: "Условия смерти" или "Смерть"\n\n6. ЛОКАЦИИ (8-14 локаций):\n   - Ищи разделы: "Глава", "Часть", "Сцена", "Локация", нумерованные списки (1., 2., 3.)\n   - Каждая локация: key="loc1", order=1, title="Название", description="Описание (2-3 предложения)", rulesPrompt="Правила для этой локации"\n\n7. ПЕРЕХОДЫ МЕЖДУ ЛОКАЦИЯМИ:\n   - exits[]: создай переходы от loc1 → loc2, loc2 → loc3, и т.д.\n\n8. NPC (если есть раздел "Приложение В. Статистика НИП"):\n   - characters[]: извлеки ВСЕХ NPC с полной статистикой D&D 5e (isPlayable: false)\n\n9. Верни ТОЛЬКО JSON, никаких комментариев!`;
             
             const { text: content } = await generateChatCompletion({
               systemPrompt: sys,
@@ -1380,9 +1380,29 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
             const s = acc.join('\n').trim();
             return s ? s.slice(0, 6000) : null;
           };
-          if (!out.game.introduction) out.game.introduction = pickBlock(/(^|\n)\s*Введение\s*$/im, 'intro') || null;
-          if (!out.game.backstory) out.game.backstory = pickBlock(/(^|\n)\s*Предыстория\s*$/im, 'back') || null;
-          if (!out.game.adventureHooks) out.game.adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*$/im, 'hooks') || null;
+          // Извлекаем разделы с улучшенными паттернами (fallback, если AI не извлек)
+          if (!out.game.introduction || out.game.introduction.length < 50) {
+            out.game.introduction = pickBlock(/(^|\n)\s*Введение\s*($|\n|:)/im, 'intro') || 
+                                     pickBlock(/(^|\n)\s*ВВЕДЕНИЕ\s*($|\n|:)/im, 'intro') ||
+                                     pickBlock(/(^|\n)\s*Introduction\s*($|\n|:)/im, 'intro') ||
+                                     null;
+          }
+          
+          if (!out.game.backstory || out.game.backstory.length < 50) {
+            out.game.backstory = pickBlock(/(^|\n)\s*Предыстория\s*($|\n|:)/im, 'back') ||
+                                 pickBlock(/(^|\n)\s*ПРЕДЫСТОРИЯ\s*($|\n|:)/im, 'back') ||
+                                 pickBlock(/(^|\n)\s*Backstory\s*($|\n|:)/im, 'back') ||
+                                 pickBlock(/(^|\n)\s*История\s*($|\n|:)/im, 'back') ||
+                                 null;
+          }
+          
+          if (!out.game.adventureHooks || out.game.adventureHooks.length < 50) {
+            out.game.adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*($|\n|:)/im, 'hooks') ||
+                                       pickBlock(/(^|\n)\s*ЗАЦЕПКИ[^\n]*ПРИКЛЮЧЕНИЯ\s*($|\n|:)/im, 'hooks') ||
+                                       pickBlock(/(^|\n)\s*Adventure[^\n]*Hooks\s*($|\n|:)/im, 'hooks') ||
+                                       pickBlock(/(^|\n)\s*Крючки\s*($|\n|:)/im, 'hooks') ||
+                                       null;
+          }
           if (!out.game.winCondition) out.game.winCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+побед[ыы]\s*$/im) || pickBlock(/(^|\n)\s*Побед[аы]\s*$/im) || null;
           if (!out.game.loseCondition) out.game.loseCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+поражени[яя]\s*$/im) || pickBlock(/(^|\n)\s*Поражени[ея]\s*$/im) || null;
           if (!out.game.deathCondition) out.game.deathCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+смерти\s*$/im) || pickBlock(/(^|\n)\s*Смерть\s*$/im) || null;
