@@ -1173,37 +1173,98 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           console.log('[INGEST-IMPORT] Scenario text length:', cleanScenarioText.length);
           console.log('[INGEST-IMPORT] Rules text preview:', cleanRulesText.slice(0, 200));
           console.log('[INGEST-IMPORT] Scenario text preview:', cleanScenarioText.slice(0, 200));
+          
+          // ЭТАП 1: Анализ правил игры
+          console.log('[INGEST-IMPORT] Stage 1: Analyzing rules...');
           try {
-            const sys = `Ты интеллектуальный ассистент для анализа настольных ролевых игр D&D 5e.
+            const rulesSys = `Ты интеллектуальный ассистент для анализа правил настольных ролевых игр D&D 5e.
+Твоя задача - извлечь из файла правил два типа информации:
+1. ПРАВИЛА МИРА (worldRules) - описание сеттинга, мира, вселенной
+2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules) - механики игры, как играть`;
 
-Твоя задача - ПОНЯТЬ СЕМАНТИЧЕСКИЙ СМЫСЛ каждого элемента в двух документах (правила и сценарий) и правильно сопоставить их с полями на фронтенде.
+            const rulesShape = '{ "worldRules": "...", "gameplayRules": "..." }';
+            const rulesPrompt = `Проанализируй файл ПРАВИЛ ИГРЫ для настольной ролевой игры D&D 5e:
+
+═══════════════════════════════════════════════════════════════════════════════
+ФАЙЛ: ПРАВИЛА ИГРЫ
+═══════════════════════════════════════════════════════════════════════════════
+---
+${cleanRulesText}
+---
+
+ИЗВЛЕКИ:
+
+1. ПРАВИЛА МИРА (worldRules):
+   - Описание сеттинга, мира, вселенной
+   - География, история мира, культура, религия
+   - Особенности мира, магия, технологии
+   - Политическая система, фракции, организации
+   - ВСЁ, что описывает МИР, в котором происходит игра
+
+2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules):
+   - Механики игры, правила боя, навыки
+   - Система характеристик, бросков кубиков
+   - Правила взаимодействия, диалогов, исследований
+   - Специальные механики для этой игры
+   - ВСЁ, что описывает КАК играть
+
+Верни только JSON без комментариев, строго формы:
+${rulesShape}
+
+ВАЖНО: Извлекай полностью, не обрезай текст!`;
+
+            const rulesResult = await generateChatCompletion({
+              systemPrompt: rulesSys,
+              userPrompt: rulesPrompt,
+              history: []
+            });
+            
+            if (rulesResult?.text) {
+              let rulesContent = rulesResult.text.trim();
+              if (rulesContent.includes('{')) {
+                const startIdx = rulesContent.indexOf('{');
+                const endIdx = rulesContent.lastIndexOf('}');
+                if (startIdx >= 0 && endIdx >= 0) {
+                  rulesContent = rulesContent.slice(startIdx, endIdx + 1);
+                  try {
+                    const rulesData = JSON.parse(rulesContent);
+                    if (rulesData.worldRules) scenario.game.worldRules = rulesData.worldRules;
+                    if (rulesData.gameplayRules) scenario.game.gameplayRules = rulesData.gameplayRules;
+                    console.log('[INGEST-IMPORT] Stage 1 complete: Rules extracted');
+                  } catch (e) {
+                    console.error('[INGEST-IMPORT] Stage 1: Failed to parse rules JSON:', e);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error('[INGEST-IMPORT] Stage 1: Rules analysis failed:', e);
+          }
+          
+          // ЭТАП 2: Анализ сценария игры
+          console.log('[INGEST-IMPORT] Stage 2: Analyzing scenario...');
+          try {
+            const sys = `Ты интеллектуальный ассистент для анализа сценариев настольных ролевых игр D&D 5e.
+
+Твоя задача - ПОНЯТЬ СЕМАНТИЧЕСКИЙ СМЫСЛ каждого элемента в сценарии и правильно сопоставить их с полями на фронтенде.
 
 НА ФРОНТЕНДЕ ЕСТЬ СЛЕДУЮЩИЕ РАЗДЕЛЫ:
 1. "Описание и промо" → game.promoDescription
 2. "Введение" → game.introduction (начальная сцена для игроков)
 3. "Предыстория" → game.backstory (история мира до начала игры)
 4. "Зацепки приключения" → game.adventureHooks (способы начать приключение)
-5. "Правила мира" → game.worldRules (из файла правил)
-6. "Правила игрового процесса" → game.gameplayRules (из файла правил)
-7. "Локации" → locations[] (из файла сценария)
-8. "Персонажи" → characters[] (NPC из файла сценария)
-9. "Условия финала" → winCondition, loseCondition, deathCondition
+5. "Локации" → locations[] (из файла сценария)
+6. "Персонажи" → characters[] (NPC из файла сценария)
+7. "Условия финала" → winCondition, loseCondition, deathCondition
 
 Ты должен РАСПОЗНАТЬ смысл каждого элемента и правильно сопоставить его с нужным полем, понимая КОНТЕКСТ и НАЗНАЧЕНИЕ каждого поля.`;
 
-            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","parentKey":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":"фраза для перехода","toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","role":"...","origin":"...","persona":"...","abilities":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","parentKey":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":"фраза для перехода","toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","role":"...","origin":"...","persona":"...","abilities":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
             
-            const prompt = `Ты анализируешь ДВА документа для настольной ролевой игры D&D 5e:
+            const prompt = `Проанализируй файл СЦЕНАРИЯ ИГРЫ для настольной ролевой игры D&D 5e:
 
 ═══════════════════════════════════════════════════════════════════════════════
-ФАЙЛ 1: ПРАВИЛА ИГРЫ
-═══════════════════════════════════════════════════════════════════════════════
----
-${cleanRulesText}
----
-
-═══════════════════════════════════════════════════════════════════════════════
-ФАЙЛ 2: СЦЕНАРИЙ ИГРЫ
+ФАЙЛ: СЦЕНАРИЙ ИГРЫ
 ═══════════════════════════════════════════════════════════════════════════════
 ---
 ${cleanScenarioText}
@@ -1216,47 +1277,31 @@ ${shape}
 СЕМАНТИЧЕСКОЕ ОПИСАНИЕ ПОЛЕЙ И ИНСТРУКЦИИ ПО РАСПОЗНАВАНИЮ
 ═══════════════════════════════════════════════════════════════════════════════
 
-ИЗ ФАЙЛА ПРАВИЛ ИЗВЛЕКИ:
-
-1. ПРАВИЛА МИРА (game.worldRules):
-   - Описание сеттинга, мира, вселенной
-   - География, история мира, культура, религия
-   - Особенности мира, магия, технологии
-   - Политическая система, фракции, организации
-   - ВСЁ, что описывает МИР, в котором происходит игра
-
-2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (game.gameplayRules):
-   - Механики игры, правила боя, навыки
-   - Система характеристик, бросков кубиков
-   - Правила взаимодействия, диалогов, исследований
-   - Специальные механики для этой игры
-   - ВСЁ, что описывает КАК играть
-
 ИЗ ФАЙЛА СЦЕНАРИЯ ИЗВЛЕКИ:
 
-3. ПРОМО ОПИСАНИЕ (game.promoDescription):
+1. ПРОМО ОПИСАНИЕ (game.promoDescription):
    - Текст ПЕРЕД первым разделом "Введение"
    - Краткое привлекательное описание (2-4 предложения)
    - Художественный текст, который "продает" игру
    - Может начинаться с большой декоративной буквы
 
-4. ВВЕДЕНИЕ (game.introduction):
+2. ВВЕДЕНИЕ (game.introduction):
    - РЕАЛЬНОЕ введение - описание начальной сцены
    - Где находятся персонажи, что они видят
    - Начинается с "Вы прибываете...", "Вы оказываетесь..."
    - НЕ метаинформация про уровень персонажей!
 
-5. ПРЕДЫСТОРИЯ (game.backstory):
+3. ПРЕДЫСТОРИЯ (game.backstory):
    - История мира/событий ДО начала игры
    - События, которые привели к текущей ситуации
    - Политическая ситуация, конфликты
 
-6. ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ (game.adventureHooks):
+4. ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ (game.adventureHooks):
    - Способы начать приключение
    - Несколько вариантов (обычно 2-4)
    - Мотивация персонажей
 
-7. ЛОКАЦИИ (locations[]):
+5. ЛОКАЦИИ (locations[]):
    - Все разделы "Часть", "Глава", нумерованные подразделы
    - РАСПОЗНАВАЙ ЛОКАЦИИ И ПОДЛОКАЦИИ:
      * Основные локации: "Часть 1", "Глава 1", крупные разделы
@@ -1270,7 +1315,7 @@ ${shape}
      * Что нужно сделать для перехода дальше (условия перехода, необходимые действия)
    - Пример: "Вы находитесь в темном подземелье. В центре комнаты стоит алтарь с древними рунами. Чтобы открыть дверь, нужно активировать все руны на алтаре."
 
-8. ПЕРСОНАЖИ (characters[]):
+6. ПЕРСОНАЖИ (characters[]):
    - Раздел "Приложение В. Статистика НИП" или похожий
    - ВСЕХ NPC с полной статистикой D&D 5e
    - isPlayable: false для всех NPC
@@ -1285,7 +1330,7 @@ ${shape}
      * class: класс D&D 5e (воин, маг, жрец и т.д.)
      * level, hp, maxHp, ac, str, dex, con, int, wis, cha: полная статистика D&D 5e
 
-9. ВЫХОДЫ (exits[]):
+7. ВЫХОДЫ (exits[]):
    - Связи между локациями (переходы)
    - fromKey: ключ локации, откуда переход
    - toKey: ключ локации, куда переход
@@ -1297,7 +1342,7 @@ ${shape}
      * Генерируй 2-3 варианта фраз через запятую
    - isGameOver: true только если это конец игры
 
-10. УСЛОВИЯ ФИНАЛА:
+8. УСЛОВИЯ ФИНАЛА:
    - winCondition, loseCondition, deathCondition
    - Обычно в конце документа
 
@@ -1312,7 +1357,7 @@ ${shape}
 
 Верни ТОЛЬКО JSON, никаких комментариев!`;
             
-            console.log('[INGEST-IMPORT] Sending to AI, rulesText length:', cleanRulesText.length, 'scenarioText length:', cleanScenarioText.length);
+            console.log('[INGEST-IMPORT] Sending scenario to AI, scenarioText length:', cleanScenarioText.length);
             const result = await generateChatCompletion({
               systemPrompt: sys,
               userPrompt: prompt,
@@ -1359,9 +1404,16 @@ ${shape}
                   charactersCount: gameData.characters?.length || 0
                 });
                 
-                // Объединяем данные игры
+                // Объединяем данные игры (не перезаписываем правила, которые уже извлечены на этапе 1)
                 if (gameData.game) {
+                  const existingRules = {
+                    worldRules: scenario.game.worldRules,
+                    gameplayRules: scenario.game.gameplayRules
+                  };
                   Object.assign(scenario.game, gameData.game);
+                  // Восстанавливаем правила из этапа 1, если они были извлечены
+                  if (existingRules.worldRules) scenario.game.worldRules = existingRules.worldRules;
+                  if (existingRules.gameplayRules) scenario.game.gameplayRules = existingRules.gameplayRules;
                   console.log('[INGEST-IMPORT] Game data assigned:', {
                     title: scenario.game.title,
                     hasIntroduction: !!scenario.game.introduction,
