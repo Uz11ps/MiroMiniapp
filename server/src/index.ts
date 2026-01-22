@@ -1,9 +1,37 @@
 // @ts-nocheck
+// Set up error handlers FIRST, before any imports that might fail
+process.on('unhandledRejection', (err) => {
+  try { 
+    console.error('[unhandledRejection]', err);
+    if (err instanceof Error) {
+      console.error('[unhandledRejection] Stack:', err.stack);
+    }
+  } catch {}
+});
+process.on('uncaughtException', (err) => {
+  try { 
+    console.error('[uncaughtException]', err);
+    if (err instanceof Error) {
+      console.error('[uncaughtException] Stack:', err.stack);
+    }
+    // Don't exit on uncaught exception - let the server try to continue
+    // process.exit(1);
+  } catch {}
+});
+
+console.log('[SERVER] Starting server initialization...');
 import 'dotenv/config';
+console.log('[SERVER] dotenv loaded');
+
+console.log('[SERVER] Importing dependencies...');
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
+console.log('[SERVER] Basic imports done');
+
 import { games, createGame, updateGame, deleteGame, profile, friends, users, createUser, updateUser, deleteUser, feedbacks, subscriptionPlans, characters, createCharacter, updateCharacter, deleteCharacter } from './db.js';
+console.log('[SERVER] db.js imported');
+
 import OpenAI from 'openai';
 import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
 import pdfParse from 'pdf-parse';
@@ -15,18 +43,14 @@ import type { Game } from './types';
 import multer from 'multer';
 import { toFile } from 'openai/uploads';
 import crypto from 'crypto';
+console.log('[SERVER] All imports completed');
 
 const app = express();
 const port = process.env.PORT ? Number(process.env.PORT) : 4000;
+console.log(`[SERVER] Express app created, port: ${port}`);
 
 app.use(cors());
 app.use(express.json());
-process.on('unhandledRejection', (err) => {
-  try { console.error('[unhandledRejection]', err); } catch {}
-});
-process.on('uncaughtException', (err) => {
-  try { console.error('[uncaughtException]', err); } catch {}
-});
 
 function normalizeProxyUrl(raw: string): string {
   const strip = (s: string) => s.trim().replace(/^['"]+|['"]+$/g, '');
@@ -1821,12 +1845,24 @@ app.post('/api/admin/scenario/import', async (req, res) => {
   }
 });
 
-const serverHttp = app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
-}).on('error', (err: Error) => {
-  console.error('Failed to start server:', err);
+console.log('[SERVER] Starting HTTP server...');
+let serverHttp: any;
+try {
+  serverHttp = app.listen(port, () => {
+    console.log(`[SERVER] Server listening on http://localhost:${port}`);
+  }).on('error', (err: Error) => {
+    console.error('[SERVER] Failed to start server:', err);
+    console.error('[SERVER] Error stack:', err.stack);
+    process.exit(1);
+  });
+  console.log('[SERVER] HTTP server setup completed');
+} catch (err) {
+  console.error('[SERVER] Fatal error during server startup:', err);
+  if (err instanceof Error) {
+    console.error('[SERVER] Error stack:', err.stack);
+  }
   process.exit(1);
-});
+}
 
 type WsClient = { socket: WebSocket; userId: string };
 const userIdToSockets = new Map<string, Set<WebSocket>>();
@@ -1850,7 +1886,9 @@ async function wsNotifyLobby(lobbyId: string, event: unknown) {
   } catch {}
 }
 
+console.log('[SERVER] Setting up WebSocket server...');
 const wss = new WebSocketServer({ server: serverHttp, path: '/ws' });
+console.log('[SERVER] WebSocket server setup completed');
 wss.on('connection', async (socket, req) => {
   try {
     const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
