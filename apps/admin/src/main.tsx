@@ -49,13 +49,32 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploadProgress, setUploadProgress] = useState<Array<{ fileName: string; status: 'pending' | 'processing' | 'done' | 'error'; progress?: string; error?: string; gameId?: string }>>([]);
   
-  const onIngestMultiple = async (files: FileList | null) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.currentTarget.files;
+    if (files && files.length > 0) {
+      const fileArray = Array.from(files);
+      setSelectedFiles(prev => {
+        const existingNames = new Set(prev.map(f => f.name + f.size));
+        const newFiles = fileArray.filter(f => !existingNames.has(f.name + f.size));
+        return [...prev, ...newFiles];
+      });
+    }
+    e.currentTarget.value = '';
+  };
+  
+  const removeFile = (index: number) => {
+    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+  
+  const onIngestMultiple = async (files: File[]) => {
     if (!files || files.length === 0) return;
     const fileArray = Array.from(files);
     setUploadProgress(fileArray.map(f => ({ fileName: f.name, status: 'pending' as const })));
     setBusy(true);
+    setSelectedFiles([]); // Очищаем выбранные файлы после начала загрузки
     
     try {
       // Отправляем все файлы в одном запросе
@@ -130,10 +149,10 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
     <div style={{ display: 'grid', gap: 10 }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
         <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input type="radio" name="mode" checked={mode === 'manual'} onChange={() => setMode('manual')} /> Самому загрузить сюжет
+          <input type="radio" name="mode" checked={mode === 'manual'} onChange={() => { setMode('manual'); setSelectedFiles([]); setUploadProgress([]); }} /> Самому загрузить сюжет
         </label>
         <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input type="radio" name="mode" checked={mode === 'pdf'} onChange={() => setMode('pdf')} /> Загрузить D&D из PDF (авто)
+          <input type="radio" name="mode" checked={mode === 'pdf'} onChange={() => { setMode('pdf'); setSelectedFiles([]); setUploadProgress([]); }} /> Загрузить D&D из PDF (авто)
         </label>
       </div>
       {mode === 'manual' ? (
@@ -150,7 +169,7 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
           <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
           <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
           <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
-            <input type="file" accept="application/pdf" multiple style={{ display: 'none' }} disabled={busy} onChange={(e: React.ChangeEvent<HTMLInputElement>) => { const files = e.currentTarget.files; e.currentTarget.value=''; if (files && files.length > 0) void onIngestMultiple(files); }} />
+            <input type="file" accept="application/pdf" multiple style={{ display: 'none' }} disabled={busy} onChange={handleFileSelect} />
             <div
               style={{ 
                 width: '100%', 
@@ -174,19 +193,96 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
               onMouseEnter={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1557b0'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(31, 111, 235, 0.4)'; e.currentTarget.style.transform = 'translateY(-1px)'; } }}
               onMouseLeave={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1f6feb'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(31, 111, 235, 0.3)'; e.currentTarget.style.transform = 'translateY(0)'; } }}
             >
-              {busy ? (
-                <>
-                  <span>⏳</span>
-                  <span>Обработка PDF...</span>
-                </>
-              ) : (
-                <>
-                  <span style={{ fontSize: '20px' }}>📄</span>
-                  <span>Выбрать PDF файлы (правила, игра, персонажи)</span>
-                </>
-              )}
+              <span style={{ fontSize: '20px' }}>📄</span>
+              <span>Выбрать PDF файлы (правила, игра, персонажи)</span>
             </div>
           </label>
+          
+          {selectedFiles.length > 0 && (
+            <div style={{ display: 'grid', gap: 8, marginTop: 12, padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #dee2e6' }}>
+              <div style={{ fontSize: '15px', fontWeight: 600, color: '#212529', marginBottom: 4 }}>Выбранные файлы ({selectedFiles.length}):</div>
+              <div style={{ display: 'grid', gap: 6 }}>
+                {selectedFiles.map((file, index) => (
+                  <div key={`${file.name}-${index}`} style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: 10, 
+                    padding: '12px 14px', 
+                    backgroundColor: '#ffffff', 
+                    borderRadius: '6px',
+                    border: '1px solid #ced4da',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                  }}>
+                    <span style={{ fontSize: '20px' }}>📄</span>
+                    <span style={{ flex: 1, fontSize: '14px', color: '#212529', fontWeight: 500, wordBreak: 'break-word' }}>{file.name}</span>
+                    <span style={{ fontSize: '12px', color: '#6c757d', whiteSpace: 'nowrap', marginLeft: '8px' }}>
+                      {(file.size / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                    {!busy && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeFile(index); }}
+                        style={{
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          backgroundColor: '#dc3545',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontWeight: 500,
+                          whiteSpace: 'nowrap'
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#c82333'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#dc3545'; }}
+                      >
+                        ✕ Удалить
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {!busy && (
+                <button
+                  onClick={() => onIngestMultiple(selectedFiles)}
+                  disabled={selectedFiles.length === 0}
+                  style={{
+                    width: '100%',
+                    padding: '14px 24px',
+                    fontSize: '16px',
+                    fontWeight: 600,
+                    backgroundColor: selectedFiles.length === 0 ? '#6c757d' : '#28a745',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '10px',
+                    cursor: selectedFiles.length === 0 ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.2s ease',
+                    boxShadow: selectedFiles.length === 0 ? 'none' : '0 2px 8px rgba(40, 167, 69, 0.3)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px'
+                  }}
+                  onMouseEnter={(e) => { 
+                    if (selectedFiles.length > 0) {
+                      e.currentTarget.style.backgroundColor = '#218838';
+                      e.currentTarget.style.boxShadow = '0 4px 12px rgba(40, 167, 69, 0.4)';
+                      e.currentTarget.style.transform = 'translateY(-1px)';
+                    }
+                  }}
+                  onMouseLeave={(e) => { 
+                    if (selectedFiles.length > 0) {
+                      e.currentTarget.style.backgroundColor = '#28a745';
+                      e.currentTarget.style.boxShadow = '0 2px 8px rgba(40, 167, 69, 0.3)';
+                      e.currentTarget.style.transform = 'translateY(0)';
+                    }
+                  }}
+                >
+                  <span>🚀</span>
+                  <span>Загрузить и создать игру</span>
+                </button>
+              )}
+            </div>
+          )}
           {uploadProgress.length > 0 && (
             <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
               {uploadProgress.map((item, idx) => (
