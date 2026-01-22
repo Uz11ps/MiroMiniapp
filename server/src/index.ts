@@ -256,20 +256,34 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 console.log('[SERVER] Health route registered');
+process.stdout.write && process.stdout.write('');
+process.stderr.write && process.stderr.write('');
 
-app.get('/api/games', async (_req, res) => {
-  try {
-    const prisma = getPrisma();
-    const list = await prisma.game.findMany({
-      where: { status: 'PUBLISHED' as any },
-      select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true }
-    });
-    res.json(list);
-  } catch {
-    res.json(games.map(({ rules, gallery, editions, ...short }) => short));
+console.log('[SERVER] About to register /api/games route...');
+try {
+  console.log('[SERVER] Registering /api/games route...');
+  app.get('/api/games', async (_req, res) => {
+    try {
+      const prisma = getPrisma();
+      const list = await prisma.game.findMany({
+        where: { status: 'PUBLISHED' as any },
+        select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true }
+      });
+      res.json(list);
+    } catch {
+      res.json(games.map(({ rules, gallery, editions, ...short }) => short));
+    }
+  });
+  console.log('[SERVER] /api/games route registered');
+} catch (e) {
+  console.error('[SERVER] Error registering /api/games route:', e);
+  if (e instanceof Error) {
+    console.error('[SERVER] Error stack:', e.stack);
   }
-});
+  throw e;
+}
 
+console.log('[SERVER] Registering /api/games/:id route...');
 app.get('/api/games/:id', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -343,7 +357,9 @@ app.delete('/api/games/:id', async (req, res) => {
     res.status(204).end();
   }
 });
+console.log('[SERVER] DELETE /api/games/:id route registered');
 
+console.log('[SERVER] Registering admin games routes...');
 app.get('/api/admin/games', async (_req, res) => {
   try {
     const prisma = getPrisma();
