@@ -1654,13 +1654,31 @@ ${shape}
           where: { gameId: game.id, isPlayable: true } 
         });
         if (playableChars.length === 0) {
-          // Удаляем игру, если нет игровых персонажей
-          await prisma.game.delete({ where: { id: game.id } });
-          set({ 
-            status: 'error', 
-            error: 'Игра должна содержать хотя бы одного игрового персонажа. Добавьте персонажей с флагом isPlayable: true.' 
+          // При импорте создаем дефолтного игрового персонажа, если его нет
+          console.log('[INGEST-IMPORT] No playable characters found, creating default character');
+          await prisma.character.create({
+            data: {
+              gameId: game.id,
+              name: 'Игрок',
+              isPlayable: true,
+              race: 'Человек',
+              gender: 'Не указан',
+              level: 1,
+              class: 'Авантюрист',
+              hp: 10,
+              maxHp: 10,
+              ac: 10,
+              str: 10,
+              dex: 10,
+              con: 10,
+              int: 10,
+              wis: 10,
+              cha: 10,
+              avatarUrl: `https://picsum.photos/seed/player_${game.id}/80/80`,
+              description: 'Игровой персонаж по умолчанию. Вы можете изменить его в разделе "Персонажи".'
+            }
           });
-          return;
+          console.log('[INGEST-IMPORT] Default playable character created');
         }
         
         set({ progress: 'Generate backgrounds' });
