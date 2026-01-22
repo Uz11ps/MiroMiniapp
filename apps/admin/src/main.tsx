@@ -49,26 +49,54 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
-  const onIngest = async (file: File) => {
+  const [uploadProgress, setUploadProgress] = useState<Array<{ fileName: string; status: 'pending' | 'processing' | 'done' | 'error'; progress?: string; error?: string; gameId?: string }>>([]);
+  
+  const onIngestMultiple = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const fileArray = Array.from(files);
+    setUploadProgress(fileArray.map(f => ({ fileName: f.name, status: 'pending' as const })));
     setBusy(true);
+    
     try {
+      // Отправляем все файлы в одном запросе
+      setUploadProgress(prev => prev.map(item => ({ ...item, status: 'processing' as const, progress: 'Отправка файлов...' })));
+      
       const fd = new FormData();
-      fd.append('file', file);
+      fileArray.forEach(file => {
+        fd.append('files', file);
+      });
+      
       // Асинхронный импорт: стартуем задачу и опрашиваем статус
       const start = await fetch(`${API}/admin/ingest-import`, { method: 'POST', body: fd });
       const sj = await start.json().catch(() => ({} as any));
-      if (!start.ok || !sj?.jobId) { alert('Старт импорта не удался'); return; }
+      if (!start.ok || !sj?.jobId) { 
+        setUploadProgress(prev => prev.map(item => ({ ...item, status: 'error' as const, error: 'Старт импорта не удался' })));
+        alert('Старт импорта не удался'); 
+        return;
+      }
+      
       const jobId = sj.jobId as string;
       let lastProgress = '';
+      
       for (let i = 0; i < 600; i++) { // до ~20 минут (600 * 2с)
         await new Promise((r) => setTimeout(r, 2000));
         const st = await fetch(`${API}/admin/ingest-import/${encodeURIComponent(jobId)}`);
         const s = await st.json().catch(() => ({} as any));
         if (!st.ok) break;
+        
         if (s?.progress && s.progress !== lastProgress) {
           lastProgress = s.progress;
+          setUploadProgress(prev => prev.map(item => 
+            item.status === 'processing' ? { ...item, progress: s.progress } : item
+          ));
         }
-        if (s?.status === 'error') { alert(`Импорт не удался: ${s?.error || 'unknown'}`); return; }
+        
+        if (s?.status === 'error') { 
+          setUploadProgress(prev => prev.map(item => ({ ...item, status: 'error' as const, error: s?.error || 'unknown' })));
+          alert(`Импорт не удался: ${s?.error || 'unknown'}`); 
+          return;
+        }
+        
         if (s?.status === 'done' && s?.gameId) {
           // применим пользовательские поля поверх
           if (title || author || coverUrl) {
@@ -80,11 +108,20 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
               }) });
             } catch {}
           }
-          window.location.href = `/admin/scenario?id=${s.gameId}`;
+          
+          setUploadProgress(prev => prev.map(item => ({ ...item, status: 'done' as const, gameId: s.gameId })));
+          
+          // Переходим к созданной игре
+          setTimeout(() => {
+            window.location.href = `/admin/scenario?id=${s.gameId}`;
+          }, 1000);
           return;
         }
       }
+      
       alert('Импорт занял слишком много времени. Обновите страницу и проверьте список игр.');
+    } catch (e) {
+      setUploadProgress(prev => prev.map(item => ({ ...item, status: 'error' as const, error: String(e) })));
     } finally {
       setBusy(false);
     }
@@ -108,12 +145,12 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>
-          <div className="muted">ИИ разберёт PDF и создаст игру: метаданные, локации, переходы. При желании заполните поля для перезаписи.</div>
+          <div className="muted">ИИ разберёт PDF и создаст игру: метаданные, локации, переходы. Можно загрузить несколько PDF: правила игры, сценарий с локациями, персонажи — все файлы объединятся в одну игру. При желании заполните поля для перезаписи.</div>
           <input placeholder="Название (опц.)" value={title} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)} />
           <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
           <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
           <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
-            <input type="file" accept="application/pdf" style={{ display: 'none' }} disabled={busy} onChange={(e: React.ChangeEvent<HTMLInputElement>) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value=''; if (f) void onIngest(f); }} />
+            <input type="file" accept="application/pdf" multiple style={{ display: 'none' }} disabled={busy} onChange={(e: React.ChangeEvent<HTMLInputElement>) => { const files = e.currentTarget.files; e.currentTarget.value=''; if (files && files.length > 0) void onIngestMultiple(files); }} />
             <div
               style={{ 
                 width: '100%', 
@@ -145,11 +182,55 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
               ) : (
                 <>
                   <span style={{ fontSize: '20px' }}>📄</span>
-                  <span>Выбрать PDF файл</span>
+                  <span>Выбрать PDF файлы (правила, игра, персонажи)</span>
                 </>
               )}
             </div>
           </label>
+          {uploadProgress.length > 0 && (
+            <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+              {uploadProgress.map((item, idx) => (
+                <div key={idx} style={{ 
+                  padding: 10, 
+                  borderRadius: 6, 
+                  backgroundColor: item.status === 'done' ? '#d4edda' : item.status === 'error' ? '#f8d7da' : item.status === 'processing' ? '#d1ecf1' : '#e9ecef',
+                  border: `1px solid ${item.status === 'done' ? '#c3e6cb' : item.status === 'error' ? '#f5c6cb' : item.status === 'processing' ? '#bee5eb' : '#dee2e6'}`,
+                  fontSize: '14px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: item.progress ? 4 : 0 }}>
+                    <span>{item.status === 'done' ? '✅' : item.status === 'error' ? '❌' : item.status === 'processing' ? '⏳' : '⏸️'}</span>
+                    <span style={{ fontWeight: 500 }}>{item.fileName}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: '12px', color: '#6c757d' }}>
+                      {item.status === 'done' ? 'Готово' : item.status === 'error' ? 'Ошибка' : item.status === 'processing' ? 'Обработка...' : 'Ожидание'}
+                    </span>
+                  </div>
+                  {item.progress && item.status === 'processing' && (
+                    <div style={{ fontSize: '12px', color: '#495057', marginTop: 4 }}>{item.progress}</div>
+                  )}
+                  {item.error && (
+                    <div style={{ fontSize: '12px', color: '#721c24', marginTop: 4 }}>Ошибка: {item.error}</div>
+                  )}
+                  {item.status === 'done' && item.gameId && (
+                    <div style={{ marginTop: 8 }}>
+                      <a 
+                        href={`/admin/scenario?id=${item.gameId}`}
+                        style={{ 
+                          fontSize: '12px', 
+                          color: '#1f6feb', 
+                          textDecoration: 'none',
+                          fontWeight: 500
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
+                      >
+                        → Открыть игру
+                      </a>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

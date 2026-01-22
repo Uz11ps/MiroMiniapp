@@ -942,9 +942,22 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
 type IngestJob = { status: 'queued' | 'running' | 'done' | 'error'; error?: string; gameId?: string; progress?: string };
 const ingestJobs = new Map<string, IngestJob>();
 
-app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => {
+app.post('/api/admin/ingest-import', upload.array('files', 10), async (req, res) => {
   try {
-    if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (!files || files.length === 0) return res.status(400).json({ error: 'file_required' });
+    
+    // Проверяем, что все файлы - PDF
+    for (const file of files) {
+      const fileName = file.originalname || '';
+      if (!fileName.toLowerCase().endsWith('.pdf')) {
+        return res.status(400).json({ error: 'invalid_file_type', expected: 'PDF', file: fileName });
+      }
+      if (file.mimetype && file.mimetype !== 'application/pdf') {
+        return res.status(400).json({ error: 'invalid_mime_type', expected: 'application/pdf', file: fileName });
+      }
+    }
+    
     const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
     ingestJobs.set(jobId, { status: 'queued', progress: 'Scheduled' });
     res.json({ jobId });
@@ -954,10 +967,33 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
         ingestJobs.set(jobId, { ...cur, ...patch });
       };
       try {
-        set({ status: 'running', progress: 'Reading PDF' });
-        const pdfBuf = req.file!.buffer;
-        const parsed = await pdfParse(pdfBuf).catch(() => null);
-        const rawText = (parsed?.text || '').replace(/\r/g, '\n');
+        set({ status: 'running', progress: `Reading ${files.length} PDF file(s)...` });
+        
+        // Парсим все PDF и объединяем текст
+        const allTexts: string[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          set({ progress: `Reading PDF ${i + 1}/${files.length}: ${file.originalname || 'file'}` });
+          try {
+            const parsed = await pdfParse(file.buffer).catch(() => null);
+            if (parsed && parsed.text) {
+              const rawText = (parsed.text || '').replace(/\r/g, '\n');
+              // Добавляем разделитель с названием файла для контекста
+              const fileName = file.originalname || `file${i + 1}.pdf`;
+              allTexts.push(`\n\n=== ${fileName} ===\n\n${rawText}`);
+            }
+          } catch (e) {
+            console.error(`[INGEST-IMPORT] Error parsing PDF ${i + 1}:`, e);
+            // Продолжаем с другими файлами
+          }
+        }
+        
+        if (allTexts.length === 0) {
+          set({ status: 'error', error: 'Не удалось извлечь текст из PDF файлов' });
+          return;
+        }
+        
+        const rawText = allTexts.join('\n\n');
         const stripTocAndLeaders = (src: string): string => {
           let t = src;
           const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
@@ -1057,7 +1093,8 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
             });
           };
           const out: any = sc && typeof sc === 'object' ? sc : {};
-          out.game = out.game || { title: (req.file!.originalname || 'Scenario').replace(/\.pdf$/i, ''), description: 'Импортировано из PDF', author: 'GM', worldRules: '—', gameplayRules: '—' };
+          const firstFileName = files[0]?.originalname || 'Scenario';
+          out.game = out.game || { title: firstFileName.replace(/\.pdf$/i, ''), description: `Импортировано из ${files.length} PDF файл(ов)`, author: 'GM', worldRules: '—', gameplayRules: '—' };
           const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
             const idx = text.search(labelRe);
             if (idx < 0) return null;
@@ -1123,10 +1160,11 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
         set({ progress: 'Import scenario' });
         const prisma = getPrisma();
         const g = scenario.game || {};
+        const firstFileName = files[0]?.originalname || 'Scenario';
         const game = await prisma.game.create({
           data: {
-            title: g.title || (req.file!.originalname || 'Scenario').replace(/\.pdf$/i, ''),
-            description: g.description || 'Импортировано из PDF',
+            title: g.title || firstFileName.replace(/\.pdf$/i, ''),
+            description: g.description || `Импортировано из ${files.length} PDF файл(ов)`,
             author: g.author || 'GM',
             coverUrl: g.coverUrl || '',
             tags: g.tags || [],
