@@ -1093,18 +1093,28 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         // Парсим все PDF с учетом порядка: 1) Правила, 2) Игра, 3+) Персонажи
         const fileSections: Array<{ type: 'rules' | 'game' | 'character'; fileName: string; text: string }> = [];
         
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // ТОЧНЫЙ ПОРЯДОК ОБРАБОТКИ ФАЙЛОВ (ВАЖНО!):
+        // 1. ПЕРВЫЙ ФАЙЛ (i === 0) → ПРАВИЛА ИГРЫ (rules)
+        // 2. ВТОРОЙ ФАЙЛ (i === 1) → ИГРА И СЦЕНАРИЙ (game)
+        // 3. ТРЕТИЙ И ДАЛЬШЕ (i >= 2) → ПЕРСОНАЖИ (character) - неограниченное количество
+        // ═══════════════════════════════════════════════════════════════════════════════
+        
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
           let fileType: 'rules' | 'game' | 'character';
           
           if (i === 0) {
-            fileType = 'rules'; // Первый файл = ПРАВИЛА ИГРЫ
+            // ФАЙЛ №1: ПРАВИЛА ИГРЫ
+            fileType = 'rules';
             set({ progress: `Reading PDF ${i + 1}/${files.length}: ПРАВИЛА ИГРЫ - ${file.originalname || 'file'}` });
           } else if (i === 1) {
-            fileType = 'game'; // Второй файл = САМА ИГРА И СЦЕНАРИЙ
+            // ФАЙЛ №2: ИГРА И СЦЕНАРИЙ (включая раздел "Приложение В. Статистика НИП")
+            fileType = 'game';
             set({ progress: `Reading PDF ${i + 1}/${files.length}: ИГРА И СЦЕНАРИЙ - ${file.originalname || 'file'}` });
           } else {
-            fileType = 'character'; // Остальные = ПЕРСОНАЖИ
+            // ФАЙЛ №3+: ПЕРСОНАЖИ (карточки формата Long Story Short, неограниченное количество)
+            fileType = 'character';
             set({ progress: `Reading PDF ${i + 1}/${files.length}: ПЕРСОНАЖ - ${file.originalname || 'file'}` });
           }
           
@@ -1333,19 +1343,6 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }
           out.characters = Array.from(uniqueChars.values());
           // Fallback удален - только реальные данные из файлов
-              const s = ln.trim().replace(/\[[^\]]+\]/g, '');
-              if (!s || s.length > 48) return;
-              if (/:|\./.test(s)) return;
-              if (/^[0-9]/.test(s)) return;
-              if (/^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё’'\-\. ]{1,}$/.test(s)) cand.push(s);
-            });
-            const uniq: string[] = [];
-            for (const n of cand) { if (!uniq.includes(n)) uniq.push(n); if (uniq.length >= 10) break; }
-            const parsedChars = parseCharacterCards(text);
-            if (parsedChars.length > 0) {
-              out.characters = parsedChars;
-            }
-          }
           if (!Array.isArray(out.editions) || !out.editions.length) out.editions = [{ name: 'Стандарт', description: '—', price: 0, badge: null }];
           return out;
         };
@@ -4733,4 +4730,11 @@ app.post('/api/chat/dice', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
   }
 });
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Server is running on http://0.0.0.0:${port}`);
+});
+
+export default app;
+}
 

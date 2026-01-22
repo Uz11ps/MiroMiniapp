@@ -1,0 +1,1 @@
+{"root":["./src/bot.ts","./src/db.ts","./src/index.clean.ts","./src/index.ts","./src/prisma.ts","./src/types.ts","../tsconfig.base.json"],"version":"5.9.3"}
