@@ -527,12 +527,93 @@ app.post('/api/admin/upload', upload.single('file'), async (req, res) => {
 });
 
 // Улучшенный парсер карточек персонажей из PDF
+// Поддерживает:
+// 1. Формат Long Story Short (карточки персонажей) - формат: ИМЯ ПЕРСОНАЖА, КЛАСС И УРОВЕНЬ, характеристики
+// 2. Формат "Приложение В. Статистика НИП" - структурированные блоки с характеристиками
+// 3. Стандартные карточки D&D 5e
 function parseCharacterCards(srcText: string): Array<any> {
   const chars: any[] = [];
   
-  // Поиск блоков с характеристиками D&D
-  // Вариант 1: Структурированные карточки с характеристиками
-  const cardPatterns = [
+  // ВАРИАНТ 1: Формат Long Story Short (карточки персонажей)
+  // Ищем блоки с форматом: ИМЯ ПЕРСОНАЖА | КЛАСС И УРОВЕНЬ | РАСА | МИРОВОЗЗРЕНИЕ
+  const lssPattern = /ИМЯ ПЕРСОНАЖА[\s\S]{0,200}?КЛАСС И УРОВЕНЬ[\s\S]{0,500}?РАСА[\s\S]{0,500}?Мудрость[\s\S]{0,300}?БАЗОВАЯ ХАРАКТЕРИСТИКА ЗАКЛИНАНИЙ[\s\S]{0,200}?(\d+)[\s\S]{0,500}?СЛОЖНОСТЬ СПАСБРОСКА[\s\S]{0,200}?(\d+)/gi;
+  let lssMatch;
+  const lssBlocks: Array<{ start: number; end: number; text: string }> = [];
+  while ((lssMatch = lssPattern.exec(srcText)) !== null) {
+    const start = Math.max(0, lssMatch.index - 500);
+    const end = Math.min(srcText.length, lssMatch.index + lssMatch[0].length + 2000);
+    lssBlocks.push({ start, end, text: srcText.slice(start, end) });
+  }
+  
+  for (const block of lssBlocks) {
+    const blockText = block.text;
+    
+    // Извлекаем имя персонажа
+    const nameMatch = blockText.match(/ИМЯ ПЕРСОНАЖА\s*\n\s*\|[^\n]+\|\s*\n\s*\|[^\n]+\|\s*\n\s*([А-Яа-яЁёA-Za-z\s]{2,50})/i);
+    if (!nameMatch) continue;
+    const name = nameMatch[1]?.trim();
+    if (!name || name.length < 2) continue;
+    
+    // Извлекаем класс и уровень
+    const classLevelMatch = blockText.match(/КЛАСС И УРОВЕНЬ[\s\S]{0,200}?([А-Яа-яЁёA-Za-z\s]+)[\s\S]{0,100}?(?:Уровень|Level|Ур\.)[:\s]*(\d+)/i) || 
+                          blockText.match(/([А-Яа-яЁёA-Za-z\s]+)\s+(\d+)\s+уровн/i);
+    const className = classLevelMatch?.[1]?.trim() || null;
+    const level = parseInt(classLevelMatch?.[2] || '1', 10);
+    
+    // Извлекаем расу
+    const raceMatch = blockText.match(/РАСА[\s\S]{0,200}?([А-Яа-яЁёA-Za-z\s]+)/i);
+    const race = raceMatch?.[1]?.trim() || null;
+    
+    // Извлекаем базовую характеристику заклинаний (WIS для друида)
+    const spellAbilityMatch = blockText.match(/БАЗОВАЯ ХАРАКТЕРИСТИКА ЗАКЛИНАНИЙ[\s\S]{0,200}?(\d+)/i);
+    const spellAbility = parseInt(spellAbilityMatch?.[1] || '13', 10);
+    
+    // Извлекаем характеристики из таблиц или текста
+    // Ищем паттерны типа "STR 10", "СИЛ 12", "Сила: 14"
+    const strMatch = blockText.match(/(?:STR|СИЛ|Сила)[:\s]+(\d+)/i);
+    const dexMatch = blockText.match(/(?:DEX|ЛОВ|Ловкость)[:\s]+(\d+)/i);
+    const conMatch = blockText.match(/(?:CON|ТЕЛ|Телосложение)[:\s]+(\d+)/i);
+    const intMatch = blockText.match(/(?:INT|ИНТ|Интеллект)[:\s]+(\d+)/i);
+    const wisMatch = blockText.match(/(?:WIS|МДР|Мудрость)[:\s]+(\d+)/i);
+    const chaMatch = blockText.match(/(?:CHA|ХАР|Харизма)[:\s]+(\d+)/i);
+    
+    // Извлекаем HP и AC
+    const hpMatch = blockText.match(/(?:HP|ХП|Хиты)[:\s]+(\d+)\/?(\d+)?/i);
+    const acMatch = blockText.match(/(?:AC|КД|Класс[^\n]*брони)[:\s]+(\d+)/i);
+    
+    // Определяем, игровой персонаж или NPC
+    // В формате LSS обычно это игровые персонажи
+    const isPlayable = !/(?:НИП|NPC|неигровой|враг|противник|enemy|cultist|mimic)/i.test(blockText);
+    
+    const char = {
+      name,
+      isPlayable,
+      race: race || null,
+      gender: blockText.match(/(?:женщина|женский|female|мужчина|мужской|male)/i)?.[0] || null,
+      level: isNaN(level) ? 1 : level,
+      class: className || null,
+      hp: hpMatch ? parseInt(hpMatch[1] || '10', 10) : 10,
+      maxHp: hpMatch ? parseInt(hpMatch[2] || hpMatch[1] || '10', 10) : 10,
+      ac: acMatch ? parseInt(acMatch[1] || '10', 10) : 10,
+      str: strMatch ? parseInt(strMatch[1] || '10', 10) : 10,
+      dex: dexMatch ? parseInt(dexMatch[1] || '10', 10) : 10,
+      con: conMatch ? parseInt(conMatch[1] || '10', 10) : 10,
+      int: intMatch ? parseInt(intMatch[1] || '10', 10) : 10,
+      wis: wisMatch ? parseInt(wisMatch[1] || spellAbility, 10) : spellAbility,
+      cha: chaMatch ? parseInt(chaMatch[1] || '10', 10) : 10,
+      role: isPlayable ? 'Игровой персонаж' : 'NPC',
+      persona: blockText.match(/ПРЕДЫСТОРИЯ ПЕРСОНАЖА[\s\S]{0,2000}/i)?.[0]?.slice(0, 1000) || null,
+    };
+    
+    // Добавляем только если есть реальные данные (не все значения по умолчанию)
+    if (name && (className || strMatch || dexMatch || conMatch || intMatch || wisMatch || chaMatch || hpMatch || acMatch)) {
+      chars.push(char);
+    }
+  }
+  
+  // ВАРИАНТ 2: Структурированные карточки D&D 5e с характеристиками
+  if (chars.length === 0) {
+    const cardPatterns = [
     // Формат: Имя\nУровень: X, Класс: Y\nHP: A/B, AC: C\nSTR: D, DEX: E, CON: F, INT: G, WIS: H, CHA: I
     /([А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\s]{2,40})\s*\n[^\n]*(?:Уровень|Level|Ур\.)[:\s]+(\d+)[^\n]*(?:Класс|Class)[:\s]+([А-Яа-яЁёA-Za-z\s]+)[^\n]*(?:HP|ХП|Хиты)[:\s]+(\d+)\/?(\d+)?[^\n]*(?:AC|КД|Класс[^\n]*брони)[:\s]+(\d+)[^\n]*(?:STR|СИЛ|Сила)[:\s]+(\d+)[^\n]*(?:DEX|ЛОВ|Ловкость)[:\s]+(\d+)[^\n]*(?:CON|ТЕЛ|Телосложение)[:\s]+(\d+)[^\n]*(?:INT|ИНТ|Интеллект)[:\s]+(\d+)[^\n]*(?:WIS|МДР|Мудрость)[:\s]+(\d+)[^\n]*(?:CHA|ХАР|Харизма)[:\s]+(\d+)/gis,
     // Формат: Имя (Уровень X Класс)\nHP A/B AC C\nSTR D DEX E CON F INT G WIS H CHA I
@@ -671,35 +752,49 @@ function parseCharacterCards(srcText: string): Array<any> {
     }
   }
   
-  // Вариант 3: Простой fallback - только имена из блока "Статистика НИП"
+  // ВАРИАНТ 3: Извлечение из раздела "Приложение В. Статистика НИП" (структурированный формат)
   if (chars.length === 0) {
-    const m = srcText.match(/Статистика НИП[\s\S]{0,3000}/i);
-    const npcBlock = m ? m[0] : '';
-    const cand: string[] = [];
-    npcBlock.split('\n').forEach((ln) => {
-      const s = ln.trim().replace(/\[[^\]]+\]/g, '');
-      if (!s || s.length > 48) return;
-      if (/:|\./.test(s)) return;
-      if (/^[0-9]/.test(s)) return;
-      if (/^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-\. ]{1,}$/.test(s)) cand.push(s);
-    });
-    const uniq: string[] = [];
-    for (const n of cand) { if (!uniq.includes(n)) uniq.push(n); if (uniq.length >= 10) break; }
-    chars.push(...uniq.map((name) => ({ 
-      name, 
-      isPlayable: false, 
-      role: 'NPC',
-      level: 1,
-      hp: 10,
-      maxHp: 10,
-      ac: 10,
-      str: 10,
-      dex: 10,
-      con: 10,
-      int: 10,
-      wis: 10,
-      cha: 10,
-    })));
+    const npcSectionMatch = srcText.match(/(?:Приложение[^\n]*В|Приложение В|Статистика НИП)[\s\S]{0,10000}/i);
+    if (npcSectionMatch) {
+      const npcSection = npcSectionMatch[0];
+      
+      // Ищем блоки персонажей в формате: Имя[Класс]\nХарактеристики...
+      const npcPattern = /([А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\s]{2,40})(?:\[([А-Яа-яЁёA-Za-z\s]+)\])?[\s\S]{0,500}?(?:HP|ХП|Хиты)[:\s]+(\d+)[^\n]*(?:AC|КД)[:\s]+(\d+)[^\n]*(?:STR|СИЛ)[:\s]+(\d+)[^\n]*(?:DEX|ЛОВ)[:\s]+(\d+)[^\n]*(?:CON|ТЕЛ)[:\s]+(\d+)[^\n]*(?:INT|ИНТ)[:\s]+(\d+)[^\n]*(?:WIS|МДР)[:\s]+(\d+)[^\n]*(?:CHA|ХАР)[:\s]+(\d+)/gi;
+      
+      let npcMatch;
+      while ((npcMatch = npcPattern.exec(npcSection)) !== null && chars.length < 20) {
+        const name = npcMatch[1]?.trim();
+        const className = npcMatch[2]?.trim() || null;
+        const hp = parseInt(npcMatch[3] || '10', 10);
+        const ac = parseInt(npcMatch[4] || '10', 10);
+        const str = parseInt(npcMatch[5] || '10', 10);
+        const dex = parseInt(npcMatch[6] || '10', 10);
+        const con = parseInt(npcMatch[7] || '10', 10);
+        const int = parseInt(npcMatch[8] || '10', 10);
+        const wis = parseInt(npcMatch[9] || '10', 10);
+        const cha = parseInt(npcMatch[10] || '10', 10);
+        
+        if (name && name.length >= 2 && name.length <= 50) {
+          // В разделе "Статистика НИП" обычно NPC
+          chars.push({
+            name,
+            isPlayable: false,
+            level: 1,
+            class: className,
+            hp,
+            maxHp: hp,
+            ac,
+            str,
+            dex,
+            con,
+            int,
+            wis,
+            cha,
+            role: 'NPC',
+          });
+        }
+      }
+    }
   }
   
   return chars;
@@ -995,18 +1090,30 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
       try {
         set({ status: 'running', progress: `Reading ${files.length} PDF file(s)...` });
         
-        // Парсим все PDF и объединяем текст
-        const allTexts: string[] = [];
+        // Парсим все PDF с учетом порядка: 1) Правила, 2) Игра, 3+) Персонажи
+        const fileSections: Array<{ type: 'rules' | 'game' | 'character'; fileName: string; text: string }> = [];
+        
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
-          set({ progress: `Reading PDF ${i + 1}/${files.length}: ${file.originalname || 'file'}` });
+          let fileType: 'rules' | 'game' | 'character';
+          
+          if (i === 0) {
+            fileType = 'rules'; // Первый файл = ПРАВИЛА ИГРЫ
+            set({ progress: `Reading PDF ${i + 1}/${files.length}: ПРАВИЛА ИГРЫ - ${file.originalname || 'file'}` });
+          } else if (i === 1) {
+            fileType = 'game'; // Второй файл = САМА ИГРА И СЦЕНАРИЙ
+            set({ progress: `Reading PDF ${i + 1}/${files.length}: ИГРА И СЦЕНАРИЙ - ${file.originalname || 'file'}` });
+          } else {
+            fileType = 'character'; // Остальные = ПЕРСОНАЖИ
+            set({ progress: `Reading PDF ${i + 1}/${files.length}: ПЕРСОНАЖ - ${file.originalname || 'file'}` });
+          }
+          
           try {
             const parsed = await pdfParse(file.buffer).catch(() => null);
             if (parsed && parsed.text) {
               const rawText = (parsed.text || '').replace(/\r/g, '\n');
-              // Добавляем разделитель с названием файла для контекста
               const fileName = file.originalname || `file${i + 1}.pdf`;
-              allTexts.push(`\n\n=== ${fileName} ===\n\n${rawText}`);
+              fileSections.push({ type: fileType, fileName, text: rawText });
             }
           } catch (e) {
             console.error(`[INGEST-IMPORT] Error parsing PDF ${i + 1}:`, e);
@@ -1014,12 +1121,28 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }
         }
         
-        if (allTexts.length === 0) {
+        if (fileSections.length === 0) {
           set({ status: 'error', error: 'Не удалось извлечь текст из PDF файлов' });
           return;
         }
         
-        const rawText = allTexts.join('\n\n');
+        // Формируем структурированный текст с четкими разделами
+        const rulesText = fileSections.find(f => f.type === 'rules')?.text || '';
+        const gameText = fileSections.find(f => f.type === 'game')?.text || '';
+        const charactersTexts = fileSections.filter(f => f.type === 'character').map(f => f.text);
+        
+        const structuredText = [
+          '=== ПРАВИЛА ИГРЫ ===',
+          rulesText,
+          '',
+          '=== ИГРА И СЦЕНАРИЙ ===',
+          gameText,
+          '',
+          '=== ПЕРСОНАЖИ ===',
+          ...charactersTexts.map((text, idx) => `--- Персонаж ${idx + 1} ---\n${text}`)
+        ].join('\n\n');
+        
+        const rawText = structuredText;
         const stripTocAndLeaders = (src: string): string => {
           let t = src;
           const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
@@ -1050,7 +1173,12 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           try {
             const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON полного сценария нашей игры без комментариев.';
             const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
-            const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, короткие описания (2–3 предложения), базовые персонажи (NPC). Опирайся на D&D 5e и единый мир.`;
+            
+            const rulesSection = rulesText ? `\n\nРАЗДЕЛ "ПРАВИЛА ИГРЫ" (используй для worldRules и gameplayRules):\n${rulesText.slice(0, 50000)}` : '';
+            const gameSection = gameText ? `\n\nРАЗДЕЛ "ИГРА И СЦЕНАРИЙ" (используй для локаций, сюжета, условий победы/поражения):\n${gameText.slice(0, 80000)}` : '';
+            const charactersSection = charactersTexts.length > 0 ? `\n\nРАЗДЕЛ "ПЕРСОНАЖИ" (извлеки всех персонажей с их характеристиками, статистикой D&D 5e):\n${charactersTexts.map((t, i) => `--- Персонаж ${i + 1} ---\n${t.slice(0, 20000)}`).join('\n\n')}` : '';
+            
+            const prompt = `Исходный текст PDF (структурирован по порядку загрузки):${rulesSection}${gameSection}${charactersSection}\n\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nВАЖНО:\n1. Из раздела "ПРАВИЛА ИГРЫ" извлеки worldRules и gameplayRules\n2. Из раздела "ИГРА И СЦЕНАРИЙ" извлеки: название игры, описание, локации (8-14), переходы между локациями, условия победы/поражения/смерти, предысторию, зацепки\n3. Из раздела "ПЕРСОНАЖИ" извлеки ВСЕХ персонажей с полной статистикой D&D 5e (level, class, hp, maxHp, ac, str, dex, con, int, wis, cha). Персонажи с isPlayable: true - это игровые персонажи (PC), остальные - NPC.\n4. Опирайся на D&D 5e и единый мир.`;
             
             const { text: content } = await generateChatCompletion({
               systemPrompt: sys,
@@ -1121,8 +1249,21 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           const out: any = sc && typeof sc === 'object' ? sc : {};
           const firstFileName = files[0]?.originalname || 'Scenario';
           out.game = out.game || { title: firstFileName.replace(/\.pdf$/i, ''), description: `Импортировано из ${files.length} PDF файл(ов)`, author: 'GM', worldRules: '—', gameplayRules: '—' };
+          
+          // Извлекаем правила из раздела "ПРАВИЛА ИГРЫ"
+          if (rulesText && (!out.game.worldRules || out.game.worldRules === '—')) {
+            const rulesMatch = rulesText.match(/(?:Правила мира|World Rules|Мировые правила)[\s\S]{0,5000}/i);
+            if (rulesMatch) out.game.worldRules = rulesMatch[0].slice(0, 3000);
+          }
+          if (rulesText && (!out.game.gameplayRules || out.game.gameplayRules === '—')) {
+            const gameplayMatch = rulesText.match(/(?:Правила игрового процесса|Gameplay Rules|Игровые правила)[\s\S]{0,5000}/i);
+            if (gameplayMatch) out.game.gameplayRules = gameplayMatch[0].slice(0, 3000);
+          }
+          
           const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
-            const idx = text.search(labelRe);
+            // Ищем в разделе "ИГРА И СЦЕНАРИЙ"
+            const searchText = gameText || text;
+            const idx = searchText.search(labelRe);
             if (idx < 0) return null;
             const tail = text.slice(idx);
             const lines = tail.split('\n');
@@ -1161,11 +1302,37 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
             }
           }
           if (!Array.isArray(out.characters)) out.characters = [];
-          if (!out.characters.length) {
-            const m = text.match(/Статистика НИП[\s\S]*/);
-            const npcBlock = m ? m[0] : '';
-            const cand: string[] = [];
-            npcBlock.split('\n').forEach((ln) => {
+          // ПОРЯДОК ИЗВЛЕЧЕНИЯ ПЕРСОНАЖЕЙ (БЕЗ FALLBACK - ТОЛЬКО РЕАЛЬНЫЕ ДАННЫЕ):
+          // 1. Сначала из второго файла (ИГРА И СЦЕНАРИЙ) - раздел "Приложение В. Статистика НИП"
+          // 2. Затем из файлов персонажей (3+ файлы) - карточки формата Long Story Short
+          
+          // 1. Извлекаем персонажей из второго файла (ИГРА) - раздел "Приложение В. Статистика НИП"
+          if (gameText) {
+            const gameChars = parseCharacterCards(gameText);
+            if (gameChars.length > 0) {
+              out.characters.push(...gameChars);
+            }
+          }
+          
+          // 2. Извлекаем персонажей из файлов персонажей (3+ файлы)
+          if (charactersTexts.length > 0) {
+            for (const charText of charactersTexts) {
+              const parsedChars = parseCharacterCards(charText);
+              if (parsedChars.length > 0) {
+                out.characters.push(...parsedChars);
+              }
+            }
+          }
+          
+          // Убираем дубликаты по имени
+          const uniqueChars = new Map<string, any>();
+          for (const char of out.characters) {
+            if (char.name && !uniqueChars.has(char.name)) {
+              uniqueChars.set(char.name, char);
+            }
+          }
+          out.characters = Array.from(uniqueChars.values());
+          // Fallback удален - только реальные данные из файлов
               const s = ln.trim().replace(/\[[^\]]+\]/g, '');
               if (!s || s.length > 48) return;
               if (/:|\./.test(s)) return;
