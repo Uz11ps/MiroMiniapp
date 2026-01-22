@@ -422,6 +422,59 @@ const GameChat: React.FC = () => {
             preserve = false;
           }
         } catch {}
+        // Проверка наличия выбранного персонажа перед стартом
+        const selCharId = selectedCharId || (() => {
+          try {
+            return window.localStorage.getItem(`mira_selected_char_${id}`);
+          } catch {
+            return null;
+          }
+        })();
+        
+        if (!selCharId) {
+          // Попробуем найти игрового персонажа автоматически
+          try {
+            const g = await fetchGame(id);
+            const playable = (g.characters || []).filter((c) => c.isPlayable !== false);
+            if (playable.length === 0) {
+              alert('В игре нет игровых персонажей. Пожалуйста, выберите персонажа перед началом игры.');
+              navigate(`/game/${id}/characters`);
+              return;
+            }
+            const firstPlayable = playable[0];
+            if (firstPlayable?.id) {
+              window.localStorage.setItem(`mira_selected_char_${id}`, firstPlayable.id);
+              setSelectedCharId(firstPlayable.id);
+            } else {
+              alert('Пожалуйста, выберите персонажа перед началом игры.');
+              navigate(`/game/${id}/characters`);
+              return;
+            }
+          } catch {
+            alert('Не удалось загрузить персонажей. Пожалуйста, выберите персонажа перед началом игры.');
+            navigate(`/game/${id}/characters`);
+            return;
+          }
+        } else {
+          // Проверяем, что выбранный персонаж является игровым
+          try {
+            const g = await fetchGame(id);
+            const selectedChar = (g.characters || []).find((c) => c.id === selCharId);
+            if (!selectedChar) {
+              alert('Выбранный персонаж не найден. Пожалуйста, выберите персонажа заново.');
+              navigate(`/game/${id}/characters`);
+              return;
+            }
+            if (selectedChar.isPlayable === false) {
+              alert('Выбранный персонаж не является игровым. Пожалуйста, выберите игрового персонажа.');
+              navigate(`/game/${id}/characters`);
+              return;
+            }
+          } catch {
+            // Если не удалось проверить, продолжаем (на сервере будет проверка)
+          }
+        }
+        
         const started = await startEngineSession({ gameId: id, lobbyId, preserve });
         setEngineSessionId(started.id);
         // Мгновенно подтянуть локацию
@@ -1156,11 +1209,28 @@ const CharacterDetails: React.FC = () => {
       <div style={{ height: 12 }} />
       <button
         className="btn block"
+        disabled={!ch?.id || ch.isPlayable === false}
         onClick={() => {
-          try { if (ch?.id) window.localStorage.setItem(`mira_selected_char_${id}`, ch.id); } catch {}
+          if (!ch?.id) {
+            alert('Пожалуйста, выберите персонажа перед началом игры');
+            return;
+          }
+          if (ch.isPlayable === false) {
+            alert('Выбранный персонаж не является игровым. Пожалуйста, выберите игрового персонажа.');
+            return;
+          }
+          try { 
+            window.localStorage.setItem(`mira_selected_char_${id}`, ch.id); 
+          } catch {}
           navigate(`/game/${id}/chat`);
         }}
-      >Начать игру</button>
+        style={{
+          opacity: (!ch?.id || ch.isPlayable === false) ? 0.5 : 1,
+          cursor: (!ch?.id || ch.isPlayable === false) ? 'not-allowed' : 'pointer'
+        }}
+      >
+        {!ch?.id ? 'Выберите персонажа' : ch.isPlayable === false ? 'Выберите игрового персонажа' : 'Начать игру'}
+      </button>
     </Sheet>
   );
 };

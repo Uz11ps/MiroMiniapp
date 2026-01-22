@@ -1,1 +1,30 @@
-
+{
+  "name": "miro-miniapp",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "./server",
+    "./apps/admin",
+    "./apps/miniapp"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=server",
+    "dev:admin": "npm run dev --workspace=@app/admin",
+    "dev:miniapp": "npm run dev --workspace=@app/miniapp",
+    "build": "npm run build --workspaces --if-present",
+    "build:server": "npm run build --workspace=server",
+    "build:admin": "npm run build --workspace=@app/admin",
+    "build:miniapp": "npm run build --workspace=@app/miniapp",
+    "install:all": "npm install",
+    "update:all": "npm update --workspaces",
+    "prisma:generate": "npm run prisma:generate --workspace=server",
+    "prisma:migrate": "npm run prisma:migrate --workspace=server"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

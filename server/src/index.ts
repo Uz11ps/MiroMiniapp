@@ -3069,6 +3069,15 @@ app.post('/api/engine/session/start', async (req, res) => {
       uid = await resolveUserIdFromQueryOrBody(req, prisma);
       if (!uid) return res.status(400).json({ error: 'user_required' });
     }
+    
+    // Проверка наличия игровых персонажей в игре
+    const playableChars = await prisma.character.findMany({ 
+      where: { gameId, isPlayable: true } 
+    });
+    if (playableChars.length === 0) {
+      return res.status(400).json({ error: 'no_playable_characters', message: 'В игре нет игровых персонажей. Игра невозможна без персонажей.' });
+    }
+    
     const first = await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
     if (!first) return res.status(404).json({ error: 'no_locations' });
     let sess = await prisma.gameSession.findFirst({
@@ -3411,26 +3420,145 @@ async function transcribeYandex(buffer: Buffer, filename: string, mime: string, 
 app.post('/api/tts', async (req, res) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text : '';
-    const voiceReq = typeof req.body?.voice === 'string' ? req.body.voice : 'jane';
+    const voiceReq = typeof req.body?.voice === 'string' ? req.body.voice : 'ru-RU-Wavenet-D';
     const format = typeof req.body?.format === 'string' ? req.body.format : 'mp3';
-    const emotionReq = typeof req.body?.emotion === 'string' ? req.body.emotion : 'friendly';
-    const speedReq = typeof req.body?.speed === 'string' ? req.body.speed : '1.05';
+    const speedReq = typeof req.body?.speed === 'string' ? parseFloat(req.body.speed) : 1.0;
+    const pitchReq = typeof req.body?.pitch === 'string' ? parseFloat(req.body.pitch) : 0.0;
     const lang = typeof req.body?.lang === 'string' ? req.body.lang : 'ru-RU';
     if (!text.trim()) return res.status(400).json({ error: 'text_required' });
-    const apiKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'tts_key_missing' });
+    
+    // Google Cloud TTS (приоритет) - используем REST API
+    const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
+    const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    
+    if (googleKey || googleCreds) {
+      try {
+        let accessToken: string | null = null;
+        
+        // Если используется Service Account, получаем access token
+        if (googleCreds) {
+          try {
+            const { TextToSpeechClient } = await import('@google-cloud/text-to-speech');
+            const client = new TextToSpeechClient({ keyFilename: googleCreds });
+            // Для Service Account используем клиент напрямую
+            const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const ssmlText = `<speak><prosody rate="${Math.max(0.75, Math.min(1.25, speedReq))}" pitch="${pitchReq >= 0 ? '+' : ''}${Math.max(-5.0, Math.min(5.0, pitchReq))}st">${escapedText}</prosody></speak>`;
+            
+            let voiceName = 'ru-RU-Wavenet-D';
+            if (voiceReq.includes('ru-RU')) {
+              voiceName = voiceReq;
+            } else if (voiceReq === 'female' || voiceReq === 'jane' || voiceReq === 'oksana') {
+              voiceName = 'ru-RU-Wavenet-E';
+            } else if (voiceReq === 'male') {
+              voiceName = 'ru-RU-Wavenet-B';
+            }
+            
+            const [response] = await client.synthesizeSpeech({
+              input: { ssml: ssmlText },
+              voice: {
+                languageCode: lang,
+                name: voiceName,
+                ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
+              },
+              audioConfig: {
+                audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
+                speakingRate: Math.max(0.75, Math.min(1.25, speedReq)),
+                pitch: Math.max(-5.0, Math.min(5.0, pitchReq)),
+                volumeGainDb: 0.0,
+                effectsProfileId: ['telephony-class-application'],
+              },
+            });
+            
+            if (response.audioContent) {
+              const audioBuffer = Buffer.from(response.audioContent as Uint8Array);
+              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+              res.setHeader('Content-Length', String(audioBuffer.length));
+              return res.send(audioBuffer);
+            }
+          } catch (serviceErr) {
+            console.error('[TTS] Google Service Account failed:', serviceErr);
+          }
+        }
+        
+        // Если используется API ключ, используем REST API напрямую
+        if (googleKey && !accessToken) {
+          const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const ssmlText = `<speak><prosody rate="${Math.max(0.75, Math.min(1.25, speedReq))}" pitch="${pitchReq >= 0 ? '+' : ''}${Math.max(-5.0, Math.min(5.0, pitchReq))}st">${escapedText}</prosody></speak>`;
+          
+          let voiceName = 'ru-RU-Wavenet-D';
+          if (voiceReq.includes('ru-RU')) {
+            voiceName = voiceReq;
+          } else if (voiceReq === 'female' || voiceReq === 'jane' || voiceReq === 'oksana') {
+            voiceName = 'ru-RU-Wavenet-E';
+          } else if (voiceReq === 'male') {
+            voiceName = 'ru-RU-Wavenet-B';
+          }
+          
+          const requestBody = {
+            input: { ssml: ssmlText },
+            voice: {
+              languageCode: lang,
+              name: voiceName,
+              ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
+            },
+            audioConfig: {
+              audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
+              speakingRate: Math.max(0.75, Math.min(1.25, speedReq)),
+              pitch: Math.max(-5.0, Math.min(5.0, pitchReq)),
+              volumeGainDb: 0.0,
+              effectsProfileId: ['telephony-class-application'],
+            },
+          };
+          
+          const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
+          const apiResponse = await undiciFetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody),
+          });
+          
+          if (apiResponse.ok) {
+            const jsonResponse = await apiResponse.json() as any;
+            if (jsonResponse.audioContent) {
+              const audioBuffer = Buffer.from(jsonResponse.audioContent, 'base64');
+              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+              res.setHeader('Content-Length', String(audioBuffer.length));
+              return res.send(audioBuffer);
+            }
+          } else {
+            const errorText = await apiResponse.text().catch(() => '');
+            console.error('[TTS] Google REST API failed:', errorText);
+          }
+        }
+      } catch (googleErr) {
+        console.error('[TTS] Google TTS failed:', googleErr);
+        // Fallback на Yandex если Google не работает
+      }
+    }
+    
+    // Fallback на Yandex TTS (если Google не настроен)
+    const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
+    if (!yandexKey && !googleKey && !googleCreds) {
+      return res.status(500).json({ error: 'tts_key_missing', message: 'Необходимо настроить GOOGLE_TTS_API_KEY или GOOGLE_APPLICATION_CREDENTIALS для Google TTS' });
+    }
+    
+    if (!yandexKey) {
+      return res.status(502).json({ error: 'tts_failed', details: 'Google TTS failed and no fallback configured' });
+    }
 
     async function synth(params: { voice: string; withExtras: boolean }) {
       const form = new FormData();
       form.append('text', text);
       form.append('lang', lang);
       form.append('voice', params.voice);
-      if (params.withExtras && emotionReq) form.append('emotion', emotionReq);
-      if (params.withExtras && speedReq) form.append('speed', speedReq);
+      if (params.withExtras) {
+        form.append('emotion', 'friendly'); // Yandex emotion
+        form.append('speed', String(speedReq)); // Используем speedReq из запроса
+      }
       form.append('format', format);
       const r = await undiciFetch('https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize', {
         method: 'POST',
-        headers: { Authorization: `Api-Key ${apiKey}` },
+        headers: { Authorization: `Api-Key ${yandexKey}` },
         body: form as any,
       });
       return r;

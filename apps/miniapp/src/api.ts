@@ -569,14 +569,17 @@ export async function ttsSynthesize(text: string, voice?: string, format?: 'mp3'
   const attempts: Array<{ voice: string; format: 'mp3' | 'oggopus' }> = [];
   // Если явно переданы — пробуем сначала их
   if (voice && format) attempts.push({ voice, format });
-  // Предпочтительный сценарий
+  // Предпочтительный сценарий для Google TTS
   if (preferOgg) {
-    attempts.push({ voice: 'jane', format: 'oggopus' });
-    attempts.push({ voice: 'jane', format: 'mp3' });
+    attempts.push({ voice: 'ru-RU-Wavenet-E', format: 'oggopus' }); // Женский голос Google
+    attempts.push({ voice: 'ru-RU-Wavenet-D', format: 'oggopus' }); // Нейтральный голос Google
+    attempts.push({ voice: 'ru-RU-Wavenet-E', format: 'mp3' });
   } else {
-    attempts.push({ voice: 'jane', format: 'mp3' });
+    attempts.push({ voice: 'ru-RU-Wavenet-E', format: 'mp3' }); // Женский голос Google
+    attempts.push({ voice: 'ru-RU-Wavenet-D', format: 'mp3' }); // Нейтральный голос Google
   }
-  // Надёжный fallback
+  // Fallback на старые голоса Yandex (если Google не работает)
+  attempts.push({ voice: 'jane', format: 'mp3' });
   attempts.push({ voice: 'oksana', format: 'mp3' });
   let lastErr: unknown = null;
   for (const att of attempts) {
@@ -585,9 +588,8 @@ export async function ttsSynthesize(text: string, voice?: string, format?: 'mp3'
         text,
         voice: att.voice,
         format: att.format,
-        emotion: 'friendly',
-        speed: '1.05',
-        pitch: '-50',
+        speed: '1.0', // Комфортный темп для настольной ролевой игры
+        pitch: '0.0', // Естественная интонация
         lang: 'ru-RU',
       };
       const res = await fetch(`${apiBase}/tts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
