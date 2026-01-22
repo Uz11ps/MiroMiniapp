@@ -1179,17 +1179,19 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         const text = stripTocAndLeaders(rawText);
         set({ progress: 'AI analyze' });
         const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
-        let scenario: any = null;
-        const tryAI = async () => {
+        let scenario: any = { game: {}, locations: [], exits: [], characters: [], editions: [] };
+        
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // ПОЭТАПНЫЙ АНАЛИЗ PDF: AI анализирует каждый файл отдельно с конкретными инструкциями
+        // ═══════════════════════════════════════════════════════════════════════════════
+        
+        // ЭТАП 1: Анализ ПРАВИЛ ИГРЫ (PDF 1)
+        if (rulesText && rulesText.trim()) {
+          set({ progress: 'AI analyzing: ПРАВИЛА ИГРЫ' });
           try {
-            const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON полного сценария нашей игры без комментариев.';
-            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
-            
-            const rulesSection = rulesText ? `\n\nРАЗДЕЛ "ПРАВИЛА ИГРЫ" (используй для worldRules и gameplayRules):\n${rulesText.slice(0, 50000)}` : '';
-            const gameSection = gameText ? `\n\nРАЗДЕЛ "ИГРА И СЦЕНАРИЙ" (используй для локаций, сюжета, условий победы/поражения):\n${gameText.slice(0, 80000)}` : '';
-            const charactersSection = charactersTexts.length > 0 ? `\n\nРАЗДЕЛ "ПЕРСОНАЖИ" (извлеки всех персонажей с их характеристиками, статистикой D&D 5e):\n${charactersTexts.map((t, i) => `--- Персонаж ${i + 1} ---\n${t.slice(0, 20000)}`).join('\n\n')}` : '';
-            
-            const prompt = `Исходный текст PDF (структурирован по порядку загрузки):${rulesSection}${gameSection}${charactersSection}\n\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nВАЖНО:\n1. Из раздела "ПРАВИЛА ИГРЫ" извлеки worldRules и gameplayRules\n2. Из раздела "ИГРА И СЦЕНАРИЙ" извлеки: название игры, описание, локации (8-14), переходы между локациями, условия победы/поражения/смерти, предысторию, зацепки\n3. Из раздела "ПЕРСОНАЖИ" извлеки ВСЕХ персонажей с полной статистикой D&D 5e (level, class, hp, maxHp, ac, str, dex, con, int, wis, cha). Персонажи с isPlayable: true - это игровые персонажи (PC), остальные - NPC.\n4. Опирайся на D&D 5e и единый мир.`;
+            const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО правила игры. Верни строго JSON без комментариев.';
+            const shape = '{ "worldRules": "...", "gameplayRules": "..." }';
+            const prompt = `Этот PDF содержит ПРАВИЛА ИГРЫ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${rulesText.slice(0, 80000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nИНСТРУКЦИИ:\n1. Извлеки "Правила мира" или "World Rules" или "Мировые правила" → worldRules\n2. Извлеки "Правила игрового процесса" или "Gameplay Rules" или "Игровые правила" → gameplayRules\n3. Если разделы не найдены явно, проанализируй текст и выдели правила мира отдельно от правил игрового процесса\n4. Верни только JSON, никаких комментариев`;
             
             const { text: content } = await generateChatCompletion({
               systemPrompt: sys,
@@ -1197,17 +1199,101 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
               history: []
             });
             
-            if (!content || !content.trim().includes('{')) return null;
-            const startIdx = content.indexOf('{');
-            const endIdx = content.lastIndexOf('}');
-            const cleaned = content.slice(startIdx, endIdx + 1);
-            return JSON.parse(cleaned);
+            if (content && content.trim().includes('{')) {
+              const startIdx = content.indexOf('{');
+              const endIdx = content.lastIndexOf('}');
+              const cleaned = content.slice(startIdx, endIdx + 1);
+              const rulesData = JSON.parse(cleaned);
+              if (rulesData.worldRules) scenario.game.worldRules = rulesData.worldRules;
+              if (rulesData.gameplayRules) scenario.game.gameplayRules = rulesData.gameplayRules;
+              console.log('[INGEST-IMPORT] Rules extracted:', { hasWorldRules: !!rulesData.worldRules, hasGameplayRules: !!rulesData.gameplayRules });
+            }
           } catch (e) {
-            console.error('[INGEST-IMPORT] Gemini failed:', e);
-            return null;
+            console.error('[INGEST-IMPORT] Rules analysis failed:', e);
           }
-        };
-        scenario = await tryAI();
+        }
+        
+        // ЭТАП 2: Анализ ИГРЫ И СЦЕНАРИЯ (PDF 2)
+        if (gameText && gameText.trim()) {
+          set({ progress: 'AI analyzing: ИГРА И СЦЕНАРИЙ' });
+          try {
+            const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО сценарий игры. Верни строго JSON без комментариев.';
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
+            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${gameText.slice(0, 100000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nИНСТРУКЦИИ:\n1. Извлеки название игры из заголовка или начала документа → game.title\n2. Извлеки описание игры → game.description\n3. Извлеки разделы "Введение", "Предыстория", "Зацепки приключения" → game.introduction, game.backstory, game.adventureHooks\n4. Извлеки условия победы/поражения/смерти (если есть) → game.winCondition, game.loseCondition, game.deathCondition\n5. Найди ВСЕ локации/сцены/главы (8-14 локаций) → locations[] с title, description, rulesPrompt\n6. Создай переходы между локациями (последовательная цепочка) → exits[]\n7. Если есть раздел "Приложение В. Статистика НИП" или "Статистика НИП" - извлеки ВСЕХ NPC с полной статистикой D&D 5e → characters[] (isPlayable: false для NPC)\n8. Опирайся на D&D 5e и единый мир\n9. Верни только JSON, никаких комментариев`;
+            
+            const { text: content } = await generateChatCompletion({
+              systemPrompt: sys,
+              userPrompt: prompt,
+              history: []
+            });
+            
+            if (content && content.trim().includes('{')) {
+              const startIdx = content.indexOf('{');
+              const endIdx = content.lastIndexOf('}');
+              const cleaned = content.slice(startIdx, endIdx + 1);
+              const gameData = JSON.parse(cleaned);
+              
+              // Объединяем данные игры
+              if (gameData.game) {
+                Object.assign(scenario.game, gameData.game);
+              }
+              if (Array.isArray(gameData.locations) && gameData.locations.length > 0) {
+                scenario.locations = gameData.locations;
+              }
+              if (Array.isArray(gameData.exits) && gameData.exits.length > 0) {
+                scenario.exits = gameData.exits;
+              }
+              // Добавляем персонажей из игры (обычно NPC)
+              if (Array.isArray(gameData.characters) && gameData.characters.length > 0) {
+                scenario.characters.push(...gameData.characters);
+                console.log('[INGEST-IMPORT] NPCs extracted from game:', gameData.characters.length);
+              }
+              console.log('[INGEST-IMPORT] Game extracted:', { 
+                hasTitle: !!gameData.game?.title, 
+                locationsCount: gameData.locations?.length || 0,
+                exitsCount: gameData.exits?.length || 0,
+                charactersCount: gameData.characters?.length || 0
+              });
+            }
+          } catch (e) {
+            console.error('[INGEST-IMPORT] Game analysis failed:', e);
+          }
+        }
+        
+        // ЭТАП 3: Анализ ПЕРСОНАЖЕЙ (PDF 3+)
+        if (charactersTexts.length > 0) {
+          set({ progress: `AI analyzing: ПЕРСОНАЖИ (${charactersTexts.length} файл(ов))` });
+          for (let i = 0; i < charactersTexts.length; i++) {
+            const charText = charactersTexts[i];
+            if (!charText || !charText.trim()) continue;
+            
+            try {
+              const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО персонажей. Верни строго JSON без комментариев.';
+              const shape = '{ "characters": [{"name":"...","isPlayable":true,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10,"persona":"...","origin":"...","role":"..."}] }';
+              const prompt = `Этот PDF содержит ПЕРСОНАЖЕЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${charText.slice(0, 50000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nИНСТРУКЦИИ:\n1. Извлеки ВСЕХ персонажей из этого PDF\n2. Для каждого персонажа извлеки: имя, раса, гендер, класс, уровень, HP, AC, характеристики (STR, DEX, CON, INT, WIS, CHA)\n3. Определи isPlayable: true для игровых персонажей (PC), false для NPC\n4. Извлеки persona (характер), origin (происхождение), role (роль) если есть\n5. Верни только JSON массив characters, никаких комментариев`;
+              
+              const { text: content } = await generateChatCompletion({
+                systemPrompt: sys,
+                userPrompt: prompt,
+                history: []
+              });
+              
+              if (content && content.trim().includes('{')) {
+                const startIdx = content.indexOf('{');
+                const endIdx = content.lastIndexOf('}');
+                const cleaned = content.slice(startIdx, endIdx + 1);
+                const charsData = JSON.parse(cleaned);
+                
+                if (Array.isArray(charsData.characters) && charsData.characters.length > 0) {
+                  scenario.characters.push(...charsData.characters);
+                  console.log(`[INGEST-IMPORT] Characters extracted from file ${i + 1}:`, charsData.characters.length);
+                }
+              }
+            } catch (e) {
+              console.error(`[INGEST-IMPORT] Character analysis failed for file ${i + 1}:`, e);
+            }
+          }
+        }
         const ensureScenario = (sc: any) => {
           const extractSections = (srcText: string): Array<{ title: string; body: string }> => {
             const markers: RegExp[] = [
@@ -1313,33 +1399,56 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
             }
           }
           if (!Array.isArray(out.characters)) out.characters = [];
-          // ПОРЯДОК ИЗВЛЕЧЕНИЯ ПЕРСОНАЖЕЙ (БЕЗ FALLBACK - ТОЛЬКО РЕАЛЬНЫЕ ДАННЫЕ):
-          // 1. Сначала из второго файла (ИГРА И СЦЕНАРИЙ) - раздел "Приложение В. Статистика НИП"
-          // 2. Затем из файлов персонажей (3+ файлы) - карточки формата Long Story Short
           
-          // 1. Извлекаем персонажей из второго файла (ИГРА) - раздел "Приложение В. Статистика НИП"
+          // ДОПОЛНИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ ПЕРСОНАЖЕЙ ИЗ ВТОРОГО PDF (ИГРА) через парсер
+          // AI уже мог извлечь персонажей, но парсер может найти больше деталей
           if (gameText) {
             const gameChars = parseCharacterCards(gameText);
             if (gameChars.length > 0) {
-              out.characters.push(...gameChars);
-            }
-          }
-          
-          // 2. Извлекаем персонажей из файлов персонажей (3+ файлы)
-          if (charactersTexts.length > 0) {
-            for (const charText of charactersTexts) {
-              const parsedChars = parseCharacterCards(charText);
-              if (parsedChars.length > 0) {
-                out.characters.push(...parsedChars);
+              // Добавляем только тех персонажей, которых еще нет
+              const existingNames = new Set(out.characters.map((c: any) => c.name?.toLowerCase()));
+              for (const char of gameChars) {
+                if (char.name && !existingNames.has(char.name.toLowerCase())) {
+                  out.characters.push(char);
+                  existingNames.add(char.name.toLowerCase());
+                }
               }
             }
           }
           
-          // Убираем дубликаты по имени
+          // ДОПОЛНИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ ПЕРСОНАЖЕЙ ИЗ ФАЙЛОВ ПЕРСОНАЖЕЙ (3+) через парсер
+          // AI уже мог извлечь персонажей, но парсер может найти больше деталей
+          if (charactersTexts.length > 0) {
+            const existingNames = new Set(out.characters.map((c: any) => c.name?.toLowerCase()));
+            for (const charText of charactersTexts) {
+              const parsedChars = parseCharacterCards(charText);
+              if (parsedChars.length > 0) {
+                for (const char of parsedChars) {
+                  if (char.name && !existingNames.has(char.name.toLowerCase())) {
+                    out.characters.push(char);
+                    existingNames.add(char.name.toLowerCase());
+                  }
+                }
+              }
+            }
+          }
+          
+          // Убираем дубликаты по имени (на всякий случай)
           const uniqueChars = new Map<string, any>();
           for (const char of out.characters) {
-            if (char.name && !uniqueChars.has(char.name)) {
-              uniqueChars.set(char.name, char);
+            if (char.name) {
+              const key = char.name.toLowerCase();
+              if (!uniqueChars.has(key)) {
+                uniqueChars.set(key, char);
+              } else {
+                // Если уже есть, берем более полную версию
+                const existing = uniqueChars.get(key);
+                const existingFields = Object.keys(existing).filter(k => existing[k] !== null && existing[k] !== undefined && existing[k] !== '' && existing[k] !== 0 && existing[k] !== 10);
+                const newFields = Object.keys(char).filter(k => char[k] !== null && char[k] !== undefined && char[k] !== '' && char[k] !== 0 && char[k] !== 10);
+                if (newFields.length > existingFields.length) {
+                  uniqueChars.set(key, char);
+                }
+              }
             }
           }
           out.characters = Array.from(uniqueChars.values());
