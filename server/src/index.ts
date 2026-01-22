@@ -1191,7 +1191,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
 
 Ты должен РАСПОЗНАТЬ смысл каждого элемента и правильно сопоставить его с нужным полем, понимая КОНТЕКСТ и НАЗНАЧЕНИЕ каждого поля.`;
 
-            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
+            const shape = '{ "game": {"title":"...","description":"...","descriptionTags":"тег1, тег2, тег3","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","promoDescriptionTags":"тег1, тег2, тег3","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","parentKey":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":"фраза для перехода","toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","role":"...","origin":"...","persona":"...","abilities":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
             
             const prompt = `Ты анализируешь ДВА документа для настольной ролевой игры D&D 5e:
 
@@ -1239,6 +1239,8 @@ ${shape}
    - Краткое привлекательное описание (2-4 предложения)
    - Художественный текст, который "продает" игру
    - Может начинаться с большой декоративной буквы
+   - promoDescriptionTags: сгенерируй 3-5 тегов через запятую (жанр, настроение, тематика)
+     Пример: "фэнтези, мрачное подземелье, мистика, приключение, D&D 5e"
 
 4. ВВЕДЕНИЕ (game.introduction):
    - РЕАЛЬНОЕ введение - описание начальной сцены
@@ -1258,15 +1260,46 @@ ${shape}
 
 7. ЛОКАЦИИ (locations[]):
    - Все разделы "Часть", "Глава", нумерованные подразделы
-   - Каждый раздел = отдельная локация
-   - title, description, rulesPrompt для каждой
+   - РАСПОЗНАВАЙ ЛОКАЦИИ И ПОДЛОКАЦИИ:
+     * Основные локации: "Часть 1", "Глава 1", крупные разделы
+     * Подлокации: вложенные разделы внутри глав (например, "Помещение с урнами", "Коридор с фальшивой дверью")
+     * Если подлокация входит в основную локацию - укажи parentKey (ключ родительской локации)
+     * Если parentKey указан, то order должен быть больше чем у родителя
+   - title, description для каждой (и основной, и подлокации)
+   - rulesPrompt: НЕ копируй из PDF! Сгенерируй краткое описание (2-3 предложения):
+     * Что окружает персонажей в этой локации (окружение, атмосфера)
+     * Что нужно сделать в локации (действия, задачи, объекты для взаимодействия)
+     * Что нужно сделать для перехода дальше (условия перехода, необходимые действия)
+   - Пример: "Вы находитесь в темном подземелье. В центре комнаты стоит алтарь с древними рунами. Чтобы открыть дверь, нужно активировать все руны на алтаре."
 
 8. ПЕРСОНАЖИ (characters[]):
    - Раздел "Приложение В. Статистика НИП" или похожий
    - ВСЕХ NPC с полной статистикой D&D 5e
    - isPlayable: false для всех NPC
+   - ОБЯЗАТЕЛЬНО заполни ВСЕ поля для каждого персонажа:
+     * name: имя персонажа
+     * race: раса (эльф, человек, гном, орк и т.д.)
+     * gender: пол (мужской, женский, не указан)
+     * role: роль в истории (страж, торговец, злодей, союзник и т.д.)
+     * origin: происхождение (откуда родом, социальный статус)
+     * persona: характер, личность (2-3 предложения о том, как персонаж ведет себя, говорит, что его мотивирует)
+     * abilities: способности, навыки (магические способности, особые умения, заклинания)
+     * class: класс D&D 5e (воин, маг, жрец и т.д.)
+     * level, hp, maxHp, ac, str, dex, con, int, wis, cha: полная статистика D&D 5e
 
-9. УСЛОВИЯ ФИНАЛА:
+9. ВЫХОДЫ (exits[]):
+   - Связи между локациями (переходы)
+   - fromKey: ключ локации, откуда переход
+   - toKey: ключ локации, куда переход
+   - type: "BUTTON" (кнопка) или "TRIGGER" (триггер-фраза)
+   - buttonText: текст кнопки (если type="BUTTON")
+   - triggerText: ОБЯЗАТЕЛЬНО сгенерируй фразы для перехода (если type="TRIGGER" или для дополнения к BUTTON)
+     * Это фразы, которые игрок может сказать для перехода
+     * Примеры: "открыть дверь", "спуститься вниз", "осмотреть алтарь", "активировать руны"
+     * Генерируй 2-3 варианта фраз через запятую
+   - isGameOver: true только если это конец игры
+
+10. УСЛОВИЯ ФИНАЛА:
    - winCondition, loseCondition, deathCondition
    - Обычно в конце документа
 
@@ -1452,6 +1485,7 @@ ${shape}
           data: {
             title: g.title || scenarioFileName.replace(/\.(pdf|txt)$/i, ''),
             description: g.description || `Импортировано из файлов правил и сценария`,
+            descriptionTags: g.descriptionTags || null,
             author: g.author || 'GM',
             coverUrl: g.coverUrl || '',
             tags: g.tags || [],
@@ -1462,6 +1496,7 @@ ${shape}
             backstory: g.backstory || null,
             adventureHooks: g.adventureHooks || null,
             promoDescription: g.promoDescription || null,
+            promoDescriptionTags: g.promoDescriptionTags || null,
             marketplaceLinks: g.marketplaceLinks || [],
             shelfCategory: g.shelfCategory || null,
             shelfPosition: typeof g.shelfPosition === 'number' ? g.shelfPosition : null,
@@ -1474,8 +1509,12 @@ ${shape}
           },
         });
         const keyToId = new Map<string, string>();
-        for (let i = 0; i < scenario.locations.length; i++) {
-          const l = scenario.locations[i] || {};
+        // Сначала создаем все основные локации (без parentKey)
+        const locationsWithoutParent = scenario.locations.filter((l: any) => !l.parentKey);
+        const locationsWithParent = scenario.locations.filter((l: any) => l.parentKey);
+        
+        for (let i = 0; i < locationsWithoutParent.length; i++) {
+          const l = locationsWithoutParent[i] || {};
           const order = Number(l.order || i + 1);
           const created = await prisma.location.create({
             data: {
@@ -1486,10 +1525,76 @@ ${shape}
               backgroundUrl: l.backgroundUrl || null,
               layout: l.layout || null,
               musicUrl: l.musicUrl || null,
+              parentLocationId: null,
             },
           });
           if (l.key) keyToId.set(String(l.key), created.id);
         }
+        
+        // Затем создаем подлокации (с parentKey)
+        for (let i = 0; i < locationsWithParent.length; i++) {
+          const l = locationsWithParent[i] || {};
+          const parentId = l.parentKey ? keyToId.get(String(l.parentKey)) : null;
+          const parentOrder = parentId ? (await prisma.location.findUnique({ where: { id: parentId }, select: { order: true } }))?.order || 0 : 0;
+          const order = Number(l.order || parentOrder + (i + 1) * 0.1);
+          const created = await prisma.location.create({
+            data: {
+              gameId: game.id, order,
+              title: l.title || `Подлокация ${i + 1}`,
+              description: l.description || null,
+              rulesPrompt: l.rulesPrompt || null,
+              backgroundUrl: l.backgroundUrl || null,
+              layout: l.layout || null,
+              musicUrl: l.musicUrl || null,
+              parentLocationId: parentId || null,
+            },
+          });
+          if (l.key) keyToId.set(String(l.key), created.id);
+        }
+        
+        // Генерируем rulesPrompt для локаций, где он пустой
+        const locationsToUpdate = await prisma.location.findMany({
+          where: { gameId: game.id, OR: [{ rulesPrompt: null }, { rulesPrompt: '' }] },
+        });
+        
+        if (locationsToUpdate.length > 0) {
+          console.log(`[INGEST-IMPORT] Generating rulesPrompt for ${locationsToUpdate.length} locations`);
+          for (const loc of locationsToUpdate) {
+            if (!loc.description || loc.description.trim().length < 10) continue;
+            
+            try {
+              const prompt = `На основе описания локации из настольной ролевой игры D&D 5e, создай краткое описание "Правил Локации" (2-3 предложения):
+
+ОПИСАНИЕ ЛОКАЦИИ:
+${loc.description}
+
+ПРАВИЛА ЛОКАЦИИ должны содержать:
+1. Что окружает персонажей (окружение, атмосфера, что они видят)
+2. Что нужно сделать в локации (действия, задачи, объекты для взаимодействия)
+3. Что нужно сделать для перехода дальше (условия перехода, необходимые действия)
+
+Верни ТОЛЬКО текст правил локации, без заголовков и пояснений.`;
+
+              const result = await generateChatCompletion({
+                systemPrompt: 'Ты помощник для создания правил локаций в настольных ролевых играх. Создавай краткие, понятные описания.',
+                userPrompt: prompt,
+                apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY || process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY,
+              });
+              
+              const generatedRules = result?.text?.trim() || '';
+              if (generatedRules && generatedRules.length > 20) {
+                await prisma.location.update({
+                  where: { id: loc.id },
+                  data: { rulesPrompt: generatedRules.slice(0, 500) },
+                });
+                console.log(`[INGEST-IMPORT] Generated rulesPrompt for location: ${loc.title}`);
+              }
+            } catch (e) {
+              console.error(`[INGEST-IMPORT] Failed to generate rulesPrompt for location ${loc.id}:`, e);
+            }
+          }
+        }
+        
         let createdExits = 0;
         for (const e of scenario.exits) {
           const fromId = keyToId.get(String(e.fromKey || ''));
@@ -1554,6 +1659,56 @@ ${shape}
               badge: e.badge || null,
             },
           });
+        }
+        
+        // Генерируем теги для description и promoDescription, если они не были сгенерированы
+        const gameUpdate: any = {};
+        if (!game.descriptionTags && game.description) {
+          try {
+            const tagsPrompt = `На основе описания игры, сгенерируй 3-5 тегов через запятую (жанр, настроение, тематика, стиль):
+ОПИСАНИЕ: ${game.description.slice(0, 500)}
+
+Верни ТОЛЬКО теги через запятую, без дополнительного текста.
+Пример: "фэнтези, мрачное подземелье, мистика, приключение, D&D 5e"`;
+            const tagsResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник для генерации тегов игр. Возвращай только теги через запятую.',
+              userPrompt: tagsPrompt,
+              apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY || process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY,
+            });
+            const tags = tagsResult?.text?.trim() || '';
+            if (tags && tags.length > 5) {
+              gameUpdate.descriptionTags = tags.slice(0, 200);
+            }
+          } catch (e) {
+            console.error('[INGEST-IMPORT] Failed to generate descriptionTags:', e);
+          }
+        }
+        if (!game.promoDescriptionTags && game.promoDescription) {
+          try {
+            const tagsPrompt = `На основе промо описания игры, сгенерируй 3-5 тегов через запятую (жанр, настроение, тематика, стиль):
+ПРОМО ОПИСАНИЕ: ${game.promoDescription.slice(0, 500)}
+
+Верни ТОЛЬКО теги через запятую, без дополнительного текста.
+Пример: "фэнтези, мрачное подземелье, мистика, приключение, D&D 5e"`;
+            const tagsResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник для генерации тегов игр. Возвращай только теги через запятую.',
+              userPrompt: tagsPrompt,
+              apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY || process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY,
+            });
+            const tags = tagsResult?.text?.trim() || '';
+            if (tags && tags.length > 5) {
+              gameUpdate.promoDescriptionTags = tags.slice(0, 200);
+            }
+          } catch (e) {
+            console.error('[INGEST-IMPORT] Failed to generate promoDescriptionTags:', e);
+          }
+        }
+        if (Object.keys(gameUpdate).length > 0) {
+          await prisma.game.update({
+            where: { id: game.id },
+            data: gameUpdate,
+          });
+          console.log('[INGEST-IMPORT] Generated tags for game');
         }
         
         // Валидация: проверка наличия игровых персонажей
@@ -4199,44 +4354,7 @@ async function generateViaGemini(prompt: string, size: string, apiKey: string): 
   const [wStr, hStr] = size.split('x');
   const w = Number(wStr); const h = Number(hStr);
 
-  for (const p of attempts) {
-    try {
-      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
-      const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
-      const body = {
-        contents: [ { parts: [ { text: `Сгенерируй фоновое изображение сцены, без текста, без водяных знаков. ${prompt}` } ] } ],
-        tools: [ { image_generation: {} } ],
-        tool_config: {
-          image_generation_config: {
-            number_of_images: 1,
-            mime_types: [ 'image/png' ],
-            width_px: Math.min(1024, Math.max(256, w)),
-            height_px: Math.min(1024, Math.max(256, h))
-          }
-        }
-      } as any;
-      const r = await undiciFetch(url, {
-        method: 'POST',
-        dispatcher,
-        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
-        body: JSON.stringify(body),
-      });
-      if (!r.ok) {
-        const t = await r.text().catch(() => '');
-        console.warn('[IMG] gemini http', r.status, t.slice(0, 200));
-        continue;
-      }
-      const data = await r.json() as any;
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const imgPart = parts.find((x: any) => x?.inline_data?.data || x?.inlineData?.data);
-      const b64 = imgPart?.inline_data?.data || imgPart?.inlineData?.data || '';
-      if (b64) return b64;
-    } catch (e) {
-
-      console.warn('[IMG] gemini attempt failed:', e);
-    }
-  }
-
+  // Используем только правильный endpoint для генерации изображений
   for (const p of attempts) {
     try {
       const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
