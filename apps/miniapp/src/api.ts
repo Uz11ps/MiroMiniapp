@@ -248,6 +248,15 @@ export async function fetchCharacterById(id: string): Promise<Character> {
   if (!res.ok) throw new Error('Not found');
   return res.json();
 }
+export async function updateCharacter(id: string, patch: Partial<Character>): Promise<Character> {
+  const res = await fetch(`${API}/characters/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error('Failed to update character');
+  return res.json();
+}
 
 export type LocationItem = { id: string; order: number; title: string; description?: string | null; backgroundUrl?: string | null; musicUrl?: string | null };
 export async function fetchLocations(gameId: string): Promise<LocationItem[]> {

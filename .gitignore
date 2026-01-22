@@ -4,3 +4,5 @@ dist/
 server/.env
 *.log
 .DS_Store
+*.md
+*.pdf

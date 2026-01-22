@@ -1288,6 +1288,55 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
               <input defaultValue={c.origin || ''} onBlur={(e) => patch(c.id, { origin: e.currentTarget.value || null })} placeholder="Происхождение" />
               <input defaultValue={c.persona || ''} onBlur={(e) => patch(c.id, { persona: e.currentTarget.value || null })} placeholder="Характер" />
             </div>
+            <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'repeat(12, 1fr)', fontSize: 12 }}>
+              <div style={{ gridColumn: 'span 2' }}>
+                <div className="muted" style={{ fontSize: 11 }}>Уровень</div>
+                <input type="number" defaultValue={c.level || 1} onBlur={(e) => patch(c.id, { level: parseInt(e.currentTarget.value) || 1 })} style={{ width: '100%' }} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}>
+                <div className="muted" style={{ fontSize: 11 }}>Класс</div>
+                <input defaultValue={c.class || ''} onBlur={(e) => patch(c.id, { class: e.currentTarget.value || null })} placeholder="Class" style={{ width: '100%' }} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}>
+                <div className="muted" style={{ fontSize: 11 }}>HP</div>
+                <input type="number" defaultValue={c.hp || 10} onBlur={(e) => patch(c.id, { hp: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}>
+                <div className="muted" style={{ fontSize: 11 }}>Max HP</div>
+                <input type="number" defaultValue={c.maxHp || c.hp || 10} onBlur={(e) => patch(c.id, { maxHp: parseInt(e.currentTarget.value) || c.hp || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}>
+                <div className="muted" style={{ fontSize: 11 }}>AC</div>
+                <input type="number" defaultValue={c.ac || 10} onBlur={(e) => patch(c.id, { ac: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}></div>
+            </div>
+            <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'repeat(6, 1fr)', fontSize: 12 }}>
+              <div>
+                <div className="muted" style={{ fontSize: 11 }}>STR</div>
+                <input type="number" defaultValue={c.str || 10} onBlur={(e) => patch(c.id, { str: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11 }}>DEX</div>
+                <input type="number" defaultValue={c.dex || 10} onBlur={(e) => patch(c.id, { dex: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11 }}>CON</div>
+                <input type="number" defaultValue={c.con || 10} onBlur={(e) => patch(c.id, { con: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11 }}>INT</div>
+                <input type="number" defaultValue={c.int || 10} onBlur={(e) => patch(c.id, { int: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11 }}>WIS</div>
+                <input type="number" defaultValue={c.wis || 10} onBlur={(e) => patch(c.id, { wis: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 11 }}>CHA</div>
+                <input type="number" defaultValue={c.cha || 10} onBlur={(e) => patch(c.id, { cha: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
+              </div>
+            </div>
             <div>
               <textarea defaultValue={c.abilities || ''} placeholder="Способности (по одной в строке)" onBlur={(e) => patch(c.id, { abilities: e.currentTarget.value || null })} />
             </div>

@@ -520,6 +520,185 @@ app.post('/api/admin/upload', upload.single('file'), async (req, res) => {
   }
 });
 
+// Улучшенный парсер карточек персонажей из PDF
+function parseCharacterCards(srcText: string): Array<any> {
+  const chars: any[] = [];
+  
+  // Поиск блоков с характеристиками D&D
+  // Вариант 1: Структурированные карточки с характеристиками
+  const cardPatterns = [
+    // Формат: Имя\nУровень: X, Класс: Y\nHP: A/B, AC: C\nSTR: D, DEX: E, CON: F, INT: G, WIS: H, CHA: I
+    /([А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\s]{2,40})\s*\n[^\n]*(?:Уровень|Level|Ур\.)[:\s]+(\d+)[^\n]*(?:Класс|Class)[:\s]+([А-Яа-яЁёA-Za-z\s]+)[^\n]*(?:HP|ХП|Хиты)[:\s]+(\d+)\/?(\d+)?[^\n]*(?:AC|КД|Класс[^\n]*брони)[:\s]+(\d+)[^\n]*(?:STR|СИЛ|Сила)[:\s]+(\d+)[^\n]*(?:DEX|ЛОВ|Ловкость)[:\s]+(\d+)[^\n]*(?:CON|ТЕЛ|Телосложение)[:\s]+(\d+)[^\n]*(?:INT|ИНТ|Интеллект)[:\s]+(\d+)[^\n]*(?:WIS|МДР|Мудрость)[:\s]+(\d+)[^\n]*(?:CHA|ХАР|Харизма)[:\s]+(\d+)/gis,
+    // Формат: Имя (Уровень X Класс)\nHP A/B AC C\nSTR D DEX E CON F INT G WIS H CHA I
+    /([А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\s]{2,40})\s*\([^\n]*(?:Ур\.|Уровень|Level)\s*(\d+)[^\n]*(?:Класс|Class)[:\s]*([А-Яа-яЁёA-Za-z\s]+)[^\n]*\)[^\n]*(?:HP|ХП)[:\s]*(\d+)\/?(\d+)?[^\n]*(?:AC|КД)[:\s]*(\d+)[^\n]*(?:STR|СИЛ)[:\s]*(\d+)[^\n]*(?:DEX|ЛОВ)[:\s]*(\d+)[^\n]*(?:CON|ТЕЛ)[:\s]*(\d+)[^\n]*(?:INT|ИНТ)[:\s]*(\d+)[^\n]*(?:WIS|МДР)[:\s]*(\d+)[^\n]*(?:CHA|ХАР)[:\s]*(\d+)/gis,
+  ];
+  
+  for (const pattern of cardPatterns) {
+    let match;
+    while ((match = pattern.exec(srcText)) !== null && chars.length < 20) {
+      const name = match[1]?.trim();
+      const level = parseInt(match[2] || '1', 10);
+      const className = match[3]?.trim();
+      const hp = parseInt(match[4] || '10', 10);
+      const maxHp = parseInt(match[5] || match[4] || '10', 10);
+      const ac = parseInt(match[6] || '10', 10);
+      const str = parseInt(match[7] || '10', 10);
+      const dex = parseInt(match[8] || '10', 10);
+      const con = parseInt(match[9] || '10', 10);
+      const int = parseInt(match[10] || '10', 10);
+      const wis = parseInt(match[11] || '10', 10);
+      const cha = parseInt(match[12] || '10', 10);
+      
+      if (name && name.length >= 2 && name.length <= 50) {
+        // Определяем, игровой персонаж или NPC по контексту
+        const matchText = match[0].toLowerCase();
+        const isPlayable = /(?:игровой|игрок|pc|player|персонаж игрока|playable)/i.test(matchText) || 
+                          !/(?:нип|npc|неигровой|враг|противник|enemy)/i.test(matchText);
+        
+        chars.push({
+          name,
+          isPlayable,
+          level: isNaN(level) ? 1 : level,
+          class: className || null,
+          hp: isNaN(hp) ? 10 : hp,
+          maxHp: isNaN(maxHp) ? hp : maxHp,
+          ac: isNaN(ac) ? 10 : ac,
+          str: isNaN(str) ? 10 : str,
+          dex: isNaN(dex) ? 10 : dex,
+          con: isNaN(con) ? 10 : con,
+          int: isNaN(int) ? 10 : int,
+          wis: isNaN(wis) ? 10 : wis,
+          cha: isNaN(cha) ? 10 : cha,
+          role: isPlayable ? 'Игровой персонаж' : 'NPC',
+        });
+      }
+    }
+    if (chars.length > 0) break; // Если нашли хотя бы одного персонажа, используем этот формат
+  }
+  
+  // Вариант 2: Поиск в блоке "Статистика НИП" или "Персонажи" с построчным парсингом
+  if (chars.length === 0) {
+    const sectionPatterns = [
+      /(?:Статистика НИП|Персонажи|Игровые персонажи|Карточки персонажей|Character Stats)[\s\S]{0,8000}/i,
+      /(?:NPC|НИП|Non-Player Characters)[\s\S]{0,5000}/i,
+    ];
+    
+    for (const sectionPattern of sectionPatterns) {
+      const sectionMatch = srcText.match(sectionPattern);
+      if (!sectionMatch) continue;
+      
+      const section = sectionMatch[0];
+      const lines = section.split('\n');
+      let currentChar: any = null;
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        
+        // Имя персонажа (строка с большой буквы, без цифр в начале, не слишком длинная)
+        if (/^[А-ЯA-Z][А-Яа-яЁёA-Za-z\s]{2,40}$/.test(line) && !/^[0-9]/.test(line) && !/^(?:HP|AC|STR|DEX|CON|INT|WIS|CHA|Уровень|Класс|Level|Class)/i.test(line)) {
+          if (currentChar && currentChar.name) {
+            chars.push(currentChar);
+          }
+          const isPlayable = /(?:игровой|игрок|pc|player|playable)/i.test(section);
+          currentChar = {
+            name: line,
+            isPlayable,
+            level: 1,
+            hp: 10,
+            maxHp: 10,
+            ac: 10,
+            str: 10,
+            dex: 10,
+            con: 10,
+            int: 10,
+            wis: 10,
+            cha: 10,
+            role: isPlayable ? 'Игровой персонаж' : 'NPC',
+          };
+        }
+        
+        // Извлечение характеристик из следующих строк
+        if (currentChar) {
+          const hpMatch = line.match(/(?:HP|ХП|Хиты)[:\s]+(\d+)\/?(\d+)?/i);
+          if (hpMatch) {
+            currentChar.hp = parseInt(hpMatch[1] || '10', 10);
+            currentChar.maxHp = parseInt(hpMatch[2] || hpMatch[1] || '10', 10);
+          }
+          
+          const acMatch = line.match(/(?:AC|КД|Класс[^\n]*брони)[:\s]+(\d+)/i);
+          if (acMatch) currentChar.ac = parseInt(acMatch[1] || '10', 10);
+          
+          const levelMatch = line.match(/(?:Уровень|Level|Ур\.)[:\s]+(\d+)/i);
+          if (levelMatch) currentChar.level = parseInt(levelMatch[1] || '1', 10);
+          
+          const classMatch = line.match(/(?:Класс|Class)[:\s]+([А-Яа-яЁёA-Za-z\s]+)/i);
+          if (classMatch) currentChar.class = classMatch[1].trim();
+          
+          const strMatch = line.match(/(?:STR|СИЛ|Сила)[:\s]+(\d+)/i);
+          if (strMatch) currentChar.str = parseInt(strMatch[1] || '10', 10);
+          
+          const dexMatch = line.match(/(?:DEX|ЛОВ|Ловкость)[:\s]+(\d+)/i);
+          if (dexMatch) currentChar.dex = parseInt(dexMatch[1] || '10', 10);
+          
+          const conMatch = line.match(/(?:CON|ТЕЛ|Телосложение)[:\s]+(\d+)/i);
+          if (conMatch) currentChar.con = parseInt(conMatch[1] || '10', 10);
+          
+          const intMatch = line.match(/(?:INT|ИНТ|Интеллект)[:\s]+(\d+)/i);
+          if (intMatch) currentChar.int = parseInt(intMatch[1] || '10', 10);
+          
+          const wisMatch = line.match(/(?:WIS|МДР|Мудрость)[:\s]+(\d+)/i);
+          if (wisMatch) currentChar.wis = parseInt(wisMatch[1] || '10', 10);
+          
+          const chaMatch = line.match(/(?:CHA|ХАР|Харизма)[:\s]+(\d+)/i);
+          if (chaMatch) currentChar.cha = parseInt(chaMatch[1] || '10', 10);
+        }
+        
+        if (chars.length >= 15) break;
+      }
+      
+      if (currentChar && currentChar.name) {
+        chars.push(currentChar);
+      }
+      
+      if (chars.length > 0) break;
+    }
+  }
+  
+  // Вариант 3: Простой fallback - только имена из блока "Статистика НИП"
+  if (chars.length === 0) {
+    const m = srcText.match(/Статистика НИП[\s\S]{0,3000}/i);
+    const npcBlock = m ? m[0] : '';
+    const cand: string[] = [];
+    npcBlock.split('\n').forEach((ln) => {
+      const s = ln.trim().replace(/\[[^\]]+\]/g, '');
+      if (!s || s.length > 48) return;
+      if (/:|\./.test(s)) return;
+      if (/^[0-9]/.test(s)) return;
+      if (/^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-\. ]{1,}$/.test(s)) cand.push(s);
+    });
+    const uniq: string[] = [];
+    for (const n of cand) { if (!uniq.includes(n)) uniq.push(n); if (uniq.length >= 10) break; }
+    chars.push(...uniq.map((name) => ({ 
+      name, 
+      isPlayable: false, 
+      role: 'NPC',
+      level: 1,
+      hp: 10,
+      maxHp: 10,
+      ac: 10,
+      str: 10,
+      dex: 10,
+      con: 10,
+      int: 10,
+      wis: 10,
+      cha: 10,
+    })));
+  }
+  
+  return chars;
+}
+
 app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
   try {
     const fixLatin1 = (s: unknown): string => {
@@ -531,8 +710,35 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       return str;
     };
     if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
-    const parsed = await pdfParse(req.file.buffer).catch(() => null);
-    const rawText = (parsed?.text || '').replace(/\r/g, '\n');
+    if (req.file.buffer.length === 0) return res.status(400).json({ error: 'file_empty' });
+    
+    // Проверка типа файла
+    const fileName = req.file.originalname || '';
+    if (!fileName.toLowerCase().endsWith('.pdf')) {
+      return res.status(400).json({ error: 'invalid_file_type', expected: 'PDF' });
+    }
+    if (req.file.mimetype && req.file.mimetype !== 'application/pdf') {
+      return res.status(400).json({ error: 'invalid_mime_type', expected: 'application/pdf' });
+    }
+    
+    // Парсинг PDF с обработкой ошибок
+    let parsed;
+    try {
+      parsed = await pdfParse(req.file.buffer);
+    } catch (e) {
+      console.error('[PDF INGEST] Parse error:', e);
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      if (errorMsg.includes('password') || errorMsg.includes('encrypted')) {
+        return res.status(400).json({ error: 'pdf_password_protected', message: 'PDF защищен паролем. Снимите защиту перед загрузкой.' });
+      }
+      return res.status(400).json({ error: 'pdf_parse_failed', details: errorMsg });
+    }
+    
+    if (!parsed || !parsed.text) {
+      return res.status(400).json({ error: 'pdf_no_text', message: 'PDF не содержит извлекаемого текста. Возможно, это сканированное изображение.' });
+    }
+    
+    const rawText = parsed.text.replace(/\r/g, '\n');
     const stripTocAndLeaders = (src: string): string => {
       let t = src;
       const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
@@ -558,13 +764,14 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
     const text = stripTocAndLeaders(rawText).slice(0, 200000);
     if (!text.trim()) return res.status(400).json({ error: 'pdf_empty' });
     const fast = String(req.query.fast || req.body?.fast || '') === '1';
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
     let scenario: any = null;
     if ((geminiKey || apiKey) && !fast) {
       try {
         const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON-схему полного сценария для нашей игры без комментариев и лишнего текста.';
-        const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
-        const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, осмысленные названия сцен и короткие (2-3 предложения) описания. Опирайся на D&D 5e и единый мир.`;
+        const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
+        const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, осмысленные названия сцен и короткие (2-3 предложения) описания. Опирайся на D&D 5e и единый мир. Обязательно извлеки условия финала (winCondition, loseCondition, deathCondition) если они есть в тексте.`;
         
         const { text: generatedText } = await generateChatCompletion({
           systemPrompt: sys,
@@ -576,9 +783,32 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
         const startIdx = content.indexOf('{');
         const endIdx = content.lastIndexOf('}');
         const cleaned = (startIdx >= 0 && endIdx >= 0) ? content.slice(startIdx, endIdx + 1) : content;
-        scenario = JSON.parse(cleaned);
+        
+        // Валидация JSON
+        try {
+          scenario = JSON.parse(cleaned);
+          
+          // Проверка структуры
+          if (!scenario || typeof scenario !== 'object') {
+            throw new Error('Invalid JSON structure');
+          }
+          
+          if (!Array.isArray(scenario.locations) || scenario.locations.length === 0) {
+            console.warn('[PDF INGEST] AI returned no locations, using fallback');
+            scenario = null;
+          }
+          
+          if (!scenario.game || typeof scenario.game !== 'object') {
+            scenario.game = scenario.game || {};
+          }
+        } catch (e) {
+          console.error('[PDF INGEST] JSON parse error:', e);
+          console.error('[PDF INGEST] Content preview:', cleaned.slice(0, 500));
+          scenario = null; // Использовать fallback
+        }
       } catch (e) {
-        console.error('PDF ingest AI failed:', e);
+        console.error('[PDF INGEST] AI failed:', e);
+        scenario = null; // Использовать fallback
       }
     }
     const buildScenarioFromText = (srcText: string) => {
@@ -607,6 +837,9 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       const introduction = pickBlock(/(^|\n)\s*Введение\s*$/im, 'intro') || null;
       const backstory = pickBlock(/(^|\n)\s*Предыстория\s*$/im, 'back') || null;
       const adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*$/im, 'hooks') || null;
+      const winCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+побед[ыы]\s*$/im) || pickBlock(/(^|\n)\s*Побед[аы]\s*$/im) || null;
+      const loseCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+поражени[яя]\s*$/im) || pickBlock(/(^|\n)\s*Поражени[ея]\s*$/im) || null;
+      const deathCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+смерти\s*$/im) || pickBlock(/(^|\n)\s*Смерть\s*$/im) || null;
       const extractSections = (): Array<{ title: string; body: string }> => {
         const markers: RegExp[] = [
           /^\s*(Глава|Локация|Сцена|Часть)\s+([^\n]{3,100})/gmi,
@@ -661,9 +894,10 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       const locations = sections.length ? sections.map((s, i) => ({ key: `loc${i + 1}`, order: i + 1, title: s.title, description: s.body, backgroundUrl: null, musicUrl: null })) :
         [{ key: 'start', order: 1, title: 'Стартовая локация', description: srcText.split('\n').slice(0, 8).join('\n'), backgroundUrl: null, musicUrl: null }];
       const exits = locations.length > 1 ? locations.slice(0, -1).map((_, i) => ({ fromKey: `loc${i + 1}`, type: 'BUTTON', buttonText: 'Дальше', triggerText: null, toKey: `loc${i + 2}`, isGameOver: false })) : [];
+      const characters = parseCharacterCards(srcText);
       return {
-        game: { title: fixLatin1(req.file.originalname.replace(/\.pdf$/i, '')), description: 'Импортировано из PDF', author: 'GM', worldRules, gameplayRules, introduction, backstory, adventureHooks },
-        locations, exits,
+        game: { title: fixLatin1(req.file.originalname.replace(/\.pdf$/i, '')), description: 'Импортировано из PDF', author: 'GM', worldRules, gameplayRules, introduction, backstory, adventureHooks, winCondition, loseCondition, deathCondition },
+        locations, exits, characters,
       };
     };
     if (!scenario || !scenario.locations || !scenario.locations.length) {
@@ -676,6 +910,18 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       })();
       if (!scenario.game.gameplayRules) scenario.game.gameplayRules = ((): string | null => {
         const blk = (text.match(/Правила игрового процесса[\s\S]{0,2000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 1800) : null;
+      })();
+      if (!scenario.game.winCondition) scenario.game.winCondition = ((): string | null => {
+        const blk = (text.match(/(?:Услови[ея]\s+побед[ыы]|Побед[аы])[\s\S]{0,2000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 1800) : null;
+      })();
+      if (!scenario.game.loseCondition) scenario.game.loseCondition = ((): string | null => {
+        const blk = (text.match(/(?:Услови[ея]\s+поражени[яя]|Поражени[ея])[\s\S]{0,2000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 1800) : null;
+      })();
+      if (!scenario.game.deathCondition) scenario.game.deathCondition = ((): string | null => {
+        const blk = (text.match(/(?:Услови[ея]\s+смерти|Смерть)[\s\S]{0,2000}/i)?.[0] || '').trim();
         return blk ? blk.slice(0, 1800) : null;
       })();
     }
@@ -741,7 +987,7 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
         const tryAI = async () => {
           try {
             const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON полного сценария нашей игры без комментариев.';
-            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16"}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
             const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, короткие описания (2–3 предложения), базовые персонажи (NPC). Опирайся на D&D 5e и единый мир.`;
             
             const { text: content } = await generateChatCompletion({
@@ -836,6 +1082,9 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
           if (!out.game.introduction) out.game.introduction = pickBlock(/(^|\n)\s*Введение\s*$/im, 'intro') || null;
           if (!out.game.backstory) out.game.backstory = pickBlock(/(^|\n)\s*Предыстория\s*$/im, 'back') || null;
           if (!out.game.adventureHooks) out.game.adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*$/im, 'hooks') || null;
+          if (!out.game.winCondition) out.game.winCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+побед[ыы]\s*$/im) || pickBlock(/(^|\n)\s*Побед[аы]\s*$/im) || null;
+          if (!out.game.loseCondition) out.game.loseCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+поражени[яя]\s*$/im) || pickBlock(/(^|\n)\s*Поражени[ея]\s*$/im) || null;
+          if (!out.game.deathCondition) out.game.deathCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+смерти\s*$/im) || pickBlock(/(^|\n)\s*Смерть\s*$/im) || null;
           const locs: any[] = Array.isArray(out.locations) ? out.locations : [];
           if (!locs.length) {
             const sections = extractSections(text);
@@ -862,7 +1111,10 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
             });
             const uniq: string[] = [];
             for (const n of cand) { if (!uniq.includes(n)) uniq.push(n); if (uniq.length >= 10) break; }
-            out.characters = uniq.map((name) => ({ name, isPlayable: false, role: 'NPC' }));
+            const parsedChars = parseCharacterCards(text);
+            if (parsedChars.length > 0) {
+              out.characters = parsedChars;
+            }
           }
           if (!Array.isArray(out.editions) || !out.editions.length) out.editions = [{ name: 'Стандарт', description: '—', price: 0, badge: null }];
           return out;
@@ -891,6 +1143,9 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
             bannerStyle: g.bannerStyle || null,
             ageRating: g.ageRating || null,
             status: g.status || 'DRAFT',
+            winCondition: g.winCondition || null,
+            loseCondition: g.loseCondition || null,
+            deathCondition: g.deathCondition || null,
           },
         });
         const keyToId = new Map<string, string>();
@@ -975,6 +1230,21 @@ app.post('/api/admin/ingest-import', upload.single('file'), async (req, res) => 
             },
           });
         }
+        
+        // Валидация: проверка наличия игровых персонажей
+        const playableChars = await prisma.character.findMany({ 
+          where: { gameId: game.id, isPlayable: true } 
+        });
+        if (playableChars.length === 0) {
+          // Удаляем игру, если нет игровых персонажей
+          await prisma.game.delete({ where: { id: game.id } });
+          set({ 
+            status: 'error', 
+            error: 'Игра должна содержать хотя бы одного игрового персонажа. Добавьте персонажей с флагом isPlayable: true.' 
+          });
+          return;
+        }
+        
         set({ progress: 'Generate backgrounds' });
         const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
         const oaKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;

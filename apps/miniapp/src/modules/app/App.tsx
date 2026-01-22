@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter } from '../../api';
 
 import '../../styles.css';
 
@@ -998,12 +998,21 @@ const CharacterDetails: React.FC = () => {
   const id = routeId || '1';
   const [game, setGame] = useState<Awaited<ReturnType<typeof fetchGame>> | null>(null);
   const [ch, setCh] = useState<import('../../api').Character | null>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [editingGender, setEditingGender] = useState(false);
+  const [nameValue, setNameValue] = useState('');
+  const [genderValue, setGenderValue] = useState('');
   useEffect(() => {
     fetchGame(id).then((g) => {
       setGame(g);
       const playable = (g.characters || []).filter((c) => c.isPlayable !== false);
       const idx = Math.max(0, Math.min(playable.length - 1, (Number(charId) || 1) - 1));
-      setCh(playable[idx] || null);
+      const char = playable[idx] || null;
+      setCh(char);
+      if (char) {
+        setNameValue(char.name || '');
+        setGenderValue(char.gender || '');
+      }
     }).catch(() => {});
   }, [id, charId]);
   return (
@@ -1059,9 +1068,91 @@ const CharacterDetails: React.FC = () => {
         <div className="muted">{ch?.description || 'Описание персонажа появится здесь.'}</div>
       </div>
       <div style={{ height: 12 }} />
-      <div className="muted">Изменить имя персонажа</div>
-      <div style={{ height: 6 }} />
-      <input className="input" placeholder={ch?.name || 'Ваш вариант'} />
+      <div className="card" style={{ padding: 12 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>Настройки персонажа</div>
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>Имя персонажа</div>
+            {editingName ? (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input 
+                  className="input" 
+                  value={nameValue} 
+                  onChange={(e) => setNameValue(e.target.value)}
+                  placeholder={ch?.name || 'Имя'}
+                  style={{ flex: 1 }}
+                />
+                <button 
+                  className="btn" 
+                  onClick={async () => {
+                    if (ch?.id && nameValue.trim()) {
+                      try {
+                        const updated = await updateCharacter(ch.id, { name: nameValue.trim() });
+                        setCh(updated);
+                        setEditingName(false);
+                      } catch (e) {
+                        alert('Не удалось сохранить имя');
+                      }
+                    }
+                  }}
+                >Сохранить</button>
+                <button 
+                  className="btn secondary" 
+                  onClick={() => {
+                    setNameValue(ch?.name || '');
+                    setEditingName(false);
+                  }}
+                >Отмена</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1 }}>{ch?.name || '—'}</div>
+                <button className="btn secondary" onClick={() => setEditingName(true)} style={{ fontSize: 12, padding: '4px 8px' }}>Изменить</button>
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>Пол персонажа</div>
+            {editingGender ? (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input 
+                  className="input" 
+                  value={genderValue} 
+                  onChange={(e) => setGenderValue(e.target.value)}
+                  placeholder={ch?.gender || 'Пол'}
+                  style={{ flex: 1 }}
+                />
+                <button 
+                  className="btn" 
+                  onClick={async () => {
+                    if (ch?.id) {
+                      try {
+                        const updated = await updateCharacter(ch.id, { gender: genderValue.trim() || null });
+                        setCh(updated);
+                        setEditingGender(false);
+                      } catch (e) {
+                        alert('Не удалось сохранить пол');
+                      }
+                    }
+                  }}
+                >Сохранить</button>
+                <button 
+                  className="btn secondary" 
+                  onClick={() => {
+                    setGenderValue(ch?.gender || '');
+                    setEditingGender(false);
+                  }}
+                >Отмена</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1 }}>{ch?.gender || '—'}</div>
+                <button className="btn secondary" onClick={() => setEditingGender(true)} style={{ fontSize: 12, padding: '4px 8px' }}>Изменить</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
       <div style={{ height: 12 }} />
       <button
         className="btn block"
@@ -1069,7 +1160,7 @@ const CharacterDetails: React.FC = () => {
           try { if (ch?.id) window.localStorage.setItem(`mira_selected_char_${id}`, ch.id); } catch {}
           navigate(`/game/${id}/chat`);
         }}
-      >Начать</button>
+      >Начать игру</button>
     </Sheet>
   );
 };
