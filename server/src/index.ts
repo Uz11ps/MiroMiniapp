@@ -101,7 +101,7 @@ function createOpenAIClient(apiKey: string) {
 const upload = multer({ 
   storage: multer.memoryStorage(), 
   limits: { 
-    fileSize: 25 * 1024 * 1024, // 25MB per file
+    fileSize: 100 * 1024 * 1024, // 100MB per file (достаточно для больших PDF)
     files: 10 // max 10 files
   } 
 });
@@ -953,7 +953,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
     if (err) {
       console.error('[INGEST-IMPORT] Multer error:', err);
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'file_too_large', message: 'Файл слишком большой. Максимальный размер: 25MB' });
+        return res.status(400).json({ error: 'file_too_large', message: 'Файл слишком большой. Максимальный размер: 100MB' });
       }
       if (err.code === 'LIMIT_FILE_COUNT') {
         return res.status(400).json({ error: 'too_many_files', message: 'Слишком много файлов. Максимум: 10' });
