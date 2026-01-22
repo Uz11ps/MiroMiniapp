@@ -187,7 +187,8 @@ try {
   console.error('[SERVER] Failed to load AI prompts:', e);
 }
 console.log('[SERVER] AI prompts initialized');
-console.log('[SERVER] About to define getSysPrompt function...');
+process.stdout.write('[SERVER] About to define getSysPrompt function...\n');
+process.stdout.flush && process.stdout.flush();
 function getSysPrompt(): string {
   return aiPrompts.system || DEFAULT_SYSTEM_PROMPT;
 }
