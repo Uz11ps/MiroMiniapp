@@ -1091,40 +1091,24 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
       try {
         set({ status: 'running', progress: `Reading ${files.length} PDF file(s)...` });
         
-        // Парсим все PDF с учетом порядка: 1) Правила, 2) Игра, 3+) Персонажи
-        const fileSections: Array<{ type: 'rules' | 'game' | 'character'; fileName: string; text: string }> = [];
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // ОБРАБОТКА ТОЛЬКО ФАЙЛА СЦЕНАРИЯ
+        // ═══════════════════════════════════════════════════════════════════════════════
         
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // ТОЧНЫЙ ПОРЯДОК ОБРАБОТКИ ФАЙЛОВ (ВАЖНО!):
-        // 1. ПЕРВЫЙ ФАЙЛ (i === 0) → ПРАВИЛА ИГРЫ (rules)
-        // 2. ВТОРОЙ ФАЙЛ (i === 1) → ИГРА И СЦЕНАРИЙ (game)
-        // 3. ТРЕТИЙ И ДАЛЬШЕ (i >= 2) → ПЕРСОНАЖИ (character) - неограниченное количество
-        // ═══════════════════════════════════════════════════════════════════════════════
+        // Обрабатываем все загруженные файлы как сценарии (объединяем их текст)
+        let gameText = '';
         
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
-          let fileType: 'rules' | 'game' | 'character';
-          
-          if (i === 0) {
-            // ФАЙЛ №1: ПРАВИЛА ИГРЫ
-            fileType = 'rules';
-            set({ progress: `Reading PDF ${i + 1}/${files.length}: ПРАВИЛА ИГРЫ - ${file.originalname || 'file'}` });
-          } else if (i === 1) {
-            // ФАЙЛ №2: ИГРА И СЦЕНАРИЙ (включая раздел "Приложение В. Статистика НИП")
-            fileType = 'game';
-            set({ progress: `Reading PDF ${i + 1}/${files.length}: ИГРА И СЦЕНАРИЙ - ${file.originalname || 'file'}` });
-          } else {
-            // ФАЙЛ №3+: ПЕРСОНАЖИ (карточки формата Long Story Short, неограниченное количество)
-            fileType = 'character';
-            set({ progress: `Reading PDF ${i + 1}/${files.length}: ПЕРСОНАЖ - ${file.originalname || 'file'}` });
-          }
+          set({ progress: `Reading PDF ${i + 1}/${files.length}: СЦЕНАРИЙ - ${file.originalname || 'file'}` });
           
           try {
             const parsed = await pdfParse(file.buffer).catch(() => null);
             if (parsed && parsed.text) {
               const rawText = (parsed.text || '').replace(/\r/g, '\n');
-              const fileName = file.originalname || `file${i + 1}.pdf`;
-              fileSections.push({ type: fileType, fileName, text: rawText });
+              // Объединяем текст всех файлов
+              if (gameText) gameText += '\n\n';
+              gameText += rawText;
             }
           } catch (e) {
             console.error(`[INGEST-IMPORT] Error parsing PDF ${i + 1}:`, e);
@@ -1132,28 +1116,12 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }
         }
         
-        if (fileSections.length === 0) {
+        if (!gameText || !gameText.trim()) {
           set({ status: 'error', error: 'Не удалось извлечь текст из PDF файлов' });
           return;
         }
         
-        // Формируем структурированный текст с четкими разделами
-        const rulesText = fileSections.find(f => f.type === 'rules')?.text || '';
-        const gameText = fileSections.find(f => f.type === 'game')?.text || '';
-        const charactersTexts = fileSections.filter(f => f.type === 'character').map(f => f.text);
-        
-        const structuredText = [
-          '=== ПРАВИЛА ИГРЫ ===',
-          rulesText,
-          '',
-          '=== ИГРА И СЦЕНАРИЙ ===',
-          gameText,
-          '',
-          '=== ПЕРСОНАЖИ ===',
-          ...charactersTexts.map((text, idx) => `--- Персонаж ${idx + 1} ---\n${text}`)
-        ].join('\n\n');
-        
-        const rawText = structuredText;
+        // Очистка текста от оглавления и лишних символов
         const stripTocAndLeaders = (src: string): string => {
           let t = src;
           const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
@@ -1176,50 +1144,23 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }).join('\n');
           return head + tail;
         };
-        const text = stripTocAndLeaders(rawText);
-        set({ progress: 'AI analyze' });
+        const text = stripTocAndLeaders(gameText);
+        
+        set({ progress: 'AI analyzing: СЦЕНАРИЙ' });
         const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
         let scenario: any = { game: {}, locations: [], exits: [], characters: [], editions: [] };
         
         // ═══════════════════════════════════════════════════════════════════════════════
-        // ПОЭТАПНЫЙ АНАЛИЗ PDF: AI анализирует каждый файл отдельно с конкретными инструкциями
+        // АНАЛИЗ СЦЕНАРИЯ: AI анализирует файл сценария
         // ═══════════════════════════════════════════════════════════════════════════════
         
-        // ЭТАП 1: Анализ ПРАВИЛ ИГРЫ (PDF 1)
-        if (rulesText && rulesText.trim()) {
-          set({ progress: 'AI analyzing: ПРАВИЛА ИГРЫ' });
-          try {
-            const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО правила игры. Верни строго JSON без комментариев.';
-            const shape = '{ "worldRules": "...", "gameplayRules": "..." }';
-            const prompt = `Этот PDF содержит ПРАВИЛА ИГРЫ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${rulesText.slice(0, 80000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nИНСТРУКЦИИ:\n1. Извлеки "Правила мира" или "World Rules" или "Мировые правила" → worldRules\n2. Извлеки "Правила игрового процесса" или "Gameplay Rules" или "Игровые правила" → gameplayRules\n3. Если разделы не найдены явно, проанализируй текст и выдели правила мира отдельно от правил игрового процесса\n4. Верни только JSON, никаких комментариев`;
-            
-            const { text: content } = await generateChatCompletion({
-              systemPrompt: sys,
-              userPrompt: prompt,
-              history: []
-            });
-            
-            if (content && content.trim().includes('{')) {
-              const startIdx = content.indexOf('{');
-              const endIdx = content.lastIndexOf('}');
-              const cleaned = content.slice(startIdx, endIdx + 1);
-              const rulesData = JSON.parse(cleaned);
-              if (rulesData.worldRules) scenario.game.worldRules = rulesData.worldRules;
-              if (rulesData.gameplayRules) scenario.game.gameplayRules = rulesData.gameplayRules;
-              console.log('[INGEST-IMPORT] Rules extracted:', { hasWorldRules: !!rulesData.worldRules, hasGameplayRules: !!rulesData.gameplayRules });
-            }
-          } catch (e) {
-            console.error('[INGEST-IMPORT] Rules analysis failed:', e);
-          }
-        }
-        
-        // ЭТАП 2: Анализ ИГРЫ И СЦЕНАРИЯ (PDF 2)
+        // Анализ СЦЕНАРИЯ
         if (gameText && gameText.trim()) {
           set({ progress: 'AI analyzing: ИГРА И СЦЕНАРИЙ' });
           try {
             const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО сценарий игры. Верни строго JSON без комментариев.';
             const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
-            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${gameText.slice(0, 100000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nКРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ ПО ИЗВЛЕЧЕНИЮ РАЗДЕЛОВ:\n\n1. НАЗВАНИЕ И ОПИСАНИЕ:\n   - game.title: извлеки из заголовка документа или первой строки (НЕ придумывай!)\n   - game.description: краткое описание игры (2-3 предложения)\n\n2. РАЗДЕЛ "ВВЕДЕНИЕ" (game.introduction):\n   - ИЩИ ТОЧНО: "Введение", "ВВЕДЕНИЕ", "Introduction", "Вступление"\n   - Это может быть отдельная глава или раздел\n   - Извлеки ВЕСЬ текст этого раздела от заголовка до следующего раздела\n   - Если раздела нет - верни null, НЕ придумывай!\n\n3. РАЗДЕЛ "ПРЕДЫСТОРИЯ" (game.backstory):\n   - ИЩИ ТОЧНО: "Предыстория", "ПРЕДЫСТОРИЯ", "Backstory", "История", "История мира"\n   - Это может быть отдельная глава или раздел\n   - Извлеки ВЕСЬ текст этого раздела от заголовка до следующего раздела\n   - Если раздела нет - верни null, НЕ придумывай!\n\n4. РАЗДЕЛ "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ" (game.adventureHooks):\n   - ИЩИ ТОЧНО: "Зацепки приключения", "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ", "Adventure Hooks", "Крючки", "Зацепки"\n   - Это может быть отдельная глава или раздел\n   - Извлеки ВЕСЬ текст этого раздела от заголовка до следующего раздела\n   - Если раздела нет - верни null, НЕ придумывай!\n\n5. УСЛОВИЯ ФИНАЛА:\n   - game.winCondition: "Условия победы" или "Победа"\n   - game.loseCondition: "Условия поражения" или "Поражение"\n   - game.deathCondition: "Условия смерти" или "Смерть"\n\n6. ЛОКАЦИИ (8-14 локаций):\n   - Ищи разделы: "Глава", "Часть", "Сцена", "Локация", нумерованные списки (1., 2., 3.)\n   - Каждая локация: key="loc1", order=1, title="Название", description="Описание (2-3 предложения)", rulesPrompt="Правила для этой локации"\n\n7. ПЕРЕХОДЫ МЕЖДУ ЛОКАЦИЯМИ:\n   - exits[]: создай переходы от loc1 → loc2, loc2 → loc3, и т.д.\n\n8. NPC (если есть раздел "Приложение В. Статистика НИП"):\n   - characters[]: извлеки ВСЕХ NPC с полной статистикой D&D 5e (isPlayable: false)\n\n9. Верни ТОЛЬКО JSON, никаких комментариев!`;
+            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${gameText.slice(0, 100000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nКРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ ПО ИЗВЛЕЧЕНИЮ РАЗДЕЛОВ:\n\nНА ФРОНТЕНДЕ ЕСТЬ ПОЛЯ:\n- "Введение" (placeholder="Введение") → game.introduction\n- "Предыстория" (placeholder="Предыстория") → game.backstory\n- "Зацепки приключения" (placeholder="Зацепки приключения") → game.adventureHooks\n\nТВОЯ ЗАДАЧА - НАЙТИ РАЗДЕЛЫ В PDF ПО ТОЧНЫМ НАЗВАНИЯМ И ИЗВЛЕЧЬ ИХ СОДЕРЖИМОЕ:\n\n1. РАЗДЕЛ "ВВЕДЕНИЕ" → game.introduction:\n   - ИЩИ ТОЧНО заголовок: "Введение", "ВВЕДЕНИЕ", "Introduction", "Вступление"\n   - НАЙДИ этот заголовок в тексте\n   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)\n   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Предыстория", "Глава", "Часть" и т.д.)\n   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!\n   - Если раздела нет - верни null\n\n2. РАЗДЕЛ "ПРЕДЫСТОРИЯ" → game.backstory:\n   - ИЩИ ТОЧНО заголовок: "Предыстория", "ПРЕДЫСТОРИЯ", "Backstory", "История", "История мира"\n   - НАЙДИ этот заголовок в тексте\n   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)\n   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Зацепки", "Глава", "Часть" и т.д.)\n   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!\n   - Если раздела нет - верни null\n\n3. РАЗДЕЛ "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ" → game.adventureHooks:\n   - ИЩИ ТОЧНО заголовок: "Зацепки приключения", "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ", "Adventure Hooks", "Крючки", "Зацепки"\n   - НАЙДИ этот заголовок в тексте\n   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)\n   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Глава", "Часть", "Сцена" и т.д.)\n   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!\n   - Если раздела нет - верни null\n\n4. НАЗВАНИЕ И ОПИСАНИЕ:\n   - game.title: извлеки из заголовка документа или первой строки (НЕ придумывай!)\n   - game.description: краткое описание игры (2-3 предложения)\n\n5. УСЛОВИЯ ФИНАЛА:\n   - game.winCondition: "Условия победы" или "Победа"\n   - game.loseCondition: "Условия поражения" или "Поражение"\n   - game.deathCondition: "Условия смерти" или "Смерть"\n\n6. ЛОКАЦИИ (8-14 локаций):\n   - Ищи разделы: "Глава", "Часть", "Сцена", "Локация", нумерованные списки (1., 2., 3.)\n   - Каждая локация: key="loc1", order=1, title="Название", description="Описание (2-3 предложения)", rulesPrompt="Правила для этой локации"\n\n7. ПЕРЕХОДЫ МЕЖДУ ЛОКАЦИЯМИ:\n   - exits[]: создай переходы от loc1 → loc2, loc2 → loc3, и т.д.\n\n8. NPC (если есть раздел "Приложение В. Статистика НИП"):\n   - characters[]: извлеки ВСЕХ NPC с полной статистикой D&D 5e (isPlayable: false)\n\n9. Верни ТОЛЬКО JSON, никаких комментариев!`;
             
             const { text: content } = await generateChatCompletion({
               systemPrompt: sys,
@@ -1260,41 +1201,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }
         }
         
-        // ЭТАП 3: Анализ ПЕРСОНАЖЕЙ (PDF 3+)
-        if (charactersTexts.length > 0) {
-          set({ progress: `AI analyzing: ПЕРСОНАЖИ (${charactersTexts.length} файл(ов))` });
-          for (let i = 0; i < charactersTexts.length; i++) {
-            const charText = charactersTexts[i];
-            if (!charText || !charText.trim()) continue;
-            
-            try {
-              const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО персонажей. Верни строго JSON без комментариев.';
-              const shape = '{ "characters": [{"name":"...","isPlayable":true,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10,"persona":"...","origin":"...","role":"..."}] }';
-              const prompt = `Этот PDF содержит ПЕРСОНАЖЕЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${charText.slice(0, 50000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nИНСТРУКЦИИ:\n1. Извлеки ВСЕХ персонажей из этого PDF\n2. Для каждого персонажа извлеки: имя, раса, гендер, класс, уровень, HP, AC, характеристики (STR, DEX, CON, INT, WIS, CHA)\n3. Определи isPlayable: true для игровых персонажей (PC), false для NPC\n4. Извлеки persona (характер), origin (происхождение), role (роль) если есть\n5. Верни только JSON массив characters, никаких комментариев`;
-              
-              const { text: content } = await generateChatCompletion({
-                systemPrompt: sys,
-                userPrompt: prompt,
-                history: []
-              });
-              
-              if (content && content.trim().includes('{')) {
-                const startIdx = content.indexOf('{');
-                const endIdx = content.lastIndexOf('}');
-                const cleaned = content.slice(startIdx, endIdx + 1);
-                const charsData = JSON.parse(cleaned);
-                
-                if (Array.isArray(charsData.characters) && charsData.characters.length > 0) {
-                  scenario.characters.push(...charsData.characters);
-                  console.log(`[INGEST-IMPORT] Characters extracted from file ${i + 1}:`, charsData.characters.length);
-                }
-              }
-            } catch (e) {
-              console.error(`[INGEST-IMPORT] Character analysis failed for file ${i + 1}:`, e);
-            }
-          }
-        }
-        const ensureScenario = (sc: any) => {
+        const ensureScenario = (sc: any, gameText: string) => {
           const extractSections = (srcText: string): Array<{ title: string; body: string }> => {
             const markers: RegExp[] = [
               /^\s*(Глава|Локация|Сцена|Часть)\s+([^\n]{3,100})/gmi,
@@ -1348,37 +1255,52 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           out.game = out.game || { title: firstFileName.replace(/\.pdf$/i, ''), description: `Импортировано из ${files.length} PDF файл(ов)`, author: 'GM', worldRules: '—', gameplayRules: '—' };
           
           // Извлекаем правила из раздела "ПРАВИЛА ИГРЫ"
-          if (rulesText && (!out.game.worldRules || out.game.worldRules === '—')) {
-            const rulesMatch = rulesText.match(/(?:Правила мира|World Rules|Мировые правила)[\s\S]{0,5000}/i);
-            if (rulesMatch) out.game.worldRules = rulesMatch[0].slice(0, 3000);
-          }
-          if (rulesText && (!out.game.gameplayRules || out.game.gameplayRules === '—')) {
-            const gameplayMatch = rulesText.match(/(?:Правила игрового процесса|Gameplay Rules|Игровые правила)[\s\S]{0,5000}/i);
-            if (gameplayMatch) out.game.gameplayRules = gameplayMatch[0].slice(0, 3000);
-          }
+          // Правила не извлекаются из сценария (если нужны правила - загружайте отдельно)
           
+          // Улучшенная функция извлечения блоков: находит заголовок, пропускает его, извлекает содержимое
           const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
-            // Ищем в разделе "ИГРА И СЦЕНАРИЙ"
-            const searchText = gameText || text;
-            const idx = searchText.search(labelRe);
-            if (idx < 0) return null;
-            const tail = text.slice(idx);
+            // Ищем в тексте сценария
+            const searchText = gameText;
+            
+            // Ищем заголовок раздела
+            const match = searchText.match(labelRe);
+            if (!match || typeof match.index !== 'number') return null;
+            
+            // Начинаем с позиции после заголовка
+            let startIdx = match.index + match[0].length;
+            
+            // Пропускаем пустые строки после заголовка
+            while (startIdx < searchText.length && /[\s\n]/.test(searchText[startIdx])) {
+              startIdx++;
+            }
+            
+            // Извлекаем текст от начала содержимого до следующего раздела
+            const tail = searchText.slice(startIdx);
             const lines = tail.split('\n');
-            lines.shift();
+            
             const acc: string[] = [];
             for (const ln of lines) {
+              // Останавливаемся на следующем разделе
               const isIntro = /^\s*Введение\b/i.test(ln);
               const isBack = /^\s*Предыстория\b/i.test(ln);
               const isHooks = /^\s*Зацепк[аи][^\n]*приключ/i.test(ln);
+              const isChapter = /^\s*(Глава|Часть|Сцена|Локация|ГЛАВА|ЧАСТЬ|СЦЕНА|ЛОКАЦИЯ)\s+/i.test(ln);
+              const isNumbered = /^\s*\d+[\.\)]\s+[А-ЯA-Z]/.test(ln); // Нумерованный список с заглавной буквы
+              
+              // Если встретили другой раздел (кроме текущего) - останавливаемся
               if (labelName !== 'intro' && isIntro) break;
               if (labelName !== 'back' && isBack) break;
               if (labelName !== 'hooks' && isHooks) break;
-              if (/^\s*\d+[\.\)]\s+[^\n]+$/.test(ln)) break;
+              if (isChapter) break;
+              if (isNumbered) break;
+              
               acc.push(ln);
-              if (acc.join('\n').length > 6000) break;
+              if (acc.join('\n').length > 8000) break; // Увеличил лимит
             }
+            
             const s = acc.join('\n').trim();
-            return s ? s.slice(0, 6000) : null;
+            // Убираем пустые строки в начале и конце
+            return s && s.length > 10 ? s.replace(/^\n+|\n+$/g, '').slice(0, 8000) : null;
           };
           // Извлекаем разделы с улучшенными паттернами (fallback, если AI не извлек)
           if (!out.game.introduction || out.game.introduction.length < 50) {
@@ -1420,7 +1342,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }
           if (!Array.isArray(out.characters)) out.characters = [];
           
-          // ДОПОЛНИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ ПЕРСОНАЖЕЙ ИЗ ВТОРОГО PDF (ИГРА) через парсер
+          // ДОПОЛНИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ ПЕРСОНАЖЕЙ ИЗ СЦЕНАРИЯ через парсер (если AI не извлек)
           // AI уже мог извлечь персонажей, но парсер может найти больше деталей
           if (gameText) {
             const gameChars = parseCharacterCards(gameText);
@@ -1431,23 +1353,6 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
                 if (char.name && !existingNames.has(char.name.toLowerCase())) {
                   out.characters.push(char);
                   existingNames.add(char.name.toLowerCase());
-                }
-              }
-            }
-          }
-          
-          // ДОПОЛНИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ ПЕРСОНАЖЕЙ ИЗ ФАЙЛОВ ПЕРСОНАЖЕЙ (3+) через парсер
-          // AI уже мог извлечь персонажей, но парсер может найти больше деталей
-          if (charactersTexts.length > 0) {
-            const existingNames = new Set(out.characters.map((c: any) => c.name?.toLowerCase()));
-            for (const charText of charactersTexts) {
-              const parsedChars = parseCharacterCards(charText);
-              if (parsedChars.length > 0) {
-                for (const char of parsedChars) {
-                  if (char.name && !existingNames.has(char.name.toLowerCase())) {
-                    out.characters.push(char);
-                    existingNames.add(char.name.toLowerCase());
-                  }
                 }
               }
             }
@@ -1476,7 +1381,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           if (!Array.isArray(out.editions) || !out.editions.length) out.editions = [{ name: 'Стандарт', description: '—', price: 0, badge: null }];
           return out;
         };
-        scenario = ensureScenario(scenario);
+        scenario = ensureScenario(scenario, gameText);
         set({ progress: 'Import scenario' });
         const prisma = getPrisma();
         const g = scenario.game || {};
