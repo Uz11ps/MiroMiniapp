@@ -556,7 +556,17 @@ export async function leaveLobby(lobbyId: string): Promise<void> {
   await fetch(`${API}/lobbies/${encodeURIComponent(lobbyId)}/leave${qs.toString() ? `?${qs}` : ''}`, { method: 'DELETE' }).catch(() => {});
 }
 
-export async function ttsSynthesize(text: string, voice?: string, format?: 'mp3' | 'oggopus'): Promise<Blob> {
+export async function ttsSynthesize(
+  text: string, 
+  options?: {
+    voice?: string;
+    format?: 'mp3' | 'oggopus';
+    characterId?: string;
+    locationId?: string;
+    gender?: string;
+    isNarrator?: boolean;
+  }
+): Promise<Blob> {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   const root = host.split('.').slice(-2).join('.');
   const apiBase = root === 'localhost' ? 'http://localhost:4000/api' : `${typeof window !== 'undefined' ? window.location.protocol : 'https:'}//api.${root}/api`;
@@ -566,40 +576,33 @@ export async function ttsSynthesize(text: string, voice?: string, format?: 'mp3'
     const a = typeof Audio !== 'undefined' ? new Audio() : null;
     preferOgg = !!(a && typeof a.canPlayType === 'function' && a.canPlayType('audio/ogg; codecs=opus'));
   } catch { preferOgg = false; }
-  const attempts: Array<{ voice: string; format: 'mp3' | 'oggopus' }> = [];
-  // Если явно переданы — пробуем сначала их
-  if (voice && format) attempts.push({ voice, format });
-  // Предпочтительный сценарий для Google TTS
-  if (preferOgg) {
-    attempts.push({ voice: 'ru-RU-Wavenet-E', format: 'oggopus' }); // Женский голос Google
-    attempts.push({ voice: 'ru-RU-Wavenet-D', format: 'oggopus' }); // Нейтральный голос Google
-    attempts.push({ voice: 'ru-RU-Wavenet-E', format: 'mp3' });
-  } else {
-    attempts.push({ voice: 'ru-RU-Wavenet-E', format: 'mp3' }); // Женский голос Google
-    attempts.push({ voice: 'ru-RU-Wavenet-D', format: 'mp3' }); // Нейтральный голос Google
+  const format = options?.format || (preferOgg ? 'oggopus' : 'mp3');
+  
+  const body: any = {
+    text,
+    format,
+    lang: 'ru-RU',
+  };
+  
+  // Передаем контекст для выбора голоса
+  if (options?.characterId) body.characterId = options.characterId;
+  if (options?.locationId) body.locationId = options.locationId;
+  if (options?.gender) body.gender = options.gender;
+  if (options?.isNarrator !== undefined) body.isNarrator = options.isNarrator;
+  if (options?.voice) body.voice = options.voice;
+  
+  const res = await fetch(`${apiBase}/tts`, { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify(body) 
+  });
+  
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`TTS failed: ${errText}`);
   }
-  // Fallback на старые голоса Yandex (если Google не работает)
-  attempts.push({ voice: 'jane', format: 'mp3' });
-  attempts.push({ voice: 'oksana', format: 'mp3' });
-  let lastErr: unknown = null;
-  for (const att of attempts) {
-    try {
-      const body = {
-        text,
-        voice: att.voice,
-        format: att.format,
-        speed: '1.0', // Комфортный темп для настольной ролевой игры
-        pitch: '0.0', // Естественная интонация
-        lang: 'ru-RU',
-      };
-      const res = await fetch(`${apiBase}/tts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!res.ok) { lastErr = await res.text().catch(() => res.statusText); continue; }
-      return await res.blob();
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw new Error(`TTS failed: ${String(lastErr || 'unknown')}`);
+  
+  return await res.blob();
 }
 
 export async function generateBackground(prompt: string, size?: { width: number; height: number }): Promise<string> {

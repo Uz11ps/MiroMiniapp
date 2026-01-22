@@ -175,7 +175,7 @@ const GameChat: React.FC = () => {
     window.addEventListener('storage', onChange);
     return () => { window.removeEventListener('mira_settings_changed', onChange); window.removeEventListener('storage', onChange); };
   }, []);
-  const speak = async (text: string) => {
+  const speak = async (text: string, context?: { characterId?: string; locationId?: string; gender?: string; isNarrator?: boolean }) => {
     try {
       const t = String(text || '');
       if (!t.trim()) return;
@@ -197,8 +197,13 @@ const GameChat: React.FC = () => {
           audioUrlRef.current = null;
         }
       } catch {}
-      // синтез
-      const blob = await ttsSynthesize(t);
+      // синтез с контекстом для выбора голоса
+      const blob = await ttsSynthesize(t, {
+        characterId: context?.characterId || selectedCharId || undefined,
+        locationId: context?.locationId || engineLocRef.current || undefined,
+        gender: context?.gender || charName ? undefined : undefined, // TODO: получить gender из персонажа
+        isNarrator: context?.isNarrator !== undefined ? context.isNarrator : true, // По умолчанию - рассказчик
+      });
       // если с тех пор пришёл новый текст — этот результат игнорируем
       if (seq !== activeSpeakSeqRef.current) {
         speakingInFlightRef.current = false;

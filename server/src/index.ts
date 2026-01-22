@@ -3185,7 +3185,16 @@ app.post('/api/engine/session/:id/describe', async (req, res) => {
       state.lastLocationId = sess.currentLocationId;
       await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
     } catch {}
-    return res.json({ text, fallback: !usedAi });
+    // Возвращаем метаданные о голосе для TTS
+    const locationId = sess.currentLocationId;
+    return res.json({ 
+      text, 
+      fallback: !usedAi,
+      ttsContext: {
+        locationId,
+        isNarrator: true, // Описание локации - это рассказчик
+      }
+    });
   } catch {
     return res.status(500).json({ error: 'engine_describe_failed' });
   }
@@ -3417,15 +3426,127 @@ async function transcribeYandex(buffer: Buffer, filename: string, mime: string, 
   return m ? m[1] : raw;
 }
 
+// Функция выбора голоса Google TTS на основе персонажа/локации
+function selectVoiceForContext(params: {
+  characterId?: string;
+  locationId?: string;
+  gender?: string | null;
+  characterGender?: string | null;
+  isNarrator?: boolean;
+  locationType?: string | null;
+}): { voice: string; pitch: number; rate: number } {
+  const { characterId, locationId, gender, characterGender, isNarrator, locationType } = params;
+  
+  // Определяем пол для выбора голоса
+  const finalGender = characterGender || gender || null;
+  const isFemale = finalGender && (finalGender.toLowerCase().includes('жен') || finalGender.toLowerCase().includes('female') || finalGender.toLowerCase().includes('f'));
+  const isMale = finalGender && (finalGender.toLowerCase().includes('муж') || finalGender.toLowerCase().includes('male') || finalGender.toLowerCase().includes('m'));
+  
+  // Google TTS голоса для русского языка:
+  // ru-RU-Wavenet-A - мужской, глубокий
+  // ru-RU-Wavenet-B - мужской, нейтральный
+  // ru-RU-Wavenet-C - женский, нейтральный
+  // ru-RU-Wavenet-D - нейтральный/универсальный (по умолчанию)
+  // ru-RU-Wavenet-E - женский, мягкий
+  
+  let voice = 'ru-RU-Wavenet-D'; // По умолчанию - нейтральный
+  let pitch = 0.0; // Нейтральная интонация
+  let rate = 1.0; // Нормальный темп
+  
+  // Выбор голоса на основе персонажа
+  if (characterId && !isNarrator) {
+    if (isFemale) {
+      voice = 'ru-RU-Wavenet-E'; // Женский, мягкий
+      pitch = 2.0; // Немного выше для женского голоса
+    } else if (isMale) {
+      voice = 'ru-RU-Wavenet-B'; // Мужской, нейтральный
+      pitch = -1.0; // Немного ниже для мужского голоса
+    } else {
+      voice = 'ru-RU-Wavenet-D'; // Нейтральный
+    }
+  } else if (isNarrator) {
+    // Для рассказчика используем нейтральный голос с небольшими вариациями
+    voice = 'ru-RU-Wavenet-D';
+    pitch = 0.0;
+    rate = 0.95; // Немного медленнее для повествования
+  } else if (locationType) {
+    // Выбор голоса на основе типа локации
+    const locType = locationType.toLowerCase();
+    if (locType.includes('темн') || locType.includes('подзем') || locType.includes('пещер')) {
+      voice = 'ru-RU-Wavenet-B'; // Мужской, более глубокий для мрачных локаций
+      pitch = -1.5;
+      rate = 0.9; // Медленнее для атмосферы
+    } else if (locType.includes('светл') || locType.includes('лес') || locType.includes('природ')) {
+      voice = 'ru-RU-Wavenet-E'; // Женский, мягкий для светлых локаций
+      pitch = 1.5;
+      rate = 1.05; // Немного быстрее
+    } else {
+      voice = 'ru-RU-Wavenet-D'; // Нейтральный
+    }
+  }
+  
+  return { voice, pitch, rate };
+}
+
 app.post('/api/tts', async (req, res) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text : '';
-    const voiceReq = typeof req.body?.voice === 'string' ? req.body.voice : 'ru-RU-Wavenet-D';
+    const voiceReq = typeof req.body?.voice === 'string' ? req.body.voice : undefined;
     const format = typeof req.body?.format === 'string' ? req.body.format : 'mp3';
-    const speedReq = typeof req.body?.speed === 'string' ? parseFloat(req.body.speed) : 1.0;
-    const pitchReq = typeof req.body?.pitch === 'string' ? parseFloat(req.body.pitch) : 0.0;
+    const speedReq = typeof req.body?.speed === 'string' ? parseFloat(req.body.speed) : undefined;
+    const pitchReq = typeof req.body?.pitch === 'string' ? parseFloat(req.body.pitch) : undefined;
     const lang = typeof req.body?.lang === 'string' ? req.body.lang : 'ru-RU';
+    
+    // Контекст для выбора голоса
+    const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
+    const locationId = typeof req.body?.locationId === 'string' ? req.body.locationId : undefined;
+    const gender = typeof req.body?.gender === 'string' ? req.body.gender : undefined;
+    const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : false;
+    
     if (!text.trim()) return res.status(400).json({ error: 'text_required' });
+    
+    // Получаем информацию о персонаже/локации из базы данных для выбора голоса
+    let characterGender: string | null = null;
+    let locationType: string | null = null;
+    
+    if (characterId || locationId) {
+      try {
+        const prisma = getPrisma();
+        if (characterId) {
+          const char = await prisma.character.findUnique({ where: { id: characterId }, select: { gender: true } });
+          if (char) characterGender = char.gender;
+        }
+        if (locationId) {
+          const loc = await prisma.location.findUnique({ where: { id: locationId }, select: { title: true, description: true } });
+          if (loc) {
+            // Определяем тип локации из названия/описания
+            const locText = ((loc.title || '') + ' ' + (loc.description || '')).toLowerCase();
+            if (locText.includes('темн') || locText.includes('подзем') || locText.includes('пещер') || locText.includes('тюрьм')) {
+              locationType = 'dark';
+            } else if (locText.includes('светл') || locText.includes('лес') || locText.includes('природ') || locText.includes('сад')) {
+              locationType = 'light';
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[TTS] Failed to fetch character/location context:', e);
+      }
+    }
+    
+    // Выбираем голос на основе контекста
+    const voiceContext = selectVoiceForContext({
+      characterId,
+      locationId,
+      gender: gender || characterGender,
+      characterGender,
+      isNarrator,
+      locationType,
+    });
+    
+    // Используем выбранный голос или переданный явно
+    const finalVoice = voiceReq || voiceContext.voice;
+    const finalSpeed = speedReq !== undefined ? speedReq : voiceContext.rate;
+    const finalPitch = pitchReq !== undefined ? pitchReq : voiceContext.pitch;
     
     // Google Cloud TTS (приоритет) - используем REST API
     const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
@@ -3462,8 +3583,8 @@ app.post('/api/tts', async (req, res) => {
               },
               audioConfig: {
                 audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-                speakingRate: Math.max(0.75, Math.min(1.25, speedReq)),
-                pitch: Math.max(-5.0, Math.min(5.0, pitchReq)),
+                speakingRate: Math.max(0.75, Math.min(1.25, finalSpeed)),
+                pitch: Math.max(-5.0, Math.min(5.0, finalPitch)),
                 volumeGainDb: 0.0,
                 effectsProfileId: ['telephony-class-application'],
               },
@@ -3483,15 +3604,18 @@ app.post('/api/tts', async (req, res) => {
         // Если используется API ключ, используем REST API напрямую
         if (googleKey && !accessToken) {
           const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          const ssmlText = `<speak><prosody rate="${Math.max(0.75, Math.min(1.25, speedReq))}" pitch="${pitchReq >= 0 ? '+' : ''}${Math.max(-5.0, Math.min(5.0, pitchReq))}st">${escapedText}</prosody></speak>`;
+          const ssmlText = `<speak><prosody rate="${Math.max(0.75, Math.min(1.25, finalSpeed))}" pitch="${finalPitch >= 0 ? '+' : ''}${Math.max(-5.0, Math.min(5.0, finalPitch))}st">${escapedText}</prosody></speak>`;
           
-          let voiceName = 'ru-RU-Wavenet-D';
-          if (voiceReq.includes('ru-RU')) {
-            voiceName = voiceReq;
-          } else if (voiceReq === 'female' || voiceReq === 'jane' || voiceReq === 'oksana') {
-            voiceName = 'ru-RU-Wavenet-E';
-          } else if (voiceReq === 'male') {
-            voiceName = 'ru-RU-Wavenet-B';
+          let voiceName = finalVoice;
+          if (!voiceName.includes('ru-RU')) {
+            // Маппинг старых имен голосов
+            if (voiceName === 'female' || voiceName === 'jane' || voiceName === 'oksana') {
+              voiceName = 'ru-RU-Wavenet-E';
+            } else if (voiceName === 'male') {
+              voiceName = 'ru-RU-Wavenet-B';
+            } else {
+              voiceName = 'ru-RU-Wavenet-D';
+            }
           }
           
           const requestBody = {
@@ -3503,8 +3627,8 @@ app.post('/api/tts', async (req, res) => {
             },
             audioConfig: {
               audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-              speakingRate: Math.max(0.75, Math.min(1.25, speedReq)),
-              pitch: Math.max(-5.0, Math.min(5.0, pitchReq)),
+              speakingRate: Math.max(0.75, Math.min(1.25, finalSpeed)),
+              pitch: Math.max(-5.0, Math.min(5.0, finalPitch)),
               volumeGainDb: 0.0,
               effectsProfileId: ['telephony-class-application'],
             },
