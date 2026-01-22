@@ -153,8 +153,8 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
         <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <input type="radio" name="mode" checked={mode === 'manual'} onChange={() => { setMode('manual'); setSelectedFiles([]); setUploadProgress([]); }} /> Самому загрузить сюжет
         </label>
-        <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input type="radio" name="mode" checked={mode === 'pdf'} onChange={() => { setMode('pdf'); setSelectedFiles([]); setUploadProgress([]); }} /> Загрузить D&D из PDF (авто)
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input type="radio" name="mode" checked={mode === 'pdf'} onChange={() => { setMode('pdf'); setSelectedFiles([]); setUploadProgress([]); }} /> Загрузить D&D из PDF/TXT (авто)
         </label>
       </div>
       {mode === 'manual' ? (
@@ -241,7 +241,7 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
           <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
           <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
           <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
-            <input type="file" accept="application/pdf" multiple style={{ display: 'none' }} disabled={busy} onChange={handleFileSelect} />
+            <input type="file" accept=".pdf,.txt,application/pdf,text/plain" multiple style={{ display: 'none' }} disabled={busy} onChange={handleFileSelect} />
             <div
               style={{ 
                 width: '100%', 
@@ -266,7 +266,7 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
               onMouseLeave={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1f6feb'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(31, 111, 235, 0.3)'; e.currentTarget.style.transform = 'translateY(0)'; } }}
             >
               <span style={{ fontSize: '20px' }}>📄</span>
-              <span>Выбрать PDF файлы (правила, игра, персонажи)</span>
+              <span>Выбрать PDF или TXT файлы (правила, игра, персонажи)</span>
             </div>
           </label>
           
