@@ -49,8 +49,14 @@ const app = express();
 const port = process.env.PORT ? Number(process.env.PORT) : 4000;
 console.log(`[SERVER] Express app created, port: ${port}`);
 
-app.use(cors());
-app.use(express.json());
+try {
+  app.use(cors());
+  app.use(express.json());
+  console.log('[SERVER] Middleware configured');
+} catch (e) {
+  console.error('[SERVER] Error configuring middleware:', e);
+  throw e;
+}
 
 function normalizeProxyUrl(raw: string): string {
   const strip = (s: string) => s.trim().replace(/^['"]+|['"]+$/g, '');
@@ -122,6 +128,7 @@ function createOpenAIClient(apiKey: string) {
   return new OpenAI({ apiKey });
 }
 
+console.log('[SERVER] Initializing multer...');
 const upload = multer({ 
   storage: multer.memoryStorage(), 
   limits: { 
@@ -129,9 +136,18 @@ const upload = multer({
     files: 10 // max 10 files
   } 
 });
+console.log('[SERVER] Multer initialized');
+
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
-try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
+console.log(`[SERVER] Upload directory: ${UPLOAD_DIR}`);
+try { 
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true }); 
+  console.log('[SERVER] Upload directory created/verified');
+} catch (e) {
+  console.error('[SERVER] Failed to create upload directory:', e);
+}
 app.use('/uploads', express.static(UPLOAD_DIR));
+console.log('[SERVER] Static file serving configured');
 
 // -------------------- AI Prompts (runtime editable) --------------------
 type AiPrompts = {
@@ -154,6 +170,7 @@ const DEFAULT_SYSTEM_PROMPT =
   '10. ФОРМАТ: Отвечай короткими абзацами (3-7 строк). В конце выводи доступные действия.\n' +
   '11. ПРОВЕРКИ: Если ситуация требует броска кубиков, добавь в самый конец сообщения скрытый тег формата: [[ROLL: skill_or_attack_or_save, DC: 15]]. Это вызовет окно броска у игрока (для атаки DC=AC).\n' +
   '12. ГРУППА: В игре всегда 5 персонажей. Если живых игроков меньше, ты сам управляешь остальными персонажами как союзными NPC, делая за них ходы, броски и принимая решения в бою.';
+console.log('[SERVER] Loading AI prompts...');
 let aiPrompts: AiPrompts = { system: DEFAULT_SYSTEM_PROMPT };
 try {
   if (fs.existsSync(AI_PROMPTS_FILE)) {
@@ -161,9 +178,15 @@ try {
     const json = JSON.parse(raw);
     if (json && typeof json.system === 'string' && json.system.trim()) {
       aiPrompts.system = json.system;
+      console.log('[SERVER] AI prompts loaded from file');
     }
+  } else {
+    console.log('[SERVER] AI prompts file not found, using defaults');
   }
-} catch {}
+} catch (e) {
+  console.error('[SERVER] Failed to load AI prompts:', e);
+}
+console.log('[SERVER] AI prompts initialized');
 function getSysPrompt(): string {
   return aiPrompts.system || DEFAULT_SYSTEM_PROMPT;
 }
@@ -1845,6 +1868,7 @@ app.post('/api/admin/scenario/import', async (req, res) => {
   }
 });
 
+console.log('[SERVER] All routes registered');
 console.log('[SERVER] Starting HTTP server...');
 let serverHttp: any;
 try {
