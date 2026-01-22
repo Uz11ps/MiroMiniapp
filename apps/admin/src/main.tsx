@@ -49,41 +49,45 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [rulesFile, setRulesFile] = useState<File | null>(null);
+  const [scenarioFile, setScenarioFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Array<{ fileName: string; status: 'pending' | 'processing' | 'done' | 'error'; progress?: string; error?: string; gameId?: string }>>([]);
   
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.currentTarget.files;
-    if (files && files.length > 0) {
-      const fileArray = Array.from(files);
-      setSelectedFiles(prev => {
-        const existingNames = new Set(prev.map(f => f.name + f.size));
-        const newFiles = fileArray.filter(f => !existingNames.has(f.name + f.size));
-        return [...prev, ...newFiles];
-      });
+  const handleRulesFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.currentTarget.files?.[0];
+    if (file) {
+      setRulesFile(file);
     }
     e.currentTarget.value = '';
   };
   
-  const removeFile = (index: number) => {
-    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  const handleScenarioFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.currentTarget.files?.[0];
+    if (file) {
+      setScenarioFile(file);
+    }
+    e.currentTarget.value = '';
   };
   
-  const onIngestMultiple = async (files: File[]) => {
-    if (!files || files.length === 0) return;
-    const fileArray = Array.from(files);
-    setUploadProgress(fileArray.map(f => ({ fileName: f.name, status: 'pending' as const })));
+  const onIngest = async () => {
+    if (!rulesFile || !scenarioFile) {
+      alert('Необходимо загрузить оба файла: правила и сценарий');
+      return;
+    }
+    
+    setUploadProgress([
+      { fileName: rulesFile.name, status: 'pending' as const },
+      { fileName: scenarioFile.name, status: 'pending' as const }
+    ]);
     setBusy(true);
-    setSelectedFiles([]); // Очищаем выбранные файлы после начала загрузки
     
     try {
-      // Отправляем все файлы в одном запросе
+      // Отправляем два файла: правила и сценарий
       setUploadProgress(prev => prev.map(item => ({ ...item, status: 'processing' as const, progress: 'Отправка файлов...' })));
       
       const fd = new FormData();
-      fileArray.forEach(file => {
-        fd.append('files', file);
-      });
+      fd.append('rulesFile', rulesFile);
+      fd.append('scenarioFile', scenarioFile);
       
       // Асинхронный импорт: стартуем задачу и опрашиваем статус
       const start = await fetch(`${API}/admin/ingest-import`, { method: 'POST', body: fd });
@@ -154,7 +158,7 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
           <input type="radio" name="mode" checked={mode === 'manual'} onChange={() => { setMode('manual'); setSelectedFiles([]); setUploadProgress([]); }} /> Самому загрузить сюжет
         </label>
           <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input type="radio" name="mode" checked={mode === 'pdf'} onChange={() => { setMode('pdf'); setSelectedFiles([]); setUploadProgress([]); }} /> Загрузить D&D из PDF/TXT (авто)
+          <input type="radio" name="mode" checked={mode === 'pdf'} onChange={() => { setMode('pdf'); setRulesFile(null); setScenarioFile(null); setUploadProgress([]); }} /> Загрузить D&D из PDF/TXT (авто)
         </label>
       </div>
       {mode === 'manual' ? (
@@ -170,37 +174,115 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
           <input placeholder="Название (опц.)" value={title} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)} />
           <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
           <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
-          <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
-            <input type="file" accept=".pdf,.txt,application/pdf,text/plain" multiple style={{ display: 'none' }} disabled={busy} onChange={handleFileSelect} />
-            <div
-              style={{ 
-                width: '100%', 
-                padding: '14px 24px', 
-                fontSize: '16px', 
-                fontWeight: 600,
-                backgroundColor: busy ? '#6c757d' : '#1f6feb',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '10px',
-                cursor: busy ? 'not-allowed' : 'pointer',
-                transition: 'all 0.2s ease',
-                opacity: busy ? 0.7 : 1,
-                textAlign: 'center',
-                boxShadow: busy ? 'none' : '0 2px 8px rgba(31, 111, 235, 0.3)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px'
-              }}
-              onMouseEnter={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1557b0'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(31, 111, 235, 0.4)'; e.currentTarget.style.transform = 'translateY(-1px)'; } }}
-              onMouseLeave={(e) => { if (!busy) { e.currentTarget.style.backgroundColor = '#1f6feb'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(31, 111, 235, 0.3)'; e.currentTarget.style.transform = 'translateY(0)'; } }}
-            >
-              <span style={{ fontSize: '20px' }}>📄</span>
-              <span>Выбрать PDF или TXT файл сценария</span>
+          <div style={{ display: 'grid', gap: 12 }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontSize: '14px', fontWeight: 600, color: '#212529' }}>
+                1. Файл правил (PDF или TXT)
+              </label>
+              <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
+                <input type="file" accept=".pdf,.txt,application/pdf,text/plain" style={{ display: 'none' }} disabled={busy} onChange={handleRulesFileSelect} />
+                <div
+                  style={{ 
+                    width: '100%', 
+                    padding: '12px 20px', 
+                    fontSize: '14px', 
+                    fontWeight: 500,
+                    backgroundColor: busy ? '#6c757d' : (rulesFile ? '#28a745' : '#1f6feb'),
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: busy ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.2s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span>📋</span>
+                    <span>{rulesFile ? rulesFile.name : 'Выбрать файл правил'}</span>
+                  </div>
+                  {rulesFile && !busy && (
+                    <span onClick={(e) => { e.stopPropagation(); setRulesFile(null); }} style={{ cursor: 'pointer', fontSize: '18px' }}>✕</span>
+                  )}
+                </div>
+              </label>
             </div>
-          </label>
+            
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontSize: '14px', fontWeight: 600, color: '#212529' }}>
+                2. Файл сценария (PDF или TXT)
+              </label>
+              <label style={{ display: 'block', cursor: busy ? 'not-allowed' : 'pointer' }}>
+                <input type="file" accept=".pdf,.txt,application/pdf,text/plain" style={{ display: 'none' }} disabled={busy} onChange={handleScenarioFileSelect} />
+                <div
+                  style={{ 
+                    width: '100%', 
+                    padding: '12px 20px', 
+                    fontSize: '14px', 
+                    fontWeight: 500,
+                    backgroundColor: busy ? '#6c757d' : (scenarioFile ? '#28a745' : '#1f6feb'),
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: busy ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.2s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span>📄</span>
+                    <span>{scenarioFile ? scenarioFile.name : 'Выбрать файл сценария'}</span>
+                  </div>
+                  {scenarioFile && !busy && (
+                    <span onClick={(e) => { e.stopPropagation(); setScenarioFile(null); }} style={{ cursor: 'pointer', fontSize: '18px' }}>✕</span>
+                  )}
+                </div>
+              </label>
+            </div>
+            
+            {!busy && rulesFile && scenarioFile && (
+              <button
+                onClick={onIngest}
+                style={{
+                  width: '100%',
+                  padding: '14px 24px',
+                  fontSize: '16px',
+                  fontWeight: 600,
+                  backgroundColor: '#28a745',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  boxShadow: '0 2px 8px rgba(40, 167, 69, 0.3)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
+                }}
+                onMouseEnter={(e) => { 
+                  e.currentTarget.style.backgroundColor = '#218838';
+                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(40, 167, 69, 0.4)';
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                }}
+                onMouseLeave={(e) => { 
+                  e.currentTarget.style.backgroundColor = '#28a745';
+                  e.currentTarget.style.boxShadow = '0 2px 8px rgba(40, 167, 69, 0.3)';
+                  e.currentTarget.style.transform = 'translateY(0)';
+                }}
+              >
+                <span>🚀</span>
+                <span>Загрузить и создать игру</span>
+              </button>
+            )}
+          </div>
           
-          {selectedFiles.length > 0 && (
+          {uploadProgress.length > 0 && (
             <div style={{ display: 'grid', gap: 8, marginTop: 12, padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #dee2e6' }}>
               <div style={{ fontSize: '15px', fontWeight: 600, color: '#212529', marginBottom: 4 }}>
                 Выбранные файлы ({selectedFiles.length}):

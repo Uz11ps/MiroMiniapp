@@ -1045,14 +1045,14 @@ type IngestJob = { status: 'queued' | 'running' | 'done' | 'error'; error?: stri
 const ingestJobs = new Map<string, IngestJob>();
 
 app.post('/api/admin/ingest-import', (req, res, next) => {
-  upload.array('files', 10)(req, res, (err: any) => {
+  upload.fields([
+    { name: 'rulesFile', maxCount: 1 },
+    { name: 'scenarioFile', maxCount: 1 }
+  ])(req, res, (err: any) => {
     if (err) {
       console.error('[INGEST-IMPORT] Multer error:', err);
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({ error: 'file_too_large', message: 'Файл слишком большой. Максимальный размер: 100MB' });
-      }
-      if (err.code === 'LIMIT_FILE_COUNT') {
-        return res.status(400).json({ error: 'too_many_files', message: 'Слишком много файлов. Максимум: 10' });
       }
       return res.status(500).json({ error: 'upload_error', details: String(err) });
     }
@@ -1060,25 +1060,30 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
   });
 }, async (req, res) => {
   try {
-    const files = req.files as Express.Multer.File[] | undefined;
-    console.log('[INGEST-IMPORT] Received request, files:', files ? files.length : 0, 'req.files type:', Array.isArray(req.files) ? 'array' : typeof req.files);
+    const files = req.files as { rulesFile?: Express.Multer.File[], scenarioFile?: Express.Multer.File[] };
+    const rulesFile = files?.rulesFile?.[0];
+    const scenarioFile = files?.scenarioFile?.[0];
     
-    if (!files || files.length === 0) {
-      console.error('[INGEST-IMPORT] No files received');
-      return res.status(400).json({ error: 'file_required' });
+    console.log('[INGEST-IMPORT] Received request, rulesFile:', rulesFile?.originalname, 'scenarioFile:', scenarioFile?.originalname);
+    
+    if (!rulesFile || !scenarioFile) {
+      console.error('[INGEST-IMPORT] Missing files - rulesFile:', !!rulesFile, 'scenarioFile:', !!scenarioFile);
+      return res.status(400).json({ error: 'both_files_required', message: 'Необходимо загрузить оба файла: правила и сценарий' });
     }
     
-    // Проверяем, что все файлы - PDF
-    for (const file of files) {
+    // Проверяем типы файлов
+    const checkFile = (file: Express.Multer.File, name: string) => {
       const fileName = file.originalname || '';
-      console.log('[INGEST-IMPORT] Checking file:', fileName, 'mimetype:', file.mimetype, 'size:', file.size);
-      
       const ext = fileName.toLowerCase().split('.').pop() || '';
       if (!['pdf', 'txt'].includes(ext)) {
-        console.error('[INGEST-IMPORT] Invalid file type:', fileName);
-        return res.status(400).json({ error: 'invalid_file_type', expected: 'PDF or TXT', file: fileName });
+        console.error(`[INGEST-IMPORT] Invalid ${name} file type:`, fileName);
+        return false;
       }
-      // Не проверяем строго mimetype, так как браузер может отправлять неправильный тип
+      return true;
+    };
+    
+    if (!checkFile(rulesFile, 'rulesFile') || !checkFile(scenarioFile, 'scenarioFile')) {
+      return res.status(400).json({ error: 'invalid_file_type', expected: 'PDF or TXT' });
     }
     
     const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -1090,139 +1095,186 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         ingestJobs.set(jobId, { ...cur, ...patch });
       };
       try {
-        set({ status: 'running', progress: `Reading ${files.length} PDF file(s)...` });
+        set({ status: 'running', progress: 'Чтение файлов...' });
         
         // ═══════════════════════════════════════════════════════════════════════════════
-        // ОБРАБОТКА ТОЛЬКО ФАЙЛА СЦЕНАРИЯ
+        // ОБРАБОТКА ДВУХ ФАЙЛОВ: ПРАВИЛА И СЦЕНАРИЙ
         // ═══════════════════════════════════════════════════════════════════════════════
         
-        // Обрабатываем все загруженные файлы как сценарии (объединяем их текст)
-        let gameText = '';
-        
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-          const fileName = file.originalname || 'file';
+        // Функция для чтения файла
+        const readFile = async (file: Express.Multer.File): Promise<string> => {
+          const fileName = file.originalname || '';
           const ext = fileName.toLowerCase().split('.').pop() || '';
-          const fileType = ext === 'txt' ? 'TXT' : 'PDF';
-          set({ progress: `Reading ${fileType} ${i + 1}/${files.length}: СЦЕНАРИЙ - ${fileName}` });
           
-          try {
-            const fileName = file.originalname || '';
-            const ext = fileName.toLowerCase().split('.').pop() || '';
-            
-            let rawText = '';
-            if (ext === 'txt') {
-              // Для TXT файлов просто читаем как текст
-              rawText = file.buffer.toString('utf-8').replace(/\r/g, '\n');
-            } else {
-              // Для PDF файлов используем парсер
-              const parsed = await pdfParse(file.buffer).catch(() => null);
-              if (parsed && parsed.text) {
-                rawText = (parsed.text || '').replace(/\r/g, '\n');
-              }
+          if (ext === 'txt') {
+            return file.buffer.toString('utf-8').replace(/\r/g, '\n');
+          } else {
+            const parsed = await pdfParse(file.buffer).catch(() => null);
+            if (parsed && parsed.text) {
+              return (parsed.text || '').replace(/\r/g, '\n');
             }
-            
-            if (rawText) {
-              // Объединяем текст всех файлов
-              if (gameText) gameText += '\n\n';
-              gameText += rawText;
-            }
-          } catch (e) {
-            console.error(`[INGEST-IMPORT] Error parsing file ${i + 1}:`, e);
-            // Продолжаем с другими файлами
           }
-        }
+          return '';
+        };
         
-        if (!gameText || !gameText.trim()) {
-          set({ status: 'error', error: 'Не удалось извлечь текст из загруженных файлов' });
+        set({ progress: 'Чтение файла правил...' });
+        const rulesText = await readFile(rulesFile);
+        if (!rulesText || !rulesText.trim()) {
+          set({ status: 'error', error: 'Не удалось извлечь текст из файла правил' });
           return;
         }
         
-        // Очистка текста от оглавления и лишних символов
-        // ВАЖНО: Страницы с оглавлением НЕ УЧИТЫВАЮТСЯ!
-        const stripTocAndLeaders = (src: string): string => {
+        set({ progress: 'Чтение файла сценария...' });
+        const scenarioText = await readFile(scenarioFile);
+        if (!scenarioText || !scenarioText.trim()) {
+          set({ status: 'error', error: 'Не удалось извлечь текст из файла сценария' });
+          return;
+        }
+        
+        // Очистка текста от оглавления
+        const stripToc = (src: string): string => {
           let t = src;
-          
-          // Ищем начало оглавления (слово "Оглавление" в начале строки)
-          const tocStartMatch = t.match(/^\s*Оглавлени[ея]\b/im);
-          if (tocStartMatch && typeof tocStartMatch.index === 'number') {
-            const tocStart = tocStartMatch.index;
-            
-            // Ищем конец оглавления - первый реальный раздел после оглавления
-            // Согласно структуре: после оглавления идет "Введение", "Предыстория", "Зацепки приключения", "Часть 1", и т.д.
+          const tocMatch = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
+          if (tocMatch) {
+            const tocStart = tocMatch.index || 0;
             const restAfterToc = t.slice(tocStart);
-            
-            // Ищем конец оглавления по следующим признакам:
-            // 1. Заголовок "Введение" (первый раздел после оглавления)
-            // 2. Заголовок "Предыстория"
-            // 3. Заголовок "Зацепки приключения"
-            // 4. Заголовок "Часть 1" или "Глава 1"
-            // 5. Нумерованный список (1., 2., 3.)
-            const tocEndPattern = /(^|\n)\s*(Введение|Предыстория|Зацепк[аи][^\n]*приключ|Часть\s+[0-9IVX]+|Глава\s+[0-9IVX]+|Сцена\s+[0-9IVX]+|Локация\s+[0-9IVX]+|^\s*\d+[\.\)]\s+[А-ЯA-Z])/im;
-            const tocEndMatch = tocEndPattern.exec(restAfterToc);
-            
-            if (tocEndMatch && typeof tocEndMatch.index === 'number' && tocEndMatch.index > 0) {
-              // Нашли конец оглавления - удаляем весь блок от начала до конца
-              const tocEnd = tocStart + tocEndMatch.index;
-              t = t.slice(0, tocStart) + t.slice(tocEnd);
-              console.log('[INGEST-IMPORT] Removed table of contents:', tocEnd - tocStart, 'characters');
+            const reEndToc = /(^|\n)\s*(Введение|Предыстория|Зацепк[аи][^\n]*приключ|Часть\s+\d+|Глава\s+\d+|Сцена|Локация|\d+[\.\)]\s+[А-ЯA-Z])/im;
+            const endTocMatch = reEndToc.exec(restAfterToc);
+            if (endTocMatch && typeof endTocMatch.index === 'number' && endTocMatch.index > 0) {
+              t = t.slice(0, tocStart) + restAfterToc.slice(endTocMatch.index);
             } else {
-              // Если не нашли конец по паттерну, удаляем первые 5000 символов после "Оглавление"
-              // (обычно оглавление не превышает 2-3 страниц)
-              const estimatedTocEnd = tocStart + Math.min(restAfterToc.length, 5000);
-              t = t.slice(0, tocStart) + t.slice(estimatedTocEnd);
-              console.log('[INGEST-IMPORT] Removed table of contents (estimated):', estimatedTocEnd - tocStart, 'characters');
+              t = t.slice(0, tocStart) + restAfterToc.slice(Math.min(restAfterToc.length, 4000));
             }
           }
-          
-          // Удаляем строки с точками-лидерами (например: "Введение ................ 3")
-          const limit = 20000; // Увеличил лимит для лучшей обработки
+          const limit = 20000;
           let head = t.slice(0, limit);
           const tail = t.slice(limit);
           head = head.split('\n').filter((ln) => {
-            // Удаляем строки вида: "Текст ................ 3" (оглавление)
             return !/^\s*\S.{0,120}\.{3,}\s*\d+\s*$/.test(ln);
           }).join('\n');
           return head + tail;
         };
-        const text = stripTocAndLeaders(gameText);
         
-        set({ progress: 'AI analyzing: СЦЕНАРИЙ' });
+        const cleanRulesText = stripToc(rulesText);
+        const cleanScenarioText = stripToc(scenarioText);
+        
+        set({ progress: 'AI анализирует оба файла...' });
         const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
         let scenario: any = { game: {}, locations: [], exits: [], characters: [], editions: [] };
         
         // ═══════════════════════════════════════════════════════════════════════════════
-        // АНАЛИЗ СЦЕНАРИЯ: AI анализирует файл сценария
+        // СЕМАНТИЧЕСКИЙ АНАЛИЗ ДВУХ ФАЙЛОВ: ПРАВИЛА И СЦЕНАРИЙ
         // ═══════════════════════════════════════════════════════════════════════════════
         
-        // Анализ СЦЕНАРИЯ
-        if (gameText && gameText.trim()) {
-          set({ progress: 'AI analyzing: ИГРА И СЦЕНАРИЙ' });
+        if (cleanRulesText && cleanScenarioText) {
+          set({ progress: 'AI анализирует: правила + сценарий' });
           try {
-            const sys = `Ты интеллектуальный ассистент для анализа сценариев настольных ролевых игр D&D 5e. 
+            const sys = `Ты интеллектуальный ассистент для анализа настольных ролевых игр D&D 5e.
 
-Твоя задача - понять СМЫСЛОВОЕ значение каждого элемента документа и правильно сопоставить его с полями на фронтенде.
+Твоя задача - ПОНЯТЬ СЕМАНТИЧЕСКИЙ СМЫСЛ каждого элемента в двух документах (правила и сценарий) и правильно сопоставить их с полями на фронтенде.
 
-На фронтенде есть следующие разделы и поля:
-1. "Описание и промо" - содержит промо описание (краткое привлекательное описание для маркетинга)
-2. "Введение / Предыстория / Зацепки приключения" - три отдельных поля:
-   - Введение: начало игры, где находятся персонажи, описание начальной сцены
-   - Предыстория: история мира/событий до начала игры
-   - Зацепки приключения: способы начать приключение, мотивация персонажей
-3. "Локации" - игровые локации с описаниями, правилами, фонами, музыкой
-4. "Персонажи" - NPC с полной статистикой D&D 5e
-5. "Условия финала" - условия победы, поражения, смерти
+НА ФРОНТЕНДЕ ЕСТЬ СЛЕДУЮЩИЕ РАЗДЕЛЫ:
+1. "Описание и промо" → game.promoDescription
+2. "Введение" → game.introduction (начальная сцена для игроков)
+3. "Предыстория" → game.backstory (история мира до начала игры)
+4. "Зацепки приключения" → game.adventureHooks (способы начать приключение)
+5. "Правила мира" → game.worldRules (из файла правил)
+6. "Правила игрового процесса" → game.gameplayRules (из файла правил)
+7. "Локации" → locations[] (из файла сценария)
+8. "Персонажи" → characters[] (NPC из файла сценария)
+9. "Условия финала" → winCondition, loseCondition, deathCondition
 
-Ты должен РАСПОЗНАТЬ смысл каждого элемента в документе и правильно сопоставить его с нужным полем, понимая КОНТЕКСТ и НАЗНАЧЕНИЕ каждого поля.`;
+Ты должен РАСПОЗНАТЬ смысл каждого элемента и правильно сопоставить его с нужным полем, понимая КОНТЕКСТ и НАЗНАЧЕНИЕ каждого поля.`;
 
-            const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
+            const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
             
-            const prompt = `Ты анализируешь документ сценария для настольной ролевой игры D&D 5e.
+            const prompt = `Ты анализируешь ДВА документа для настольной ролевой игры D&D 5e:
 
-Текст документа (оглавление уже удалено):
+═══════════════════════════════════════════════════════════════════════════════
+ФАЙЛ 1: ПРАВИЛА ИГРЫ
+═══════════════════════════════════════════════════════════════════════════════
 ---
-${text.slice(0, 100000)}
+${cleanRulesText.slice(0, 50000)}
 ---
+
+═══════════════════════════════════════════════════════════════════════════════
+ФАЙЛ 2: СЦЕНАРИЙ ИГРЫ
+═══════════════════════════════════════════════════════════════════════════════
+---
+${cleanScenarioText.slice(0, 100000)}
+---
+
+Верни только JSON без комментариев, строго формы:
+${shape}
+
+═══════════════════════════════════════════════════════════════════════════════
+СЕМАНТИЧЕСКОЕ ОПИСАНИЕ ПОЛЕЙ И ИНСТРУКЦИИ ПО РАСПОЗНАВАНИЮ
+═══════════════════════════════════════════════════════════════════════════════
+
+ИЗ ФАЙЛА ПРАВИЛ ИЗВЛЕКИ:
+
+1. ПРАВИЛА МИРА (game.worldRules):
+   - Описание сеттинга, мира, вселенной
+   - География, история мира, культура, религия
+   - Особенности мира, магия, технологии
+   - Политическая система, фракции, организации
+   - ВСЁ, что описывает МИР, в котором происходит игра
+
+2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (game.gameplayRules):
+   - Механики игры, правила боя, навыки
+   - Система характеристик, бросков кубиков
+   - Правила взаимодействия, диалогов, исследований
+   - Специальные механики для этой игры
+   - ВСЁ, что описывает КАК играть
+
+ИЗ ФАЙЛА СЦЕНАРИЯ ИЗВЛЕКИ:
+
+3. ПРОМО ОПИСАНИЕ (game.promoDescription):
+   - Текст ПЕРЕД первым разделом "Введение"
+   - Краткое привлекательное описание (2-4 предложения)
+   - Художественный текст, который "продает" игру
+   - Может начинаться с большой декоративной буквы
+
+4. ВВЕДЕНИЕ (game.introduction):
+   - РЕАЛЬНОЕ введение - описание начальной сцены
+   - Где находятся персонажи, что они видят
+   - Начинается с "Вы прибываете...", "Вы оказываетесь..."
+   - НЕ метаинформация про уровень персонажей!
+
+5. ПРЕДЫСТОРИЯ (game.backstory):
+   - История мира/событий ДО начала игры
+   - События, которые привели к текущей ситуации
+   - Политическая ситуация, конфликты
+
+6. ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ (game.adventureHooks):
+   - Способы начать приключение
+   - Несколько вариантов (обычно 2-4)
+   - Мотивация персонажей
+
+7. ЛОКАЦИИ (locations[]):
+   - Все разделы "Часть", "Глава", нумерованные подразделы
+   - Каждый раздел = отдельная локация
+   - title, description, rulesPrompt для каждой
+
+8. ПЕРСОНАЖИ (characters[]):
+   - Раздел "Приложение В. Статистика НИП" или похожий
+   - ВСЕХ NPC с полной статистикой D&D 5e
+   - isPlayable: false для всех NPC
+
+9. УСЛОВИЯ ФИНАЛА:
+   - winCondition, loseCondition, deathCondition
+   - Обычно в конце документа
+
+═══════════════════════════════════════════════════════════════════════════════
+КРИТИЧЕСКИ ВАЖНО:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. ПОНИМАЙ СМЫСЛ: Анализируй СОДЕРЖИМОЕ, а не только заголовки
+2. ПРАВИЛЬНО СОПОСТАВЛЯЙ: Каждый элемент в правильное поле
+3. ИЗВЛЕКАЙ ВСЁ: Не обрезай текст, извлекай полностью
+4. НЕ ПРИДУМЫВАЙ: Только реальные данные, если нет - верни null
+
+Верни ТОЛЬКО JSON, никаких комментариев!`;
 
 Верни только JSON без комментариев, строго формы:
 ${shape}
@@ -1448,7 +1500,7 @@ ${shape}
           }
         }
         
-        const ensureScenario = (sc: any, gameText: string) => {
+        const ensureScenario = (sc: any) => {
           const extractSections = (srcText: string): Array<{ title: string; body: string }> => {
             const markers: RegExp[] = [
               /^\s*(Глава|Локация|Сцена|Часть)\s+([^\n]{3,100})/gmi,
@@ -1498,8 +1550,14 @@ ${shape}
             });
           };
           const out: any = sc && typeof sc === 'object' ? sc : {};
-          const firstFileName = files[0]?.originalname || 'Scenario';
-          out.game = out.game || { title: firstFileName.replace(/\.pdf$/i, ''), description: `Импортировано из ${files.length} PDF файл(ов)`, author: 'GM', worldRules: '—', gameplayRules: '—' };
+          const scenarioFileName = scenarioFile?.originalname || 'Scenario';
+          out.game = out.game || { 
+            title: scenarioFileName.replace(/\.(pdf|txt)$/i, ''), 
+            description: `Импортировано из файлов правил и сценария`, 
+            author: 'GM', 
+            worldRules: null, 
+            gameplayRules: null 
+          };
           
           // НЕТ FALLBACK - если AI не извлек данные, поля остаются пустыми
           // Все данные должны быть извлечены AI из промпта
@@ -1536,15 +1594,15 @@ ${shape}
           if (!Array.isArray(out.editions) || !out.editions.length) out.editions = [{ name: 'Стандарт', description: '—', price: 0, badge: null }];
           return out;
         };
-        scenario = ensureScenario(scenario, gameText);
-        set({ progress: 'Import scenario' });
+        scenario = ensureScenario(scenario);
+        set({ progress: 'Сохранение игры...' });
         const prisma = getPrisma();
         const g = scenario.game || {};
-        const firstFileName = files[0]?.originalname || 'Scenario';
+        const scenarioFileName = scenarioFile?.originalname || 'Scenario';
         const game = await prisma.game.create({
           data: {
-            title: g.title || firstFileName.replace(/\.pdf$/i, ''),
-            description: g.description || `Импортировано из ${files.length} PDF файл(ов)`,
+            title: g.title || scenarioFileName.replace(/\.(pdf|txt)$/i, ''),
+            description: g.description || `Импортировано из файлов правил и сценария`,
             author: g.author || 'GM',
             coverUrl: g.coverUrl || '',
             tags: g.tags || [],
