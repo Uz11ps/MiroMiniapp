@@ -4874,3 +4874,4 @@ app.post('/api/chat/dice', async (req, res) => {
   }
 });
 console.log('[SERVER] Chat dice route registered');
+}
