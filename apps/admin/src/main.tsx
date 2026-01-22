@@ -101,17 +101,17 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
       </div>
       {mode === 'manual' ? (
         <div style={{ display: 'grid', gap: 8 }}>
-          <input placeholder="Название" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <input placeholder="Автор" value={author} onChange={(e) => setAuthor(e.target.value)} />
-          <input placeholder="Обложка URL" value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} />
+          <input placeholder="Название" value={title} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)} />
+          <input placeholder="Автор" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
+          <input placeholder="Обложка URL" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
           <button onClick={async () => { await onManualCreate(); }}>Создать пустую игру</button>
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>
           <div className="muted">ИИ разберёт PDF и создаст игру: метаданные, локации, переходы. При желании заполните поля для перезаписи.</div>
-          <input placeholder="Название (опц.)" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <input placeholder="Автор (опц.)" value={author} onChange={(e) => setAuthor(e.target.value)} />
-          <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} />
+          <input placeholder="Название (опц.)" value={title} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTitle(e.target.value)} />
+          <input placeholder="Автор (опц.)" value={author} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAuthor(e.target.value)} />
+          <input placeholder="Обложка URL (опц.)" value={coverUrl} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCoverUrl(e.target.value)} />
           <label className="btn">
             {busy ? 'Обработка...' : 'Выбрать PDF'}
             <input type="file" accept="application/pdf" style={{ display: 'none' }} disabled={busy} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value=''; if (f) void onIngest(f); }} />
@@ -1287,55 +1287,6 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
               <input defaultValue={c.voiceId || ''} onBlur={(e) => patch(c.id, { voiceId: e.currentTarget.value || null })} placeholder="Голос (voiceId)" />
               <input defaultValue={c.origin || ''} onBlur={(e) => patch(c.id, { origin: e.currentTarget.value || null })} placeholder="Происхождение" />
               <input defaultValue={c.persona || ''} onBlur={(e) => patch(c.id, { persona: e.currentTarget.value || null })} placeholder="Характер" />
-            </div>
-            <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'repeat(12, 1fr)', fontSize: 12 }}>
-              <div style={{ gridColumn: 'span 2' }}>
-                <div className="muted" style={{ fontSize: 11 }}>Уровень</div>
-                <input type="number" defaultValue={c.level || 1} onBlur={(e) => patch(c.id, { level: parseInt(e.currentTarget.value) || 1 })} style={{ width: '100%' }} />
-              </div>
-              <div style={{ gridColumn: 'span 2' }}>
-                <div className="muted" style={{ fontSize: 11 }}>Класс</div>
-                <input defaultValue={c.class || ''} onBlur={(e) => patch(c.id, { class: e.currentTarget.value || null })} placeholder="Class" style={{ width: '100%' }} />
-              </div>
-              <div style={{ gridColumn: 'span 2' }}>
-                <div className="muted" style={{ fontSize: 11 }}>HP</div>
-                <input type="number" defaultValue={c.hp || 10} onBlur={(e) => patch(c.id, { hp: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div style={{ gridColumn: 'span 2' }}>
-                <div className="muted" style={{ fontSize: 11 }}>Max HP</div>
-                <input type="number" defaultValue={c.maxHp || c.hp || 10} onBlur={(e) => patch(c.id, { maxHp: parseInt(e.currentTarget.value) || c.hp || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div style={{ gridColumn: 'span 2' }}>
-                <div className="muted" style={{ fontSize: 11 }}>AC</div>
-                <input type="number" defaultValue={c.ac || 10} onBlur={(e) => patch(c.id, { ac: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div style={{ gridColumn: 'span 2' }}></div>
-            </div>
-            <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'repeat(6, 1fr)', fontSize: 12 }}>
-              <div>
-                <div className="muted" style={{ fontSize: 11 }}>STR</div>
-                <input type="number" defaultValue={c.str || 10} onBlur={(e) => patch(c.id, { str: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <div className="muted" style={{ fontSize: 11 }}>DEX</div>
-                <input type="number" defaultValue={c.dex || 10} onBlur={(e) => patch(c.id, { dex: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <div className="muted" style={{ fontSize: 11 }}>CON</div>
-                <input type="number" defaultValue={c.con || 10} onBlur={(e) => patch(c.id, { con: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <div className="muted" style={{ fontSize: 11 }}>INT</div>
-                <input type="number" defaultValue={c.int || 10} onBlur={(e) => patch(c.id, { int: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <div className="muted" style={{ fontSize: 11 }}>WIS</div>
-                <input type="number" defaultValue={c.wis || 10} onBlur={(e) => patch(c.id, { wis: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
-              <div>
-                <div className="muted" style={{ fontSize: 11 }}>CHA</div>
-                <input type="number" defaultValue={c.cha || 10} onBlur={(e) => patch(c.id, { cha: parseInt(e.currentTarget.value) || 10 })} style={{ width: '100%' }} />
-              </div>
             </div>
             <div>
               <textarea defaultValue={c.abilities || ''} placeholder="Способности (по одной в строке)" onBlur={(e) => patch(c.id, { abilities: e.currentTarget.value || null })} />
