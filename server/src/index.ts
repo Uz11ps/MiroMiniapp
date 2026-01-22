@@ -1168,6 +1168,11 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         
         if (cleanRulesText && cleanScenarioText) {
           set({ progress: 'AI анализирует: правила + сценарий' });
+          console.log('[INGEST-IMPORT] Starting AI analysis...');
+          console.log('[INGEST-IMPORT] Rules text length:', cleanRulesText.length);
+          console.log('[INGEST-IMPORT] Scenario text length:', cleanScenarioText.length);
+          console.log('[INGEST-IMPORT] Rules text preview:', cleanRulesText.slice(0, 200));
+          console.log('[INGEST-IMPORT] Scenario text preview:', cleanScenarioText.slice(0, 200));
           try {
             const sys = `Ты интеллектуальный ассистент для анализа настольных ролевых игр D&D 5e.
 
@@ -1276,42 +1281,71 @@ ${shape}
 
 Верни ТОЛЬКО JSON, никаких комментариев!`;
             
-            const { text: content } = await generateChatCompletion({
+            console.log('[INGEST-IMPORT] Sending to AI, rulesText length:', cleanRulesText.length, 'scenarioText length:', cleanScenarioText.length);
+            const result = await generateChatCompletion({
               systemPrompt: sys,
               userPrompt: prompt,
               history: []
             });
+            const content = result?.text || '';
+            console.log('[INGEST-IMPORT] AI provider:', result?.provider || 'unknown');
+            
+            console.log('[INGEST-IMPORT] AI response received, length:', content?.length || 0);
+            console.log('[INGEST-IMPORT] AI response preview:', content?.slice(0, 500) || 'empty');
             
             if (content && content.trim().includes('{')) {
               const startIdx = content.indexOf('{');
               const endIdx = content.lastIndexOf('}');
               const cleaned = content.slice(startIdx, endIdx + 1);
-              const gameData = JSON.parse(cleaned);
+              console.log('[INGEST-IMPORT] Extracted JSON, length:', cleaned.length);
               
-              // Объединяем данные игры
-              if (gameData.game) {
-                Object.assign(scenario.game, gameData.game);
+              try {
+                const gameData = JSON.parse(cleaned);
+                console.log('[INGEST-IMPORT] Parsed JSON successfully:', {
+                  hasGame: !!gameData.game,
+                  gameKeys: gameData.game ? Object.keys(gameData.game) : [],
+                  locationsCount: gameData.locations?.length || 0,
+                  exitsCount: gameData.exits?.length || 0,
+                  charactersCount: gameData.characters?.length || 0
+                });
+                
+                // Объединяем данные игры
+                if (gameData.game) {
+                  Object.assign(scenario.game, gameData.game);
+                  console.log('[INGEST-IMPORT] Game data assigned:', {
+                    title: scenario.game.title,
+                    hasIntroduction: !!scenario.game.introduction,
+                    hasBackstory: !!scenario.game.backstory,
+                    hasAdventureHooks: !!scenario.game.adventureHooks,
+                    hasPromoDescription: !!scenario.game.promoDescription,
+                    hasWorldRules: !!scenario.game.worldRules,
+                    hasGameplayRules: !!scenario.game.gameplayRules
+                  });
+                }
+                if (Array.isArray(gameData.locations) && gameData.locations.length > 0) {
+                  scenario.locations = gameData.locations;
+                  console.log('[INGEST-IMPORT] Locations assigned:', gameData.locations.length);
+                }
+                if (Array.isArray(gameData.exits) && gameData.exits.length > 0) {
+                  scenario.exits = gameData.exits;
+                  console.log('[INGEST-IMPORT] Exits assigned:', gameData.exits.length);
+                }
+                // Добавляем персонажей из игры (обычно NPC)
+                if (Array.isArray(gameData.characters) && gameData.characters.length > 0) {
+                  scenario.characters.push(...gameData.characters);
+                  console.log('[INGEST-IMPORT] NPCs extracted from game:', gameData.characters.length);
+                }
+              } catch (parseError) {
+                console.error('[INGEST-IMPORT] JSON parse error:', parseError);
+                console.error('[INGEST-IMPORT] Failed JSON content:', cleaned.slice(0, 1000));
               }
-              if (Array.isArray(gameData.locations) && gameData.locations.length > 0) {
-                scenario.locations = gameData.locations;
-              }
-              if (Array.isArray(gameData.exits) && gameData.exits.length > 0) {
-                scenario.exits = gameData.exits;
-              }
-              // Добавляем персонажей из игры (обычно NPC)
-              if (Array.isArray(gameData.characters) && gameData.characters.length > 0) {
-                scenario.characters.push(...gameData.characters);
-                console.log('[INGEST-IMPORT] NPCs extracted from game:', gameData.characters.length);
-              }
-              console.log('[INGEST-IMPORT] Game extracted:', { 
-                hasTitle: !!gameData.game?.title, 
-                locationsCount: gameData.locations?.length || 0,
-                exitsCount: gameData.exits?.length || 0,
-                charactersCount: gameData.characters?.length || 0
-              });
+            } else {
+              console.error('[INGEST-IMPORT] AI response does not contain JSON or is empty');
+              console.error('[INGEST-IMPORT] Full response:', content);
             }
           } catch (e) {
             console.error('[INGEST-IMPORT] Game analysis failed:', e);
+            console.error('[INGEST-IMPORT] Error stack:', (e as Error).stack);
           }
         }
         
@@ -4264,7 +4298,7 @@ async function generateViaGeminiText(params: {
     contents,
     generationConfig: {
       temperature: 0.45,
-      maxOutputTokens: 1024,
+      maxOutputTokens: 32768,
     },
   };
   if (systemPrompt) {
@@ -4352,7 +4386,6 @@ async function generateChatCompletion(params: {
       const r = await client.chat.completions.create({
         model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
         temperature: 0.4,
-        max_tokens: 800,
         messages: messages as any,
       });
       const text = r.choices?.[0]?.message?.content || '';
