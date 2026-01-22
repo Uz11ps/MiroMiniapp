@@ -98,7 +98,13 @@ function createOpenAIClient(apiKey: string) {
   return new OpenAI({ apiKey });
 }
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+const upload = multer({ 
+  storage: multer.memoryStorage(), 
+  limits: { 
+    fileSize: 25 * 1024 * 1024, // 25MB per file
+    files: 10 // max 10 files
+  } 
+});
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
 try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
 app.use('/uploads', express.static(UPLOAD_DIR));
@@ -942,20 +948,40 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
 type IngestJob = { status: 'queued' | 'running' | 'done' | 'error'; error?: string; gameId?: string; progress?: string };
 const ingestJobs = new Map<string, IngestJob>();
 
-app.post('/api/admin/ingest-import', upload.array('files', 10), async (req, res) => {
+app.post('/api/admin/ingest-import', (req, res, next) => {
+  upload.array('files', 10)(req, res, (err: any) => {
+    if (err) {
+      console.error('[INGEST-IMPORT] Multer error:', err);
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'file_too_large', message: 'Файл слишком большой. Максимальный размер: 25MB' });
+      }
+      if (err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(400).json({ error: 'too_many_files', message: 'Слишком много файлов. Максимум: 10' });
+      }
+      return res.status(500).json({ error: 'upload_error', details: String(err) });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[] | undefined;
-    if (!files || files.length === 0) return res.status(400).json({ error: 'file_required' });
+    console.log('[INGEST-IMPORT] Received request, files:', files ? files.length : 0, 'req.files type:', Array.isArray(req.files) ? 'array' : typeof req.files);
+    
+    if (!files || files.length === 0) {
+      console.error('[INGEST-IMPORT] No files received');
+      return res.status(400).json({ error: 'file_required' });
+    }
     
     // Проверяем, что все файлы - PDF
     for (const file of files) {
       const fileName = file.originalname || '';
+      console.log('[INGEST-IMPORT] Checking file:', fileName, 'mimetype:', file.mimetype, 'size:', file.size);
+      
       if (!fileName.toLowerCase().endsWith('.pdf')) {
+        console.error('[INGEST-IMPORT] Invalid file type:', fileName);
         return res.status(400).json({ error: 'invalid_file_type', expected: 'PDF', file: fileName });
       }
-      if (file.mimetype && file.mimetype !== 'application/pdf') {
-        return res.status(400).json({ error: 'invalid_mime_type', expected: 'application/pdf', file: fileName });
-      }
+      // Не проверяем строго mimetype, так как браузер может отправлять неправильный тип
     }
     
     const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -1328,8 +1354,10 @@ app.post('/api/admin/ingest-import', upload.array('files', 10), async (req, res)
         set({ status: 'error', error: (e?.message || String(e)).slice(0, 500) });
       }
     })();
-  } catch (e) {
-    return res.status(500).json({ error: 'ingest_start_failed' });
+  } catch (e: any) {
+    console.error('[INGEST-IMPORT] Error in handler:', e);
+    const errorMsg = e?.message || String(e) || 'unknown_error';
+    return res.status(500).json({ error: 'ingest_start_failed', details: errorMsg });
   }
 });
 

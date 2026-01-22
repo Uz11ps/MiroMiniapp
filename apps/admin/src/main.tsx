@@ -89,8 +89,10 @@ const NewGameWizard: React.FC<{ onManualCreate: () => Promise<void> | void }> = 
       const start = await fetch(`${API}/admin/ingest-import`, { method: 'POST', body: fd });
       const sj = await start.json().catch(() => ({} as any));
       if (!start.ok || !sj?.jobId) { 
-        setUploadProgress(prev => prev.map(item => ({ ...item, status: 'error' as const, error: 'Старт импорта не удался' })));
-        alert('Старт импорта не удался'); 
+        const errorMsg = sj?.error || sj?.details || sj?.message || 'Старт импорта не удался';
+        console.error('[INGEST] Start failed:', sj);
+        setUploadProgress(prev => prev.map(item => ({ ...item, status: 'error' as const, error: errorMsg })));
+        alert(`Старт импорта не удался: ${errorMsg}`); 
         return;
       }
       
