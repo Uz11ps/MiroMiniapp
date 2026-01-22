@@ -4393,33 +4393,66 @@ async function generateViaGeminiText(params: {
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
   let lastErr: unknown = null;
+  const maxRetries = 3;
+  const retryableStatuses = [503, 429, 500, 502]; // Перегружен, слишком много запросов, внутренняя ошибка
+  
   for (const p of attempts) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Math.max(30000, timeoutMs));
-      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
-      const r = await undiciFetch(url, {
-        method: 'POST',
-        dispatcher,
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
-        body: JSON.stringify(body),
-      });
-      clearTimeout(timer);
-      if (!r.ok) {
-        const t = await r.text().catch(() => '');
-        console.error('[GEMINI-TEXT] HTTP', r.status, t.slice(0, 200));
-        lastErr = t || r.statusText;
-        continue;
+    for (let retry = 0; retry < maxRetries; retry++) {
+      try {
+        if (retry > 0) {
+          const delay = Math.min(1000 * Math.pow(2, retry - 1), 10000); // Экспоненциальная задержка: 1s, 2s, 4s (макс 10s)
+          console.log(`[GEMINI-TEXT] Retry ${retry}/${maxRetries - 1} after ${delay}ms delay`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.max(30000, timeoutMs));
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        const r = await undiciFetch(url, {
+          method: 'POST',
+          dispatcher,
+          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+          body: JSON.stringify(body),
+        });
+        clearTimeout(timer);
+        
+        if (!r.ok) {
+          const t = await r.text().catch(() => '');
+          let errorData: any = {};
+          try {
+            if (t) errorData = JSON.parse(t) || {};
+          } catch {}
+          const status = r.status;
+          
+          console.error('[GEMINI-TEXT] HTTP', status, t.slice(0, 200));
+          
+          // Если это retryable ошибка и есть попытки - повторяем
+          if (retryableStatuses.includes(status) && retry < maxRetries - 1) {
+            lastErr = errorData.error || t || r.statusText;
+            continue; // Продолжаем retry
+          }
+          
+          // Если не retryable или закончились попытки - переходим к следующему прокси
+          lastErr = errorData.error || t || r.statusText;
+          break; // Выходим из retry цикла, переходим к следующему прокси
+        }
+        
+        const data = await r.json() as any;
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+        if (text) return text;
+        lastErr = 'empty_text';
+        break; // Успешно получили ответ, но он пустой - не retry
+      } catch (e) {
+        lastErr = e;
+        console.error('[GEMINI-TEXT] Error:', e);
+        // Если это не последняя попытка и ошибка может быть временной - retry
+        if (retry < maxRetries - 1 && (e instanceof Error && (e.message.includes('aborted') || e.message.includes('timeout')))) {
+          continue; // Retry для таймаутов
+        }
+        break; // Выходим из retry цикла
       }
-      const data = await r.json() as any;
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
-      if (text) return text;
-      lastErr = 'empty_text';
-    } catch (e) {
-      lastErr = e;
-      console.error('[GEMINI-TEXT] Error:', e);
     }
   }
   throw lastErr || new Error('gemini_text_failed');
@@ -4453,8 +4486,20 @@ async function generateChatCompletion(params: {
         modelName: process.env.GEMINI_MODEL || 'gemini-2.5-pro'
       });
       if (text) return { text, provider: 'gemini' };
-    } catch (e) {
-      console.error('[COMPLETION] Gemini failed:', e);
+    } catch (e: any) {
+      const errorMsg = e?.error?.message || e?.message || String(e);
+      const isOverloaded = errorMsg.includes('overloaded') || errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE');
+      console.error('[COMPLETION] Gemini failed:', errorMsg);
+      
+      // Если Gemini перегружен - сразу переключаемся на OpenAI без ожидания
+      if (isOverloaded && openaiKey) {
+        console.log('[COMPLETION] Gemini overloaded, switching to OpenAI');
+      } else {
+        // Для других ошибок тоже пробуем OpenAI как fallback
+        if (openaiKey) {
+          console.log('[COMPLETION] Trying OpenAI as fallback');
+        }
+      }
     }
   }
 
