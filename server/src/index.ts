@@ -1122,24 +1122,48 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         }
         
         // Очистка текста от оглавления и лишних символов
+        // ВАЖНО: Страницы с оглавлением НЕ УЧИТЫВАЮТСЯ!
         const stripTocAndLeaders = (src: string): string => {
           let t = src;
-          const m = t.match(/^\s*Оглавлени[ея]\b[\s\S]*?$/im);
-          if (m) {
-            const start = m.index || 0;
-            const rest = t.slice(start);
-            const reEnd = /(^|\n)\s*(Введение|Предыстория|Зацепк[аи][^\n]*приключ|Глава|Часть|Сцена|Локация)\s*($|\n)|(\f)/im;
-            const endM = reEnd.exec(rest);
-            if (endM && typeof endM.index === 'number' && endM.index > 0) {
-              t = t.slice(0, start) + rest.slice(endM.index);
+          
+          // Ищем начало оглавления (слово "Оглавление" в начале строки)
+          const tocStartMatch = t.match(/^\s*Оглавлени[ея]\b/im);
+          if (tocStartMatch && typeof tocStartMatch.index === 'number') {
+            const tocStart = tocStartMatch.index;
+            
+            // Ищем конец оглавления - первый реальный раздел после оглавления
+            // Согласно структуре: после оглавления идет "Введение", "Предыстория", "Зацепки приключения", "Часть 1", и т.д.
+            const restAfterToc = t.slice(tocStart);
+            
+            // Ищем конец оглавления по следующим признакам:
+            // 1. Заголовок "Введение" (первый раздел после оглавления)
+            // 2. Заголовок "Предыстория"
+            // 3. Заголовок "Зацепки приключения"
+            // 4. Заголовок "Часть 1" или "Глава 1"
+            // 5. Нумерованный список (1., 2., 3.)
+            const tocEndPattern = /(^|\n)\s*(Введение|Предыстория|Зацепк[аи][^\n]*приключ|Часть\s+[0-9IVX]+|Глава\s+[0-9IVX]+|Сцена\s+[0-9IVX]+|Локация\s+[0-9IVX]+|^\s*\d+[\.\)]\s+[А-ЯA-Z])/im;
+            const tocEndMatch = tocEndPattern.exec(restAfterToc);
+            
+            if (tocEndMatch && typeof tocEndMatch.index === 'number' && tocEndMatch.index > 0) {
+              // Нашли конец оглавления - удаляем весь блок от начала до конца
+              const tocEnd = tocStart + tocEndMatch.index;
+              t = t.slice(0, tocStart) + t.slice(tocEnd);
+              console.log('[INGEST-IMPORT] Removed table of contents:', tocEnd - tocStart, 'characters');
             } else {
-              t = t.slice(0, start) + rest.slice(Math.min(rest.length, 4000));
+              // Если не нашли конец по паттерну, удаляем первые 5000 символов после "Оглавление"
+              // (обычно оглавление не превышает 2-3 страниц)
+              const estimatedTocEnd = tocStart + Math.min(restAfterToc.length, 5000);
+              t = t.slice(0, tocStart) + t.slice(estimatedTocEnd);
+              console.log('[INGEST-IMPORT] Removed table of contents (estimated):', estimatedTocEnd - tocStart, 'characters');
             }
           }
-          const limit = 15000;
+          
+          // Удаляем строки с точками-лидерами (например: "Введение ................ 3")
+          const limit = 20000; // Увеличил лимит для лучшей обработки
           let head = t.slice(0, limit);
           const tail = t.slice(limit);
           head = head.split('\n').filter((ln) => {
+            // Удаляем строки вида: "Текст ................ 3" (оглавление)
             return !/^\s*\S.{0,120}\.{3,}\s*\d+\s*$/.test(ln);
           }).join('\n');
           return head + tail;
@@ -1160,7 +1184,95 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           try {
             const sys = 'Ты помощник-редактор настольных приключений (D&D). Анализируй ТОЛЬКО сценарий игры. Верни строго JSON без комментариев.';
             const shape = '{ "game": {"title":"...","description":"...","author":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"..."}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":false,"race":"...","gender":"...","level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}] }';
-            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.\n\nТекст PDF:\n---\n${gameText.slice(0, 100000)}\n---\n\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nКРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ ПО ИЗВЛЕЧЕНИЮ РАЗДЕЛОВ:\n\nНА ФРОНТЕНДЕ ЕСТЬ ПОЛЯ:\n- "Введение" (placeholder="Введение") → game.introduction\n- "Предыстория" (placeholder="Предыстория") → game.backstory\n- "Зацепки приключения" (placeholder="Зацепки приключения") → game.adventureHooks\n\nТВОЯ ЗАДАЧА - НАЙТИ РАЗДЕЛЫ В PDF ПО ТОЧНЫМ НАЗВАНИЯМ И ИЗВЛЕЧЬ ИХ СОДЕРЖИМОЕ:\n\n1. РАЗДЕЛ "ВВЕДЕНИЕ" → game.introduction:\n   - ИЩИ ТОЧНО заголовок: "Введение", "ВВЕДЕНИЕ", "Introduction", "Вступление"\n   - НАЙДИ этот заголовок в тексте\n   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)\n   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Предыстория", "Глава", "Часть" и т.д.)\n   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!\n   - Если раздела нет - верни null\n\n2. РАЗДЕЛ "ПРЕДЫСТОРИЯ" → game.backstory:\n   - ИЩИ ТОЧНО заголовок: "Предыстория", "ПРЕДЫСТОРИЯ", "Backstory", "История", "История мира"\n   - НАЙДИ этот заголовок в тексте\n   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)\n   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Зацепки", "Глава", "Часть" и т.д.)\n   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!\n   - Если раздела нет - верни null\n\n3. РАЗДЕЛ "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ" → game.adventureHooks:\n   - ИЩИ ТОЧНО заголовок: "Зацепки приключения", "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ", "Adventure Hooks", "Крючки", "Зацепки"\n   - НАЙДИ этот заголовок в тексте\n   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)\n   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Глава", "Часть", "Сцена" и т.д.)\n   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!\n   - Если раздела нет - верни null\n\n4. НАЗВАНИЕ И ОПИСАНИЕ:\n   - game.title: извлеки из заголовка документа или первой строки (НЕ придумывай!)\n   - game.description: краткое описание игры (2-3 предложения)\n\n5. УСЛОВИЯ ФИНАЛА:\n   - game.winCondition: "Условия победы" или "Победа"\n   - game.loseCondition: "Условия поражения" или "Поражение"\n   - game.deathCondition: "Условия смерти" или "Смерть"\n\n6. ЛОКАЦИИ (8-14 локаций):\n   - Ищи разделы: "Глава", "Часть", "Сцена", "Локация", нумерованные списки (1., 2., 3.)\n   - Каждая локация: key="loc1", order=1, title="Название", description="Описание (2-3 предложения)", rulesPrompt="Правила для этой локации"\n\n7. ПЕРЕХОДЫ МЕЖДУ ЛОКАЦИЯМИ:\n   - exits[]: создай переходы от loc1 → loc2, loc2 → loc3, и т.д.\n\n8. NPC (если есть раздел "Приложение В. Статистика НИП"):\n   - characters[]: извлеки ВСЕХ NPC с полной статистикой D&D 5e (isPlayable: false)\n\n9. Верни ТОЛЬКО JSON, никаких комментариев!`;
+            const prompt = `Этот PDF содержит ИГРУ И СЦЕНАРИЙ для настольной ролевой игры D&D 5e.
+
+ВАЖНО: Оглавление уже удалено из текста! Текст начинается с реальных разделов.
+
+СТРУКТУРА ДОКУМЕНТА (согласно оглавлению):
+0. ПРОМО ОПИСАНИЕ (текст ПЕРЕД разделом "Введение" - это краткое привлекательное описание игры, обычно 2-4 предложения)
+1. Введение (первый раздел после оглавления)
+2. Предыстория (второй раздел)
+3. Зацепки приключения (третий раздел)
+4. Введение (может быть еще одно введение к самой игре)
+5. Часть 1. [Название] (например, "Гильдия Магов")
+6. Часть 2. [Название] (например, "Грот забытых снов")
+7. Часть 3. [Название] (например, "Храм Мистры")
+8. Приложение В. Статистика НИП (NPC персонажи)
+
+Текст PDF (оглавление уже удалено):
+---
+${text.slice(0, 100000)}
+---
+
+Верни только JSON без комментариев, строго формы:
+${shape}
+
+КРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ ПО ИЗВЛЕЧЕНИЮ РАЗДЕЛОВ:
+
+НА ФРОНТЕНДЕ ЕСТЬ ПОЛЯ:
+- "Промо описание" (placeholder="Промо описание") → game.promoDescription
+- "Введение" (placeholder="Введение") → game.introduction
+- "Предыстория" (placeholder="Предыстория") → game.backstory
+- "Зацепки приключения" (placeholder="Зацепки приключения") → game.adventureHooks
+
+ТВОЯ ЗАДАЧА - НАЙТИ РАЗДЕЛЫ В PDF ПО ТОЧНЫМ НАЗВАНИЯМ И ИЗВЛЕЧЬ ИХ СОДЕРЖИМОЕ:
+
+0. ПРОМО ОПИСАНИЕ → game.promoDescription:
+   - ВАЖНО: Промо описание находится ПЕРЕД разделом "Введение"!
+   - ИЩИ текст от начала документа (после удаления оглавления) до первого заголовка "Введение"
+   - Это обычно краткое привлекательное описание игры (2-4 предложения)
+   - Может начинаться с большой декоративной буквы (drop cap)
+   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ от начала до "Введение"
+   - ВАЖНО: верни ТОЛЬКО текст промо описания, БЕЗ заголовка "Введение"!
+   - Если промо описания нет - верни null
+
+1. РАЗДЕЛ "ВВЕДЕНИЕ" → game.introduction:
+   - ИЩИ ТОЧНО заголовок: "Введение", "ВВЕДЕНИЕ", "Introduction", "Вступление"
+   - НАЙДИ этот заголовок в тексте (обычно это ПЕРВЫЙ раздел после оглавления)
+   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)
+   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Предыстория", "Зацепки", "Глава", "Часть" и т.д.)
+   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!
+   - Если раздела нет - верни null
+
+2. РАЗДЕЛ "ПРЕДЫСТОРИЯ" → game.backstory:
+   - ИЩИ ТОЧНО заголовок: "Предыстория", "ПРЕДЫСТОРИЯ", "Backstory", "История", "История мира"
+   - НАЙДИ этот заголовок в тексте (обычно это ВТОРОЙ раздел после оглавления)
+   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)
+   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Зацепки", "Введение", "Глава", "Часть" и т.д.)
+   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!
+   - Если раздела нет - верни null
+
+3. РАЗДЕЛ "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ" → game.adventureHooks:
+   - ИЩИ ТОЧНО заголовок: "Зацепки приключения", "ЗАЦЕПКИ ПРИКЛЮЧЕНИЯ", "Adventure Hooks", "Крючки", "Зацепки"
+   - НАЙДИ этот заголовок в тексте (обычно это ТРЕТИЙ раздел после оглавления)
+   - ПРОПУСТИ строку с заголовком (НЕ включай её в результат!)
+   - ИЗВЛЕКИ ВЕСЬ ТЕКСТ ПОСЛЕ заголовка до следующего раздела (до "Введение", "Глава", "Часть", "Сцена" и т.д.)
+   - ВАЖНО: верни ТОЛЬКО СОДЕРЖИМОЕ раздела, БЕЗ названия!
+   - Если раздела нет - верни null
+
+4. НАЗВАНИЕ И ОПИСАНИЕ:
+   - game.title: извлеки из заголовка документа или первой строки (НЕ придумывай!)
+   - game.description: краткое описание игры (2-3 предложения)
+
+5. УСЛОВИЯ ФИНАЛА:
+   - game.winCondition: "Условия победы" или "Победа"
+   - game.loseCondition: "Условия поражения" или "Поражение"
+   - game.deathCondition: "Условия смерти" или "Смерть"
+
+6. ЛОКАЦИИ (8-14 локаций):
+   - Ищи разделы: "Часть 1", "Часть 2", "Часть 3", "Глава", "Сцена", "Локация", нумерованные списки (1., 2., 3.)
+   - Согласно оглавлению, локации могут быть в разделах "Часть 1", "Часть 2", "Часть 3" и их подразделах
+   - Каждая локация: key="loc1", order=1, title="Название", description="Описание (2-3 предложения)", rulesPrompt="Правила для этой локации"
+   - Примеры локаций из оглавления: "Помещение с урнами", "Коридор с фальшивой дверью", "Путь скорби", "Главное святилище", и т.д.
+
+7. ПЕРЕХОДЫ МЕЖДУ ЛОКАЦИЯМИ:
+   - exits[]: создай переходы от loc1 → loc2, loc2 → loc3, и т.д.
+
+8. NPC (если есть раздел "Приложение В. Статистика НИП"):
+   - characters[]: извлеки ВСЕХ NPC с полной статистикой D&D 5e (isPlayable: false)
+   - Примеры NPC из оглавления: "Культист Ноктуса", "Потрошитель", "Тал'Киар", "Мимик"
+
+9. Верни ТОЛЬКО JSON, никаких комментариев!`;
             
             const { text: content } = await generateChatCompletion({
               systemPrompt: sys,
@@ -1254,86 +1366,8 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           const firstFileName = files[0]?.originalname || 'Scenario';
           out.game = out.game || { title: firstFileName.replace(/\.pdf$/i, ''), description: `Импортировано из ${files.length} PDF файл(ов)`, author: 'GM', worldRules: '—', gameplayRules: '—' };
           
-          // Извлекаем правила из раздела "ПРАВИЛА ИГРЫ"
-          // Правила не извлекаются из сценария (если нужны правила - загружайте отдельно)
-          
-          // Улучшенная функция извлечения блоков: находит заголовок, пропускает его, извлекает содержимое
-          const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
-            // Ищем в тексте сценария
-            const searchText = gameText;
-            
-            // Ищем заголовок раздела
-            const match = searchText.match(labelRe);
-            if (!match || typeof match.index !== 'number') return null;
-            
-            // Начинаем с позиции после заголовка
-            let startIdx = match.index + match[0].length;
-            
-            // Пропускаем пустые строки после заголовка
-            while (startIdx < searchText.length && /[\s\n]/.test(searchText[startIdx])) {
-              startIdx++;
-            }
-            
-            // Извлекаем текст от начала содержимого до следующего раздела
-            const tail = searchText.slice(startIdx);
-            const lines = tail.split('\n');
-            
-            const acc: string[] = [];
-            for (const ln of lines) {
-              // Останавливаемся на следующем разделе
-              const isIntro = /^\s*Введение\b/i.test(ln);
-              const isBack = /^\s*Предыстория\b/i.test(ln);
-              const isHooks = /^\s*Зацепк[аи][^\n]*приключ/i.test(ln);
-              const isChapter = /^\s*(Глава|Часть|Сцена|Локация|ГЛАВА|ЧАСТЬ|СЦЕНА|ЛОКАЦИЯ)\s+/i.test(ln);
-              const isNumbered = /^\s*\d+[\.\)]\s+[А-ЯA-Z]/.test(ln); // Нумерованный список с заглавной буквы
-              
-              // Если встретили другой раздел (кроме текущего) - останавливаемся
-              if (labelName !== 'intro' && isIntro) break;
-              if (labelName !== 'back' && isBack) break;
-              if (labelName !== 'hooks' && isHooks) break;
-              if (isChapter) break;
-              if (isNumbered) break;
-              
-              acc.push(ln);
-              if (acc.join('\n').length > 8000) break; // Увеличил лимит
-            }
-            
-            const s = acc.join('\n').trim();
-            // Убираем пустые строки в начале и конце
-            return s && s.length > 10 ? s.replace(/^\n+|\n+$/g, '').slice(0, 8000) : null;
-          };
-          // Извлекаем разделы с улучшенными паттернами (fallback, если AI не извлек)
-          if (!out.game.introduction || out.game.introduction.length < 50) {
-            out.game.introduction = pickBlock(/(^|\n)\s*Введение\s*($|\n|:)/im, 'intro') || 
-                                     pickBlock(/(^|\n)\s*ВВЕДЕНИЕ\s*($|\n|:)/im, 'intro') ||
-                                     pickBlock(/(^|\n)\s*Introduction\s*($|\n|:)/im, 'intro') ||
-                                     null;
-          }
-          
-          if (!out.game.backstory || out.game.backstory.length < 50) {
-            out.game.backstory = pickBlock(/(^|\n)\s*Предыстория\s*($|\n|:)/im, 'back') ||
-                                 pickBlock(/(^|\n)\s*ПРЕДЫСТОРИЯ\s*($|\n|:)/im, 'back') ||
-                                 pickBlock(/(^|\n)\s*Backstory\s*($|\n|:)/im, 'back') ||
-                                 pickBlock(/(^|\n)\s*История\s*($|\n|:)/im, 'back') ||
-                                 null;
-          }
-          
-          if (!out.game.adventureHooks || out.game.adventureHooks.length < 50) {
-            out.game.adventureHooks = pickBlock(/(^|\n)\s*Зацепк[аи][^\n]*приключ[^\n]*\s*($|\n|:)/im, 'hooks') ||
-                                       pickBlock(/(^|\n)\s*ЗАЦЕПКИ[^\n]*ПРИКЛЮЧЕНИЯ\s*($|\n|:)/im, 'hooks') ||
-                                       pickBlock(/(^|\n)\s*Adventure[^\n]*Hooks\s*($|\n|:)/im, 'hooks') ||
-                                       pickBlock(/(^|\n)\s*Крючки\s*($|\n|:)/im, 'hooks') ||
-                                       null;
-          }
-          if (!out.game.winCondition) out.game.winCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+побед[ыы]\s*$/im) || pickBlock(/(^|\n)\s*Побед[аы]\s*$/im) || null;
-          if (!out.game.loseCondition) out.game.loseCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+поражени[яя]\s*$/im) || pickBlock(/(^|\n)\s*Поражени[ея]\s*$/im) || null;
-          if (!out.game.deathCondition) out.game.deathCondition = pickBlock(/(^|\n)\s*Услови[ея]\s+смерти\s*$/im) || pickBlock(/(^|\n)\s*Смерть\s*$/im) || null;
-          const locs: any[] = Array.isArray(out.locations) ? out.locations : [];
-          if (!locs.length) {
-            const sections = extractSections(text);
-            out.locations = sections.length ? sections.map((s, i) => ({ key: `loc${i + 1}`, order: i + 1, title: s.title, description: s.body, backgroundUrl: null, musicUrl: null })) :
-              [{ key: 'start', order: 1, title: 'Стартовая локация', description: null, backgroundUrl: null, musicUrl: null }];
-          }
+          // НЕТ FALLBACK - если AI не извлек данные, поля остаются пустыми
+          // Все данные должны быть извлечены AI из промпта
           if (!Array.isArray(out.exits) || !out.exits.length) {
             out.exits = [];
             for (let i = 1; i < out.locations.length; i++) {
@@ -1342,21 +1376,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           }
           if (!Array.isArray(out.characters)) out.characters = [];
           
-          // ДОПОЛНИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ ПЕРСОНАЖЕЙ ИЗ СЦЕНАРИЯ через парсер (если AI не извлек)
-          // AI уже мог извлечь персонажей, но парсер может найти больше деталей
-          if (gameText) {
-            const gameChars = parseCharacterCards(gameText);
-            if (gameChars.length > 0) {
-              // Добавляем только тех персонажей, которых еще нет
-              const existingNames = new Set(out.characters.map((c: any) => c.name?.toLowerCase()));
-              for (const char of gameChars) {
-                if (char.name && !existingNames.has(char.name.toLowerCase())) {
-                  out.characters.push(char);
-                  existingNames.add(char.name.toLowerCase());
-                }
-              }
-            }
-          }
+          // НЕТ FALLBACK - персонажи должны быть извлечены AI
           
           // Убираем дубликаты по имени (на всякий случай)
           const uniqueChars = new Map<string, any>();
