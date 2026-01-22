@@ -360,47 +360,77 @@ app.delete('/api/games/:id', async (req, res) => {
 console.log('[SERVER] DELETE /api/games/:id route registered');
 
 console.log('[SERVER] Registering admin games routes...');
-app.get('/api/admin/games', async (_req, res) => {
-  try {
-    const prisma = getPrisma();
-    const list = await prisma.game.findMany({ select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true, status: true, createdAt: true } });
-    return res.json(list);
-  } catch {
-    return res.json(games.map(({ rules, gallery, editions, ...short }) => ({ ...short, status: 'PUBLISHED', createdAt: new Date().toISOString() })));
+try {
+  app.get('/api/admin/games', async (_req, res) => {
+    try {
+      const prisma = getPrisma();
+      const list = await prisma.game.findMany({ select: { id: true, title: true, description: true, rating: true, tags: true, author: true, coverUrl: true, status: true, createdAt: true } });
+      return res.json(list);
+    } catch {
+      return res.json(games.map(({ rules, gallery, editions, ...short }) => ({ ...short, status: 'PUBLISHED', createdAt: new Date().toISOString() })));
+    }
+  });
+  console.log('[SERVER] GET /api/admin/games route registered');
+} catch (e) {
+  console.error('[SERVER] Error registering GET /api/admin/games route:', e);
+  if (e instanceof Error) {
+    console.error('[SERVER] Error stack:', e.stack);
   }
-});
+  throw e;
+}
 
-app.get('/api/admin/games/:id/full', async (req, res) => {
-  try {
-    const prisma = getPrisma();
-    const game = await prisma.game.findUnique({
-      where: { id: req.params.id },
-      include: {
-        editions: true,
-        locations: {
-          orderBy: { order: 'asc' },
-          include: { exits: true },
+console.log('[SERVER] Registering GET /api/admin/games/:id/full route...');
+try {
+  app.get('/api/admin/games/:id/full', async (req, res) => {
+    try {
+      const prisma = getPrisma();
+      const game = await prisma.game.findUnique({
+        where: { id: req.params.id },
+        include: {
+          editions: true,
+          locations: {
+            orderBy: { order: 'asc' },
+            include: { exits: true },
+          },
+          characters: true,
         },
-        characters: true,
-      },
-    });
-    if (!game) return res.status(404).json({ error: 'Not found' });
-    return res.json(game);
-  } catch (e) {
-    return res.status(500).json({ error: 'failed_to_load', details: String(e) });
+      });
+      if (!game) return res.status(404).json({ error: 'Not found' });
+      return res.json(game);
+    } catch (e) {
+      return res.status(500).json({ error: 'failed_to_load', details: String(e) });
+    }
+  });
+  console.log('[SERVER] GET /api/admin/games/:id/full route registered');
+} catch (e) {
+  console.error('[SERVER] Error registering GET /api/admin/games/:id/full route:', e);
+  if (e instanceof Error) {
+    console.error('[SERVER] Error stack:', e.stack);
   }
-});
+  throw e;
+}
 
-app.patch('/api/admin/games/:id', async (req, res) => {
-  try {
-    const prisma = getPrisma();
-    const updated = await prisma.game.update({ where: { id: req.params.id }, data: req.body });
-    return res.json(updated);
-  } catch (e) {
-    return res.status(500).json({ error: 'failed_to_update', details: String(e) });
+console.log('[SERVER] Registering PATCH /api/admin/games/:id route...');
+try {
+  app.patch('/api/admin/games/:id', async (req, res) => {
+    try {
+      const prisma = getPrisma();
+      const updated = await prisma.game.update({ where: { id: req.params.id }, data: req.body });
+      return res.json(updated);
+    } catch (e) {
+      return res.status(500).json({ error: 'failed_to_update', details: String(e) });
+    }
+  });
+  console.log('[SERVER] PATCH /api/admin/games/:id route registered');
+} catch (e) {
+  console.error('[SERVER] Error registering PATCH /api/admin/games/:id route:', e);
+  if (e instanceof Error) {
+    console.error('[SERVER] Error stack:', e.stack);
   }
-});
+  throw e;
+}
 
+console.log('[SERVER] Registering locations routes...');
 app.get('/api/games/:id/locations', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -449,7 +479,9 @@ app.delete('/api/locations/:locId', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_delete', details: String(e) });
   }
 });
+console.log('[SERVER] Locations routes registered');
 
+console.log('[SERVER] Registering exits routes...');
 app.get('/api/locations/:locId/exits', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -522,7 +554,9 @@ app.delete('/api/exits/:exitId', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_delete_exit', details: String(e) });
   }
 });
+console.log('[SERVER] Exits routes registered');
 
+console.log('[SERVER] Registering editions routes...');
 app.get('/api/games/:id/editions', async (req, res) => {
   try {
     const prisma = getPrisma();
@@ -575,7 +609,9 @@ app.delete('/api/editions/:id', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_delete_edition' });
   }
 });
+console.log('[SERVER] Editions routes registered');
 
+console.log('[SERVER] Registering upload route...');
 app.post('/api/admin/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'file_required' });
@@ -1604,7 +1640,9 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
     return res.status(500).json({ error: 'ingest_start_failed', details: errorMsg });
   }
 });
+console.log('[SERVER] Ingest-import route registered');
 
+console.log('[SERVER] Registering ingest-import status route...');
 app.get('/api/admin/ingest-import/:id', async (req, res) => {
   const j = ingestJobs.get(req.params.id);
   if (!j) return res.status(404).json({ error: 'not_found' });
@@ -2229,7 +2267,9 @@ app.get('/api/feedback', async (_req, res) => {
     res.json(feedbacks);
   }
 });
+console.log('[SERVER] Feedback routes registered');
 
+console.log('[SERVER] Registering users routes...');
 app.get('/api/users', async (req, res) => {
   const q = String(req.query.q || '').toLowerCase();
   const page = Number(req.query.page || 1);
@@ -3388,7 +3428,9 @@ app.delete('/api/chat/history', async (req, res) => {
     return res.status(500).json({ error: 'failed_to_reset' });
   }
 });
+console.log('[SERVER] Chat routes registered');
 
+console.log('[SERVER] Registering engine routes...');
 app.post('/api/engine/session/start', async (req, res) => {
   const gameId = String(req.body?.gameId || '');
   const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
@@ -4830,4 +4872,5 @@ app.post('/api/chat/dice', async (req, res) => {
   } catch {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
   }
-});}
+});
+console.log('[SERVER] Chat dice route registered');
