@@ -187,30 +187,45 @@ try {
   console.error('[SERVER] Failed to load AI prompts:', e);
 }
 console.log('[SERVER] AI prompts initialized');
+console.log('[SERVER] About to define getSysPrompt function...');
 function getSysPrompt(): string {
   return aiPrompts.system || DEFAULT_SYSTEM_PROMPT;
 }
-app.get('/api/admin/ai-prompts', async (_req, res) => {
-  return res.json({ system: getSysPrompt() });
-});
-app.post('/api/admin/ai-prompts', async (req, res) => {
-  try {
-    const system = typeof req.body?.system === 'string' ? req.body.system.trim() : '';
-    if (!system || system.length < 20) return res.status(400).json({ error: 'system_prompt_too_short' });
-    aiPrompts.system = system;
+console.log('[SERVER] getSysPrompt function defined');
+console.log('[SERVER] Registering AI prompts routes...');
+try {
+  app.get('/api/admin/ai-prompts', async (_req, res) => {
+    return res.json({ system: getSysPrompt() });
+  });
+  app.post('/api/admin/ai-prompts', async (req, res) => {
     try {
-      fs.mkdirSync(path.dirname(AI_PROMPTS_FILE), { recursive: true });
-      fs.writeFileSync(AI_PROMPTS_FILE, JSON.stringify({ system }, null, 2), 'utf8');
-    } catch {}
-    return res.json({ ok: true });
-  } catch {
-    return res.status(500).json({ error: 'failed_to_save_prompts' });
+      const system = typeof req.body?.system === 'string' ? req.body.system.trim() : '';
+      if (!system || system.length < 20) return res.status(400).json({ error: 'system_prompt_too_short' });
+      aiPrompts.system = system;
+      try {
+        fs.mkdirSync(path.dirname(AI_PROMPTS_FILE), { recursive: true });
+        fs.writeFileSync(AI_PROMPTS_FILE, JSON.stringify({ system }, null, 2), 'utf8');
+      } catch {}
+      return res.json({ ok: true });
+    } catch {
+      return res.status(500).json({ error: 'failed_to_save_prompts' });
+    }
+  });
+  console.log('[SERVER] AI prompts routes registered');
+} catch (e) {
+  console.error('[SERVER] Error registering AI prompts routes:', e);
+  if (e instanceof Error) {
+    console.error('[SERVER] Error stack:', e.stack);
   }
-});
+  throw e;
+}
+
 app.get('/', (_req, res) => {
   res.type('text/plain').send('MIRA API. Health: /api/health, Games: /api/games, Profile: /api/profile');
 });
+console.log('[SERVER] Root route registered');
 
+console.log('[SERVER] Registering debug route...');
 app.post('/api/debug/openai', async (req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
@@ -239,6 +254,7 @@ app.post('/api/debug/openai', async (req, res) => {
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
+console.log('[SERVER] Health route registered');
 
 app.get('/api/games', async (_req, res) => {
   try {
