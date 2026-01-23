@@ -6595,43 +6595,147 @@ app.post('/api/tts', async (req, res) => {
       
       console.log(`[TTS] 🔊 Synthesizing speech with Google TTS using ${ssmlSource === 'gemini' ? 'Gemini-generated SSML' : 'fallback SSML'}, voice: ${voiceName}, format: ${format}`);
       
-      // Используем Google TTS REST API
-      const requestBody = {
-        input: { ssml: ssmlText },
-        voice: {
-          languageCode: lang,
-          name: voiceName,
-          ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
-        },
-        audioConfig: {
-          audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-          speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)),
-          pitch: Math.max(-4.0, Math.min(4.0, finalPitch)),
-          volumeGainDb: 2.0,
-        },
-      };
+      // Проверяем размер SSML (лимит Google TTS: 5000 байт)
+      const ssmlBytes = Buffer.from(ssmlText, 'utf8').length;
+      console.log(`[TTS] SSML size: ${ssmlBytes} bytes (limit: 5000 bytes)`);
       
-      const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
-      const apiResponse = await undiciFetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      });
-      
-      if (apiResponse.ok) {
-        const jsonResponse = await apiResponse.json() as any;
-        if (jsonResponse.audioContent) {
-          const audioBuffer = Buffer.from(jsonResponse.audioContent, 'base64');
-          console.log(`[TTS] ✅ Success (${ssmlSource === 'gemini' ? 'Gemini SSML' : 'fallback SSML'}), audio size: ${audioBuffer.length} bytes`);
-          res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-          res.setHeader('Content-Length', String(audioBuffer.length));
-          return res.send(audioBuffer);
+      if (ssmlBytes > 5000) {
+        console.log('[TTS] SSML превышает лимит 5000 байт, разбиваем на части');
+        
+        // Умное разбиение SSML на части по ~4500 байт (с запасом)
+        // Извлекаем содержимое между <speak> и </speak>
+        const speakMatch = ssmlText.match(/<speak[^>]*>(.*?)<\/speak>/s);
+        const parts: string[] = [];
+        const maxPartSize = 4500; // С запасом от лимита 5000
+        
+        if (speakMatch) {
+          const speakTag = ssmlText.match(/<speak[^>]*>/)?.[0] || '<speak>';
+          const content = speakMatch[1];
+          
+          // Разбиваем по предложениям, сохраняя SSML теги
+          // Ищем точки, восклицательные и вопросительные знаки с последующими пробелами или тегами
+          const sentences = content.split(/(?<=[.!?])\s+(?=<|$|[А-ЯЁ])/);
+          
+          let currentPart = '';
+          let currentSize = Buffer.from(speakTag + currentPart + '</speak>', 'utf8').length;
+          
+          for (const sentence of sentences) {
+            const sentenceSize = Buffer.from(sentence, 'utf8').length;
+            const newSize = currentSize + sentenceSize;
+            
+            if (newSize > maxPartSize && currentPart) {
+              // Сохраняем текущую часть
+              parts.push(speakTag + currentPart + '</speak>');
+              currentPart = sentence;
+              currentSize = Buffer.from(speakTag + currentPart + '</speak>', 'utf8').length;
+            } else {
+              currentPart += (currentPart ? ' ' : '') + sentence;
+              currentSize = Buffer.from(speakTag + currentPart + '</speak>', 'utf8').length;
+            }
+          }
+          
+          if (currentPart) {
+            parts.push(speakTag + currentPart + '</speak>');
+          }
         } else {
-          console.error('[TTS] Google TTS response missing audioContent');
+          // Если не нашли структуру <speak>, разбиваем просто по размеру
+          const chunkSize = 4500;
+          for (let i = 0; i < ssmlText.length; i += chunkSize) {
+            parts.push(ssmlText.slice(i, i + chunkSize));
+          }
+        }
+        
+        console.log(`[TTS] Разбито на ${parts.length} частей`);
+        
+        // Синтезируем каждую часть и объединяем
+        const audioBuffers: Buffer[] = [];
+        for (let i = 0; i < parts.length; i++) {
+          const partSSML = parts[i];
+          const partSize = Buffer.from(partSSML, 'utf8').length;
+          console.log(`[TTS] Синтезируем часть ${i + 1}/${parts.length}, размер: ${partSize} байт`);
+          
+          const requestBody = {
+            input: { ssml: partSSML },
+            voice: {
+              languageCode: lang,
+              name: voiceName,
+              ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
+            },
+            audioConfig: {
+              audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
+              speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)),
+              pitch: Math.max(-4.0, Math.min(4.0, finalPitch)),
+              volumeGainDb: 2.0,
+            },
+          };
+          
+          const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
+          const apiResponse = await undiciFetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody),
+          });
+          
+          if (apiResponse.ok) {
+            const jsonResponse = await apiResponse.json() as any;
+            if (jsonResponse.audioContent) {
+              audioBuffers.push(Buffer.from(jsonResponse.audioContent, 'base64'));
+            }
+          } else {
+            const errorText = await apiResponse.text().catch(() => '');
+            console.error(`[TTS] Ошибка при синтезе части ${i + 1}:`, apiResponse.status, errorText.slice(0, 200));
+          }
+        }
+        
+        if (audioBuffers.length > 0) {
+          // Объединяем все аудио буферы
+          const combinedAudio = Buffer.concat(audioBuffers);
+          console.log(`[TTS] ✅ Success (объединено ${audioBuffers.length} частей), total audio size: ${combinedAudio.length} bytes`);
+          res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+          res.setHeader('Content-Length', String(combinedAudio.length));
+          return res.send(combinedAudio);
+        } else {
+          console.error('[TTS] Не удалось синтезировать ни одну часть');
         }
       } else {
-        const errorText = await apiResponse.text().catch(() => '');
-        console.error('[TTS] Google TTS REST API failed:', apiResponse.status, errorText.slice(0, 500));
+        // Обычный синтез для коротких SSML
+        const requestBody = {
+          input: { ssml: ssmlText },
+          voice: {
+            languageCode: lang,
+            name: voiceName,
+            ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
+          },
+          audioConfig: {
+            audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
+            speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)),
+            pitch: Math.max(-4.0, Math.min(4.0, finalPitch)),
+            volumeGainDb: 2.0,
+          },
+        };
+        
+        const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
+        const apiResponse = await undiciFetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+        });
+        
+        if (apiResponse.ok) {
+          const jsonResponse = await apiResponse.json() as any;
+          if (jsonResponse.audioContent) {
+            const audioBuffer = Buffer.from(jsonResponse.audioContent, 'base64');
+            console.log(`[TTS] ✅ Success (${ssmlSource === 'gemini' ? 'Gemini SSML' : 'fallback SSML'}), audio size: ${audioBuffer.length} bytes`);
+            res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+            res.setHeader('Content-Length', String(audioBuffer.length));
+            return res.send(audioBuffer);
+          } else {
+            console.error('[TTS] Google TTS response missing audioContent');
+          }
+        } else {
+          const errorText = await apiResponse.text().catch(() => '');
+          console.error('[TTS] Google TTS REST API failed:', apiResponse.status, errorText.slice(0, 500));
+        }
       }
     } catch (googleErr) {
       console.error('[TTS] Google TTS failed:', googleErr);
