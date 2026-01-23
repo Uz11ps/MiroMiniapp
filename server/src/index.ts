@@ -1109,6 +1109,8 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           if (ext === 'txt') {
             return file.buffer.toString('utf-8').replace(/\r/g, '\n');
           } else {
+            // Примечание: pdf-parse может выводить предупреждения "Warning: TT: undefined function" и "Warning: TT: invalid function id"
+            // Это не критичные ошибки - они связаны с обработкой шрифтов TrueType в PDF и не влияют на извлечение текста
             const parsed = await pdfParse(file.buffer).catch(() => null);
             if (parsed && parsed.text) {
               return (parsed.text || '').replace(/\r/g, '\n');
@@ -4549,8 +4551,21 @@ async function generateViaGemini(prompt: string, size: string, apiKey: string): 
       });
       if (!r.ok) {
         const t = await r.text().catch(() => '');
-
-        console.warn('[IMG] gemini http', r.status, t.slice(0, 200));
+        let errorBody: any = { error: 'Unknown error' };
+        if (t) {
+          try {
+            errorBody = JSON.parse(t);
+          } catch {
+            errorBody = { error: t.slice(0, 200) };
+          }
+        }
+        
+        // 404 означает, что эндпоинт не найден - возможно, генерация изображений через Gemini недоступна
+        if (r.status === 404) {
+          console.warn('[IMG] gemini http 404 - эндпоинт генерации изображений недоступен. Возможно, функция не поддерживается в текущей версии API или требуется другой эндпоинт.');
+        } else {
+          console.warn('[IMG] gemini http', r.status, errorBody);
+        }
         continue;
       }
       const data = await r.json() as any;
