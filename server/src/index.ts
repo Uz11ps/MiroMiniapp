@@ -5063,8 +5063,12 @@ async function parseTextIntoSegments(params: {
 }>> {
   const { text, gameId, availableCharacters = [] } = params;
   
-  // Если текст очень короткий, возвращаем как один сегмент
-  if (text.length < 50) {
+  // Если текст очень короткий или нет явных признаков реплик, возвращаем как один сегмент рассказчика
+  const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»') || text.includes('„') || text.includes('"');
+  const hasNamePattern = /^([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)[:"]/.test(text);
+  
+  if (text.length < 100 || (!hasQuotes && !hasNamePattern)) {
+    // Если текст короткий или нет явных реплик, возвращаем как один сегмент рассказчика
     const quickEmotion = detectEmotion(text);
     return [{
       text: text.trim(),
@@ -5145,12 +5149,16 @@ ${charactersList}
 }
 
 Правила разбиения:
-- Разбивай текст на логические сегменты (предложения или группы предложений)
-- Реплики персонажей выделяй отдельными сегментами
-- Текст рассказчика между репликами тоже выделяй отдельными сегментами
+- Разбивай текст ТОЛЬКО когда есть реплики персонажей - выделяй реплики отдельными сегментами
+- Если весь текст - это рассказчик (нет реплик), верни ОДИН сегмент с isNarrator: true
+- НЕ разбивай текст рассказчика на мелкие части - объединяй весь текст рассказчика в один сегмент
+- Разбивай только когда есть явные реплики персонажей (в кавычках или после имени)
+- ВАЖНО: Распознавай персонажей по имени точно - если в тексте упоминается имя персонажа (например, БАЛДУР, Балдур, балдур), используй это имя для characterName
+- Имена персонажей могут быть в любом регистре - учитывай это при сопоставлении
 - Сохраняй порядок сегментов как в оригинальном тексте
 - Не теряй текст - каждый символ должен быть в каком-то сегменте
-- Учитывай характеристики персонажей при определении, кто говорит`;
+- Учитывай характеристики персонажей при определении, кто говорит
+- Минимизируй количество сегментов - объединяй текст рассказчика`;
 
     const userPrompt = `Разбей следующий текст на сегменты и проанализируй каждый:
 
@@ -5176,10 +5184,17 @@ ${charactersList}
             const segments = parsed.segments.map((seg: any) => {
               let foundCharacterId: string | undefined;
               if (seg.characterName && availableCharacters.length > 0) {
-                const found = availableCharacters.find(c => 
-                  c.name.toLowerCase().includes(seg.characterName.toLowerCase()) ||
-                  seg.characterName.toLowerCase().includes(c.name.toLowerCase())
-                );
+                // Улучшенное распознавание персонажей по имени (например, БАЛДУР)
+                const searchName = seg.characterName.toLowerCase().trim();
+                const found = availableCharacters.find(c => {
+                  const charName = c.name.toLowerCase().trim();
+                  // Точное совпадение или частичное (БАЛДУР найдет "Балдур", "БАЛДУР" и т.д.)
+                  return charName === searchName || 
+                         charName.includes(searchName) || 
+                         searchName.includes(charName) ||
+                         // Также проверяем без учета регистра и пробелов
+                         charName.replace(/\s+/g, '') === searchName.replace(/\s+/g, '');
+                });
                 if (found) {
                   foundCharacterId = found.id;
                   seg.gender = found.gender || seg.gender;
@@ -5476,6 +5491,111 @@ ${charactersList}
 }
 
 // Функция парсинга эмоций из текста (fallback)
+// Функция генерации SSML с интонациями через Gemini
+async function generateSSMLWithIntonation(params: {
+  text: string;
+  isNarrator: boolean;
+  characterName?: string;
+  characterClass?: string | null;
+  characterRace?: string | null;
+  characterPersona?: string | null;
+  characterCha?: number | null;
+  characterInt?: number | null;
+  characterWis?: number | null;
+  emotion?: string;
+  intensity?: number;
+  basePitch?: number;
+  baseRate?: number;
+}): Promise<string | null> {
+  const { 
+    text, 
+    isNarrator, 
+    characterName,
+    characterClass,
+    characterRace,
+    characterPersona,
+    characterCha,
+    characterInt,
+    characterWis,
+    emotion = 'neutral',
+    intensity = 0.5,
+    basePitch = 0,
+    baseRate = 1.0
+  } = params;
+  
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (!geminiKey) {
+      return null; // Fallback на обычный SSML
+    }
+    
+    const characterInfo: string[] = [];
+    if (characterName) characterInfo.push(`Имя: ${characterName}`);
+    if (characterClass) characterInfo.push(`Класс: ${characterClass}`);
+    if (characterRace) characterInfo.push(`Раса: ${characterRace}`);
+    if (characterPersona) characterInfo.push(`Характер: ${characterPersona}`);
+    if (characterCha !== null) characterInfo.push(`Харизма: ${characterCha}`);
+    if (characterInt !== null) characterInfo.push(`Интеллект: ${characterInt}`);
+    if (characterWis !== null) characterInfo.push(`Мудрость: ${characterWis}`);
+    
+    const systemPrompt = `Ты эксперт по синтезу речи и SSML разметке. Твоя задача - создать SSML разметку с естественными интонациями для текста.
+
+${isNarrator ? 'Это текст рассказчика (мастера игры). Рассказчик должен говорить мягко, с интонацией, не роботизированно.' : `Это реплика персонажа${characterName ? ` по имени ${characterName}` : ''}.`}
+
+${characterInfo.length > 0 ? `Характеристики персонажа:\n${characterInfo.join('\n')}` : ''}
+
+Эмоция: ${emotion}, интенсивность: ${intensity}
+
+Твоя задача:
+1. Создать SSML разметку с естественными интонациями
+2. Использовать тег <prosody> с параметрами rate, pitch, volume
+3. Добавить естественные паузы через <break>
+4. Использовать <emphasis> для выделения важных слов
+5. Создать живую, не роботизированную речь с интонациями
+
+Верни ТОЛЬКО SSML разметку (без дополнительного текста, только SSML):
+<speak>
+  <prosody rate="${baseRate}" pitch="${basePitch >= 0 ? '+' : ''}${basePitch}st" volume="+1dB">
+    <!-- здесь текст с интонациями -->
+  </prosody>
+</speak>
+
+Правила:
+- Используй естественные паузы (<break time="50ms-150ms"/>)
+- Выделяй важные слова через <emphasis level="moderate">
+- Создавай живую речь с вариациями интонации
+- Не делай слишком роботизированным`;
+
+    const userPrompt = `Создай SSML разметку для следующего текста с естественными интонациями:
+
+"${text}"
+
+Верни только SSML разметку.`;
+
+    const { text: ssmlResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt,
+      history: []
+    });
+    
+    if (ssmlResponse) {
+      // Извлекаем SSML из ответа
+      const ssmlMatch = ssmlResponse.match(/<speak>[\s\S]*<\/speak>/i);
+      if (ssmlMatch) {
+        return ssmlMatch[0];
+      }
+      // Если SSML не найден, но есть теги speak, используем весь ответ
+      if (ssmlResponse.includes('<speak>')) {
+        return ssmlResponse;
+      }
+    }
+  } catch (e) {
+    console.error('[TTS-SSML] Gemini SSML generation failed:', e);
+  }
+  
+  return null; // Fallback на обычный SSML
+}
+
 function detectEmotion(text: string): { emotion: string; intensity: number } {
   const lowerText = text.toLowerCase();
   
@@ -5693,11 +5813,11 @@ function selectVoiceForContext(params: {
     pitch = Math.max(-5.0, Math.min(5.0, pitch));
     rate = Math.max(0.75, Math.min(1.25, rate));
   } else if (isNarrator) {
-    // Для рассказчика используем уникальный нейтральный голос
+    // Для рассказчика используем женский мягкий голос
     // Всегда один и тот же голос для рассказчика для консистентности
-    voice = 'ru-RU-Wavenet-D';
-    pitch = 0.0; // Нейтральная интонация
-    rate = 0.92; // Немного медленнее для повествования, более размеренно
+    voice = 'ru-RU-Wavenet-E'; // Женский мягкий голос
+    pitch = 1.5; // Немного выше для мягкости
+    rate = 1.0; // Нормальный темп для естественной речи
   } else if (locationType) {
     // Выбор голоса на основе типа локации
     const locType = locationType.toLowerCase();
@@ -6186,23 +6306,49 @@ app.post('/api/tts', async (req, res) => {
             const client = new TextToSpeechClient({ keyFilename: googleCreds });
             // Для Service Account используем клиент напрямую
             const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            // Создаем улучшенную SSML разметку с эмоциями и интонацией
-            const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
-            const rateStr = finalSpeed.toFixed(2);
-            // Добавляем паузы для лучшей интонации (особенно для рассказчика)
-            const textWithPauses = finalIsNarrator 
-              ? escapedText.replace(/([.!?])\s+/g, '$1<break time="300ms"/>')
-                .replace(/([,;:])\s+/g, '$1<break time="150ms"/>')
-              : escapedText.replace(/([.!?])\s+/g, '$1<break time="200ms"/>');
-            const ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+0dB">${textWithPauses}</prosody></speak>`;
             
-            let voiceName = 'ru-RU-Wavenet-D';
-            if (voiceReq.includes('ru-RU')) {
+            // Пытаемся сгенерировать SSML с интонациями через Gemini
+            let ssmlText: string | null = null;
+            if (finalCharacterId || finalIsNarrator) {
+              const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
+              ssmlText = await generateSSMLWithIntonation({
+                text: escapedText,
+                isNarrator: finalIsNarrator,
+                characterName: finalCharacterName,
+                characterClass: characterInfo?.class || finalCharacterClass,
+                characterRace: characterInfo?.race || finalCharacterRace,
+                characterPersona: characterInfo?.persona || finalCharacterPersona,
+                characterCha: characterInfo?.cha !== null && characterInfo?.cha !== undefined ? characterInfo.cha : finalCharacterCha,
+                characterInt: characterInfo?.int !== null && characterInfo?.int !== undefined ? characterInfo.int : finalCharacterInt,
+                characterWis: characterInfo?.wis !== null && characterInfo?.wis !== undefined ? characterInfo.wis : finalCharacterWis,
+                emotion: emotion.emotion,
+                intensity: emotion.intensity,
+                basePitch: finalPitch,
+                baseRate: finalSpeed
+              });
+            }
+            
+            // Если Gemini не сгенерировал SSML, используем стандартный
+            if (!ssmlText) {
+              const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
+              const rateStr = finalSpeed.toFixed(2);
+              const textWithPauses = finalIsNarrator 
+                ? escapedText.replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
+                  .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
+                : escapedText.replace(/([.!?])\s+/g, '$1<break time="120ms"/>');
+              ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
+            }
+            
+            // Для рассказчика используем женский мягкий голос
+            let voiceName = finalIsNarrator ? 'ru-RU-Wavenet-E' : finalVoice;
+            if (voiceReq && voiceReq.includes('ru-RU')) {
               voiceName = voiceReq;
             } else if (voiceReq === 'female' || voiceReq === 'jane' || voiceReq === 'oksana') {
               voiceName = 'ru-RU-Wavenet-E';
             } else if (voiceReq === 'male') {
               voiceName = 'ru-RU-Wavenet-B';
+            } else if (finalIsNarrator) {
+              voiceName = 'ru-RU-Wavenet-E'; // Рассказчик - женский мягкий голос
             }
             
             const [response] = await client.synthesizeSpeech({
@@ -6214,10 +6360,11 @@ app.post('/api/tts', async (req, res) => {
               },
               audioConfig: {
                 audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-                speakingRate: Math.max(0.75, Math.min(1.25, finalSpeed)),
-                pitch: Math.max(-5.0, Math.min(5.0, finalPitch)),
-                volumeGainDb: 0.0,
-                effectsProfileId: ['telephony-class-application'],
+                speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)), // Более узкий диапазон для естественности
+                pitch: Math.max(-4.0, Math.min(4.0, finalPitch)), // Более узкий диапазон pitch
+                volumeGainDb: 2.0, // Немного увеличиваем громкость для естественности
+                // Убираем telephony-class-application - он делает голос роботизированным
+                // Используем более естественный профиль или не используем вообще
               },
             });
             
@@ -6235,23 +6382,49 @@ app.post('/api/tts', async (req, res) => {
         // Если используется API ключ, используем REST API напрямую
         if (googleKey && !accessToken) {
           const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          // Создаем улучшенную SSML разметку с эмоциями и интонацией
-          const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
-          const rateStr = finalSpeed.toFixed(2);
-          // Добавляем паузы для лучшей интонации (особенно для рассказчика)
-          const textWithPauses = finalIsNarrator 
-            ? escapedText.replace(/([.!?])\s+/g, '$1<break time="300ms"/>')
-              .replace(/([,;:])\s+/g, '$1<break time="150ms"/>')
-            : escapedText.replace(/([.!?])\s+/g, '$1<break time="200ms"/>');
-          const ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+0dB">${textWithPauses}</prosody></speak>`;
           
-          let voiceName = finalVoice;
+          // Пытаемся сгенерировать SSML с интонациями через Gemini
+          let ssmlText: string | null = null;
+          if (finalCharacterId || finalIsNarrator) {
+            const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
+            ssmlText = await generateSSMLWithIntonation({
+              text: escapedText,
+              isNarrator: finalIsNarrator,
+              characterName: finalCharacterName,
+              characterClass: characterInfo?.class || finalCharacterClass,
+              characterRace: characterInfo?.race || finalCharacterRace,
+              characterPersona: characterInfo?.persona || finalCharacterPersona,
+              characterCha: characterInfo?.cha !== null && characterInfo?.cha !== undefined ? characterInfo.cha : finalCharacterCha,
+              characterInt: characterInfo?.int !== null && characterInfo?.int !== undefined ? characterInfo.int : finalCharacterInt,
+              characterWis: characterInfo?.wis !== null && characterInfo?.wis !== undefined ? characterInfo.wis : finalCharacterWis,
+              emotion: emotion.emotion,
+              intensity: emotion.intensity,
+              basePitch: finalPitch,
+              baseRate: finalSpeed
+            });
+          }
+          
+          // Если Gemini не сгенерировал SSML, используем стандартный
+          if (!ssmlText) {
+            const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
+            const rateStr = finalSpeed.toFixed(2);
+            const textWithPauses = finalIsNarrator 
+              ? escapedText.replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
+                .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
+              : escapedText.replace(/([.!?])\s+/g, '$1<break time="120ms"/>');
+            ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
+          }
+          
+          // Для рассказчика используем женский мягкий голос
+          let voiceName = finalIsNarrator ? 'ru-RU-Wavenet-E' : finalVoice;
           if (!voiceName.includes('ru-RU')) {
             // Маппинг старых имен голосов
             if (voiceName === 'female' || voiceName === 'jane' || voiceName === 'oksana') {
               voiceName = 'ru-RU-Wavenet-E';
             } else if (voiceName === 'male') {
               voiceName = 'ru-RU-Wavenet-B';
+            } else if (finalIsNarrator) {
+              voiceName = 'ru-RU-Wavenet-E'; // Рассказчик - женский мягкий голос
             } else {
               voiceName = 'ru-RU-Wavenet-D';
             }
@@ -6266,10 +6439,11 @@ app.post('/api/tts', async (req, res) => {
             },
             audioConfig: {
               audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-              speakingRate: Math.max(0.75, Math.min(1.25, finalSpeed)),
-              pitch: Math.max(-5.0, Math.min(5.0, finalPitch)),
-              volumeGainDb: 0.0,
-              effectsProfileId: ['telephony-class-application'],
+              speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)), // Более узкий диапазон для естественности
+              pitch: Math.max(-4.0, Math.min(4.0, finalPitch)), // Более узкий диапазон pitch
+              volumeGainDb: 2.0, // Немного увеличиваем громкость для естественности
+              // Убираем telephony-class-application - он делает голос роботизированным
+              // Используем более естественный профиль или не используем вообще
             },
           };
           

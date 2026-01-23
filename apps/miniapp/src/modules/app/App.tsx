@@ -272,9 +272,33 @@ const GameChat: React.FC = () => {
         const segments = await ttsAnalyzeText(t, id);
         console.log('[TTS-CLIENT] Text analyzed into segments:', segments.length);
         
-        // Если сегментов больше одного, воспроизводим последовательно
-        if (segments.length > 1) {
-          for (const segment of segments) {
+        // Объединяем соседние сегменты рассказчика, чтобы избежать лишних пауз
+        const mergedSegments: Array<{ text: string; isNarrator: boolean; characterId?: string; characterName?: string; gender?: string | null }> = [];
+        for (let i = 0; i < segments.length; i++) {
+          const current = segments[i];
+          if (!current) continue;
+          
+          const prev = mergedSegments[mergedSegments.length - 1];
+          
+          // Если текущий сегмент - рассказчик и предыдущий тоже рассказчик, объединяем
+          if (current.isNarrator && prev && prev.isNarrator && !prev.characterId && !current.characterId) {
+            prev.text += ' ' + current.text;
+          } else {
+            mergedSegments.push({
+              text: current.text,
+              isNarrator: current.isNarrator,
+              characterId: current.characterId,
+              characterName: current.characterName,
+              gender: current.gender
+            });
+          }
+        }
+        
+        console.log('[TTS-CLIENT] Merged segments:', mergedSegments.length, 'from', segments.length);
+        
+        // Если сегментов больше одного после объединения, воспроизводим последовательно
+        if (mergedSegments.length > 1) {
+          for (const segment of mergedSegments) {
             // Проверяем, не изменилась ли последовательность
             if (seq !== activeSpeakSeqRef.current) {
               console.log('[TTS-CLIENT] Sequence changed, stopping playback');
