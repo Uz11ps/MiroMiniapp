@@ -1308,11 +1308,49 @@ const FeedbackPage: React.FC = () => {
   );
 };
 
-type Character = { id: string; name: string; gender?: string; race?: string; avatarUrl: string; description?: string; rating?: number; gameId?: string };
+type Character = { 
+  id: string; 
+  name: string; 
+  gender?: string; 
+  race?: string; 
+  avatarUrl: string; 
+  description?: string; 
+  rating?: number; 
+  gameId?: string;
+  // D&D 5e Stats
+  level?: number;
+  class?: string;
+  hp?: number;
+  maxHp?: number;
+  ac?: number;
+  str?: number;
+  dex?: number;
+  con?: number;
+  int?: number;
+  wis?: number;
+  cha?: number;
+  isPlayable?: boolean;
+};
 const CharactersPage: React.FC = () => {
   const [list, setList] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState<Partial<Character>>({ name: '', avatarUrl: 'https://picsum.photos/seed/new_char/80/80', gender: 'Мужской', race: 'Раса' });
+  const [form, setForm] = useState<Partial<Character>>({ 
+    name: '', 
+    avatarUrl: 'https://picsum.photos/seed/new_char/80/80', 
+    gender: 'Мужской', 
+    race: 'Раса',
+    level: 1,
+    class: '',
+    hp: 10,
+    maxHp: 10,
+    ac: 10,
+    str: 10,
+    dex: 10,
+    con: 10,
+    int: 10,
+    wis: 10,
+    cha: 10,
+  });
   const load = async () => {
     setLoading(true);
     const res = await fetch(`${API}/admin/characters`);
@@ -1321,7 +1359,26 @@ const CharactersPage: React.FC = () => {
   };
   useEffect(() => { load(); }, []);
   const onCreate = async () => {
-    const payload = { name: form.name || 'Новый персонаж', avatarUrl: form.avatarUrl || 'https://picsum.photos/seed/new_char/80/80', gender: form.gender, race: form.race, description: form.description, rating: Number(form.rating) || 5, gameId: form.gameId };
+    const payload = { 
+      name: form.name || 'Новый персонаж', 
+      avatarUrl: form.avatarUrl || 'https://picsum.photos/seed/new_char/80/80', 
+      gender: form.gender, 
+      race: form.race, 
+      description: form.description, 
+      rating: Number(form.rating) || 5, 
+      gameId: form.gameId,
+      level: Number(form.level) || 1,
+      class: form.class,
+      hp: Number(form.hp) || 10,
+      maxHp: Number(form.maxHp) || 10,
+      ac: Number(form.ac) || 10,
+      str: Number(form.str) || 10,
+      dex: Number(form.dex) || 10,
+      con: Number(form.con) || 10,
+      int: Number(form.int) || 10,
+      wis: Number(form.wis) || 10,
+      cha: Number(form.cha) || 10,
+    };
     await fetch(`${API}/characters`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     await load();
   };
@@ -1348,19 +1405,122 @@ const CharactersPage: React.FC = () => {
           <input placeholder="Рейтинг" type="number" value={form.rating as number | undefined} onChange={(e) => setForm({ ...form, rating: Number(e.target.value) })} />
           <textarea placeholder="Описание" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
         </div>
+        <div style={{ marginTop: 12, padding: 8, backgroundColor: '#f5f5f5', borderRadius: 4 }}>
+          <h4 style={{ margin: '0 0 8px 0' }}>D&D 5e Статы</h4>
+          <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)' }}>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Уровень</label>
+              <input type="number" placeholder="1" value={form.level || ''} onChange={(e) => setForm({ ...form, level: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Класс</label>
+              <input placeholder="Воин" value={form.class || ''} onChange={(e) => setForm({ ...form, class: e.target.value })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>HP</label>
+              <input type="number" placeholder="10" value={form.hp || ''} onChange={(e) => setForm({ ...form, hp: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Max HP</label>
+              <input type="number" placeholder="10" value={form.maxHp || ''} onChange={(e) => setForm({ ...form, maxHp: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>AC</label>
+              <input type="number" placeholder="10" value={form.ac || ''} onChange={(e) => setForm({ ...form, ac: Number(e.target.value) })} />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)', marginTop: 8 }}>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>STR</label>
+              <input type="number" placeholder="10" value={form.str || ''} onChange={(e) => setForm({ ...form, str: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>DEX</label>
+              <input type="number" placeholder="10" value={form.dex || ''} onChange={(e) => setForm({ ...form, dex: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>CON</label>
+              <input type="number" placeholder="10" value={form.con || ''} onChange={(e) => setForm({ ...form, con: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>INT</label>
+              <input type="number" placeholder="10" value={form.int || ''} onChange={(e) => setForm({ ...form, int: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>WIS</label>
+              <input type="number" placeholder="10" value={form.wis || ''} onChange={(e) => setForm({ ...form, wis: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>CHA</label>
+              <input type="number" placeholder="10" value={form.cha || ''} onChange={(e) => setForm({ ...form, cha: Number(e.target.value) })} />
+            </div>
+          </div>
+        </div>
         <div style={{ marginTop: 8 }}><button onClick={onCreate}>Создать</button></div>
       </div>
       <div className="card" style={{ padding: 12 }}>
         <h3>Список персонажей</h3>
         {loading ? 'Загрузка...' : (
-          <ul>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}>
             {list.map((c) => (
-              <li key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <img src={c.avatarUrl} alt="a" width={36} height={36} style={{ borderRadius: 18 }} />
-                <span>{c.name}</span>
-                <span className="muted">{c.race}</span>
-                <span className="muted">{c.gender}</span>
-                <button onClick={() => onDelete(c.id)} style={{ marginLeft: 'auto' }}>Удалить</button>
+              <li key={c.id} className="card" style={{ padding: 12, display: 'grid', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <img src={c.avatarUrl} alt="a" width={48} height={48} style={{ borderRadius: 24 }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 'bold' }}>{c.name}</div>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {c.race} • {c.gender} {c.isPlayable ? '• Игровой' : '• NPC'}
+                      {c.class ? ` • ${c.class} (Ур.${c.level || 1})` : ''}
+                    </div>
+                  </div>
+                  <button onClick={() => onDelete(c.id)} className="header-btn danger">Удалить</button>
+                </div>
+                <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)', padding: 8, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>HP</label>
+                    <input type="number" defaultValue={c.hp || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hp: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Max HP</label>
+                    <input type="number" defaultValue={c.maxHp || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxHp: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>AC</label>
+                    <input type="number" defaultValue={c.ac || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ac: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>STR</label>
+                    <input type="number" defaultValue={c.str || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ str: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>DEX</label>
+                    <input type="number" defaultValue={c.dex || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dex: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CON</label>
+                    <input type="number" defaultValue={c.con || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ con: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>INT</label>
+                    <input type="number" defaultValue={c.int || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ int: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>WIS</label>
+                    <input type="number" defaultValue={c.wis || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wis: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CHA</label>
+                    <input type="number" defaultValue={c.cha || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cha: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Уровень</label>
+                    <input type="number" defaultValue={c.level || 1} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ level: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Класс</label>
+                    <input defaultValue={c.class || ''} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ class: e.target.value || null }) }).then(() => load())} style={{ width: '100%' }} />
+                  </div>
+                </div>
               </li>
             ))}
           </ul>
@@ -1430,6 +1590,17 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
     role: '',
     isPlayable: false,
     abilities: '',
+    level: 1,
+    class: '',
+    hp: 10,
+    maxHp: 10,
+    ac: 10,
+    str: 10,
+    dex: 10,
+    con: 10,
+    int: 10,
+    wis: 10,
+    cha: 10,
   });
   const load = async () => {
     const r = await fetch(`${API}/characters?gameId=${encodeURIComponent(gameId)}`);
@@ -1437,9 +1608,22 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
   };
   useEffect(() => { if (gameId) load(); }, [gameId]);
   const add = async () => {
-    const payload = { ...form, gameId };
+    const payload = { 
+      ...form, 
+      gameId,
+      level: Number(form.level) || 1,
+      hp: Number(form.hp) || 10,
+      maxHp: Number(form.maxHp) || 10,
+      ac: Number(form.ac) || 10,
+      str: Number(form.str) || 10,
+      dex: Number(form.dex) || 10,
+      con: Number(form.con) || 10,
+      int: Number(form.int) || 10,
+      wis: Number(form.wis) || 10,
+      cha: Number(form.cha) || 10,
+    };
     await fetch(`${API}/characters`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    setForm({ name: '', avatarUrl: '', race: '', gender: '', voiceId: '', persona: '', origin: '', role: '', isPlayable: false, abilities: '' });
+    setForm({ name: '', avatarUrl: '', race: '', gender: '', voiceId: '', persona: '', origin: '', role: '', isPlayable: false, abilities: '', level: 1, class: '', hp: 10, maxHp: 10, ac: 10, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 });
     load();
   };
   const patch = async (id: string, p: any) => {
@@ -1478,6 +1662,57 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
           <input placeholder="Характер (persona)" value={form.persona || ''} onChange={(e) => setForm({ ...form, persona: e.target.value })} />
           <textarea placeholder="Способности (по одной в строке)" value={form.abilities || ''} onChange={(e) => setForm({ ...form, abilities: e.target.value })} />
         </div>
+        <div style={{ marginTop: 8, padding: 8, backgroundColor: '#f5f5f5', borderRadius: 4 }}>
+          <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>D&D 5e Статы</h4>
+          <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)' }}>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Уровень</label>
+              <input type="number" placeholder="1" value={form.level || ''} onChange={(e) => setForm({ ...form, level: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Класс</label>
+              <input placeholder="Воин" value={form.class || ''} onChange={(e) => setForm({ ...form, class: e.target.value })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>HP</label>
+              <input type="number" placeholder="10" value={form.hp || ''} onChange={(e) => setForm({ ...form, hp: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Max HP</label>
+              <input type="number" placeholder="10" value={form.maxHp || ''} onChange={(e) => setForm({ ...form, maxHp: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>AC</label>
+              <input type="number" placeholder="10" value={form.ac || ''} onChange={(e) => setForm({ ...form, ac: Number(e.target.value) })} />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)', marginTop: 8 }}>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>STR</label>
+              <input type="number" placeholder="10" value={form.str || ''} onChange={(e) => setForm({ ...form, str: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>DEX</label>
+              <input type="number" placeholder="10" value={form.dex || ''} onChange={(e) => setForm({ ...form, dex: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CON</label>
+              <input type="number" placeholder="10" value={form.con || ''} onChange={(e) => setForm({ ...form, con: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>INT</label>
+              <input type="number" placeholder="10" value={form.int || ''} onChange={(e) => setForm({ ...form, int: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>WIS</label>
+              <input type="number" placeholder="10" value={form.wis || ''} onChange={(e) => setForm({ ...form, wis: Number(e.target.value) })} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CHA</label>
+              <input type="number" placeholder="10" value={form.cha || ''} onChange={(e) => setForm({ ...form, cha: Number(e.target.value) })} />
+            </div>
+          </div>
+        </div>
       </div>
       <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 6 }}>
         {list.map((c) => (
@@ -1500,6 +1735,55 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
             </div>
             <div>
               <textarea defaultValue={c.abilities || ''} placeholder="Способности (по одной в строке)" onBlur={(e) => patch(c.id, { abilities: e.currentTarget.value || null })} />
+            </div>
+            <div style={{ padding: 8, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>D&D 5e Статы</h4>
+              <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)' }}>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>HP</label>
+                  <input type="number" defaultValue={c.hp || 10} onBlur={(e) => patch(c.id, { hp: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Max HP</label>
+                  <input type="number" defaultValue={c.maxHp || 10} onBlur={(e) => patch(c.id, { maxHp: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>AC</label>
+                  <input type="number" defaultValue={c.ac || 10} onBlur={(e) => patch(c.id, { ac: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>STR</label>
+                  <input type="number" defaultValue={c.str || 10} onBlur={(e) => patch(c.id, { str: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>DEX</label>
+                  <input type="number" defaultValue={c.dex || 10} onBlur={(e) => patch(c.id, { dex: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CON</label>
+                  <input type="number" defaultValue={c.con || 10} onBlur={(e) => patch(c.id, { con: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>INT</label>
+                  <input type="number" defaultValue={c.int || 10} onBlur={(e) => patch(c.id, { int: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>WIS</label>
+                  <input type="number" defaultValue={c.wis || 10} onBlur={(e) => patch(c.id, { wis: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CHA</label>
+                  <input type="number" defaultValue={c.cha || 10} onBlur={(e) => patch(c.id, { cha: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Уровень</label>
+                  <input type="number" defaultValue={c.level || 1} onBlur={(e) => patch(c.id, { level: Number(e.target.value) })} style={{ width: '100%' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Класс</label>
+                  <input defaultValue={c.class || ''} onBlur={(e) => patch(c.id, { class: e.target.value || null })} style={{ width: '100%' }} />
+                </div>
+              </div>
             </div>
             <div>
               <label className="btn">

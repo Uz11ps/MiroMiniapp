@@ -125,6 +125,10 @@ const DEFAULT_SYSTEM_PROMPT =
   '5. ПРЕИМУЩЕСТВО/ПОМЕХА: Если условия дают преимущество или помеху, явно указывай это при броске d20. ' +
   '6. БОЙ: В случае конфликта инициируй бросок инициативы, рассчитывай попадания (бросок атаки против AC цели) и урон (согласно оружию/заклинанию). Учитывай крит на нат.20. ' +
   '7. ПАМЯТЬ: Ты работаешь с расширенным контекстом Gemini — помни всё состояние мира, инвентарь, HP и предысторию персонажей. ' +
+  'ВАЖНО: Когда описываешь изменения HP, урон или лечение, используй явные формулировки: "Персонаж теряет X HP", "Персонаж восстанавливает X HP", "Урон: X HP". ' +
+  'Система автоматически отслеживает и обновляет состояние персонажей на основе твоих описаний. ' +
+  'СОСТОЯНИЯ: Состояния (отравление, паралич, оглушение и т.д.) имеют реальные эффекты: отравление причиняет урон каждый ход, паралич блокирует действия, оглушение дает помеху на проверки. ' +
+  'Используй состояния осознанно и описывай их применение. Для снятия состояний используй: "Персонаж излечен от отравления", "Лечение снимает паралич", "Отдых восстанавливает силы". ' +
   '8. СТИЛЬ: Пиши атмосферно, кинематографично и живо. Описывай звуки, запахи и ощущения. ' +
   '9. ОГРАНИЧЕНИЯ: Не создавай новые ключевые локации, если их нет в сценарии, но можешь описывать путь между ними. ' +
   '10. ФОРМАТ: Отвечай короткими абзацами (3-7 строк). В конце выводи доступные действия.\n' +
@@ -2885,6 +2889,22 @@ app.post('/api/characters', async (req, res) => {
       persona: req.body.persona,
       origin: req.body.origin,
       isPlayable: Boolean(req.body.isPlayable),
+      // D&D 5e Stats
+      level: Number.isFinite(req.body.level) ? Number(req.body.level) : undefined,
+      class: req.body.class || null,
+      hp: Number.isFinite(req.body.hp) ? Number(req.body.hp) : undefined,
+      maxHp: Number.isFinite(req.body.maxHp) ? Number(req.body.maxHp) : undefined,
+      ac: Number.isFinite(req.body.ac) ? Number(req.body.ac) : undefined,
+      str: Number.isFinite(req.body.str) ? Number(req.body.str) : undefined,
+      dex: Number.isFinite(req.body.dex) ? Number(req.body.dex) : undefined,
+      con: Number.isFinite(req.body.con) ? Number(req.body.con) : undefined,
+      int: Number.isFinite(req.body.int) ? Number(req.body.int) : undefined,
+      wis: Number.isFinite(req.body.wis) ? Number(req.body.wis) : undefined,
+      cha: Number.isFinite(req.body.cha) ? Number(req.body.cha) : undefined,
+      skills: req.body.skills || null,
+      inventory: req.body.inventory || null,
+      spells: req.body.spells || null,
+      equipment: req.body.equipment || null,
     } });
     return res.status(201).json(created);
   } catch {
@@ -3532,12 +3552,74 @@ app.post('/api/chat/reply', async (req, res) => {
       if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
       if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
       if (playable.length) {
-        context.push('Игровые персонажи D&D 5e:\n' + playable.map((p: any) => {
+        // Получаем актуальное состояние персонажей из gameSession
+        let characterStates: Record<string, any> = {};
+        try {
+          if (gameId) {
+            let sess: any = null;
+            if (lobbyId) {
+              sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+            } else {
+              const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+              if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+            }
+            if (sess?.state) {
+              const state = sess.state as any;
+              characterStates = state.characters || {};
+            }
+          }
+        } catch {}
+        
+        context.push('Игровые персонажи D&D 5e (ТЕКУЩЕЕ СОСТОЯНИЕ):\n' + playable.map((p: any) => {
+          const charState = characterStates[p.id] || {};
+          // Используем состояние из сессии, если есть, иначе базовые значения
+          const currentHp = typeof charState.hp === 'number' ? charState.hp : p.hp;
+          const currentMaxHp = typeof charState.maxHp === 'number' ? charState.maxHp : p.maxHp;
+          
+          // Применяем модификаторы состояний к характеристикам
+          const baseStr = typeof charState.str === 'number' ? charState.str : p.str;
+          const baseDex = typeof charState.dex === 'number' ? charState.dex : p.dex;
+          const baseCon = typeof charState.con === 'number' ? charState.con : p.con;
+          const baseInt = typeof charState.int === 'number' ? charState.int : p.int;
+          const baseWis = typeof charState.wis === 'number' ? charState.wis : p.wis;
+          const baseCha = typeof charState.cha === 'number' ? charState.cha : p.cha;
+          
+          const statMods = charState.statModifiers || {};
+          const currentStr = baseStr + (statMods.str || 0);
+          const currentDex = baseDex + (statMods.dex || 0);
+          const currentCon = baseCon + (statMods.con || 0);
+          const currentInt = baseInt + (statMods.int || 0);
+          const currentWis = baseWis + (statMods.wis || 0);
+          const currentCha = baseCha + (statMods.cha || 0);
+          
+          const currentAc = typeof charState.ac === 'number' ? charState.ac : p.ac;
+          
           const traits = [p.role, p.class, p.race, p.gender].filter(Boolean).join(', ');
-          const stats = `HP: ${p.hp}/${p.maxHp}, AC: ${p.ac}, STR:${p.str}, DEX:${p.dex}, CON:${p.con}, INT:${p.int}, WIS:${p.wis}, CHA:${p.cha}`;
+          const stats = `HP: ${currentHp}/${currentMaxHp}, AC: ${currentAc}, STR:${currentStr}${statMods.str ? `(${statMods.str > 0 ? '+' : ''}${statMods.str})` : ''}, DEX:${currentDex}${statMods.dex ? `(${statMods.dex > 0 ? '+' : ''}${statMods.dex})` : ''}, CON:${currentCon}${statMods.con ? `(${statMods.con > 0 ? '+' : ''}${statMods.con})` : ''}, INT:${currentInt}${statMods.int ? `(${statMods.int > 0 ? '+' : ''}${statMods.int})` : ''}, WIS:${currentWis}${statMods.wis ? `(${statMods.wis > 0 ? '+' : ''}${statMods.wis})` : ''}, CHA:${currentCha}${statMods.cha ? `(${statMods.cha > 0 ? '+' : ''}${statMods.cha})` : ''}`;
           const extras = [p.persona, p.origin].filter(Boolean).join('. ');
           const abilities = p.abilities ? `; способности: ${String(p.abilities).slice(0, 200)}` : '';
-          return `- ${p.name} (${traits}) — ${stats}. ${extras}${abilities}`;
+          
+          // Форматируем состояния с описанием эффектов
+          let conditionsText = '';
+          if (charState.conditions && Array.isArray(charState.conditions) && charState.conditions.length > 0) {
+            const conditionDescriptions = charState.conditions.map((cond: string) => {
+              const effect = CONDITION_EFFECTS[cond.toLowerCase()];
+              if (effect) {
+                let desc = effect.name;
+                if (effect.blocksActions) desc += ' (блокирует действия)';
+                if (effect.blocksMovement) desc += ' (блокирует движение)';
+                if (effect.blocksVision) desc += ' (блокирует зрение)';
+                if (effect.duration !== undefined && charState.conditionData?.[cond]?.duration) {
+                  desc += ` (${charState.conditionData[cond].duration} ходов)`;
+                }
+                return desc;
+              }
+              return cond;
+            });
+            conditionsText = `; состояния: ${conditionDescriptions.join(', ')}`;
+          }
+          
+          return `- ${p.name} (${traits}) — ${stats}. ${extras}${abilities}${conditionsText}`;
         }).join('\n'));
       }
       if (Array.isArray(npcs) && npcs.length) {
@@ -3734,6 +3816,190 @@ app.post('/api/chat/reply', async (req, res) => {
       const kindNorm = normalizeRollKind(kindRaw);
       aiRequestDice = { expr: 'd20', dc, context: `Проверка: ${kindRaw}`, kind: kindNorm, skill: kindRaw };
       text = text.replace(diceTagRegex, '').trim();
+    }
+
+    // Парсинг изменений состояния персонажей из ответа ИИ
+    if (gameId && playable.length) {
+      try {
+        let sess: any = null;
+        if (lobbyId) {
+          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+        } else {
+          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        }
+        
+        if (sess) {
+          const state = (sess.state as any) || {};
+          if (!state.characters) state.characters = {};
+          
+          // ПРИМЕНЯЕМ ЭФФЕКТЫ СОСТОЯНИЙ В НАЧАЛЕ ХОДА
+          for (const char of playable) {
+            const charState = state.characters[char.id] || { hp: char.hp, maxHp: char.maxHp };
+            const baseChar = char;
+            
+            // Обновляем длительность состояний
+            const { removed } = updateConditionDurations(charState);
+            if (removed.length > 0) {
+              console.log(`[CONDITIONS] Removed expired conditions for ${char.name}:`, removed);
+            }
+            
+            // Применяем эффекты состояний
+            const { hpChange, statChanges, messages } = applyConditionEffects(charState, baseChar);
+            
+            if (hpChange !== 0) {
+              charState.hp = Math.max(0, Math.min(charState.maxHp || baseChar.maxHp, (charState.hp || baseChar.hp) + hpChange));
+              console.log(`[CONDITIONS] ${char.name} HP changed by ${hpChange} due to conditions. New HP: ${charState.hp}/${charState.maxHp || baseChar.maxHp}`);
+            }
+            
+            if (Object.keys(statChanges).length > 0) {
+              if (!charState.statModifiers) charState.statModifiers = {};
+              for (const [stat, change] of Object.entries(statChanges)) {
+                charState.statModifiers[stat] = (charState.statModifiers[stat] || 0) + change;
+              }
+            }
+            
+            state.characters[char.id] = charState;
+          }
+          
+          // Парсим изменения HP из текста ИИ
+          // Форматы: "Персонаж теряет 5 HP", "HP уменьшается на 3", "Персонаж получает урон 10"
+          // "Персонаж восстанавливает 5 HP", "HP увеличивается на 3", "Лечение: +5 HP"
+          const hpChangeRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*(?:теряет|получает|восстанавливает|теряет|получил|восстановил|получила|восстановила)\s*(?:урон|урон|HP|хит|хитов)?\s*(\d+)\s*(?:HP|хит|хитов|урона|урона)|HP\s*(?:уменьшается|увеличивается|изменяется)\s*(?:на|до)\s*([+-]?\d+)|(?:Урон|Лечение|Восстановление):\s*([+-]?\d+)\s*HP)/gi;
+          const hpMatches = text.matchAll(hpChangeRegex);
+          
+          for (const hpMatch of hpMatches) {
+            const charName = hpMatch[1]?.trim();
+            const damage = hpMatch[2] ? parseInt(hpMatch[2], 10) : (hpMatch[3] ? parseInt(hpMatch[3], 10) : (hpMatch[4] ? parseInt(hpMatch[4], 10) : 0));
+            
+            if (charName && damage) {
+              // Находим персонажа по имени
+              const char = playable.find((p: any) => 
+                p.name.toLowerCase().includes(charName.toLowerCase()) || 
+                charName.toLowerCase().includes(p.name.toLowerCase())
+              );
+              
+              if (char) {
+                const charState = state.characters[char.id] || { hp: char.hp, maxHp: char.maxHp };
+                const isHeal = hpMatch[0].toLowerCase().includes('восстанов') || hpMatch[0].toLowerCase().includes('лечение') || damage < 0;
+                const isDamage = hpMatch[0].toLowerCase().includes('теряет') || hpMatch[0].toLowerCase().includes('урон') || damage > 0;
+                
+                if (isHeal) {
+                  charState.hp = Math.min(charState.maxHp || char.maxHp, (charState.hp || char.hp) + Math.abs(damage));
+                } else if (isDamage) {
+                  charState.hp = Math.max(0, (charState.hp || char.hp) - Math.abs(damage));
+                }
+                
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Парсим изменения характеристик (временные эффекты)
+          // Формат: "STR уменьшается на 2", "DEX +1", "CON -1"
+          const statChangeRegex = /(STR|DEX|CON|INT|WIS|CHA|Сила|Ловкость|Телосложение|Интеллект|Мудрость|Харизма)\s*(?:уменьшается|увеличивается|изменяется|становится)\s*(?:на|до)?\s*([+-]?\d+)/gi;
+          const statMatches = text.matchAll(statChangeRegex);
+          
+          for (const statMatch of statMatches) {
+            const statName = statMatch[1];
+            const change = parseInt(statMatch[2], 10);
+            
+            if (statName && !isNaN(change)) {
+              // Маппинг русских названий на английские
+              const statMap: Record<string, string> = {
+                'Сила': 'str', 'STR': 'str',
+                'Ловкость': 'dex', 'DEX': 'dex',
+                'Телосложение': 'con', 'CON': 'con',
+                'Интеллект': 'int', 'INT': 'int',
+                'Мудрость': 'wis', 'WIS': 'wis',
+                'Харизма': 'cha', 'CHA': 'cha'
+              };
+              
+              const statKey = statMap[statName] || statName.toLowerCase();
+              
+              // Применяем изменение ко всем персонажам (или можно указать конкретного)
+              for (const char of playable) {
+                const charState = state.characters[char.id] || {};
+                if (!charState.statModifiers) charState.statModifiers = {};
+                charState.statModifiers[statKey] = (charState.statModifiers[statKey] || 0) + change;
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Парсим состояния (отравление, паралич и т.д.)
+          // Формат: "Персонаж отравлен", "Применяется эффект: Паралич"
+          const conditionRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*(?:получает|подвергается|подвержен|подвержена)\s*(?:эффекту|состоянию)?:?\s*)?(отравлен|парализован|оглушен|ослеплен|очарован|испуган|невидим|невидима|болезнь|болезни|усталость|усталости|истощение|истощения)/gi;
+          const conditionMatches = text.matchAll(conditionRegex);
+          
+          for (const condMatch of conditionMatches) {
+            const charName = condMatch[1]?.trim();
+            const condition = condMatch[2]?.toLowerCase();
+            
+            if (condition) {
+              const chars = charName ? 
+                playable.filter((p: any) => 
+                  p.name.toLowerCase().includes(charName.toLowerCase()) || 
+                  charName.toLowerCase().includes(p.name.toLowerCase())
+                ) : playable;
+              
+              for (const char of chars) {
+                const charState = state.characters[char.id] || {};
+                if (!charState.conditions) charState.conditions = [];
+                if (!charState.conditions.includes(condition)) {
+                  charState.conditions.push(condition);
+                  // Инициализируем данные состояния
+                  const effect = CONDITION_EFFECTS[condition];
+                  if (effect && effect.duration !== undefined) {
+                    if (!charState.conditionData) charState.conditionData = {};
+                    charState.conditionData[condition] = { duration: effect.duration };
+                  }
+                  console.log(`[CONDITIONS] Applied condition "${condition}" to ${char.name}`);
+                }
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Парсим снятие состояний (лечение, отдых)
+          // Формат: "Состояние снято", "Отравление излечено", "Лечение снимает паралич"
+          const removeConditionRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*)?(?:излечен|излечена|вылечен|вылечена|снят|снята|снято|восстановлен|восстановлена|отдых|отдыхает|лечение|лечится)\s*(?:от|от)?\s*(отравлен|парализован|оглушен|ослеплен|очарован|испуган|невидим|невидима|болезнь|болезни|усталость|усталости|истощение|истощения|состояни[яе])/gi;
+          const removeMatches = text.matchAll(removeConditionRegex);
+          
+          for (const removeMatch of removeMatches) {
+            const charName = removeMatch[1]?.trim();
+            const condition = removeMatch[2]?.toLowerCase();
+            
+            if (condition && condition !== 'состояни' && condition !== 'состояние') {
+              const chars = charName ? 
+                playable.filter((p: any) => 
+                  p.name.toLowerCase().includes(charName.toLowerCase()) || 
+                  charName.toLowerCase().includes(p.name.toLowerCase())
+                ) : playable;
+              
+              for (const char of chars) {
+                const charState = state.characters[char.id] || {};
+                if (charState.conditions && charState.conditions.includes(condition)) {
+                  charState.conditions = charState.conditions.filter((c: string) => c !== condition);
+                  if (charState.conditionData && charState.conditionData[condition]) {
+                    delete charState.conditionData[condition];
+                  }
+                  console.log(`[CONDITIONS] Removed condition "${condition}" from ${char.name}`);
+                }
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Сохраняем обновленное состояние
+          await prisma.gameSession.update({
+            where: { id: sess.id },
+            data: { state }
+          });
+        }
+      } catch (e) {
+        console.error('[REPLY] Failed to parse character state changes:', e);
+      }
     }
 
     if (lobbyId) {
@@ -4080,11 +4346,8 @@ app.post('/api/engine/session/:id/act', async (req, res) => {
       }
     }
     if (!chosen && userText) {
-      const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
-      if (apiKey && exits.length) {
+      if (exits.length) {
         try {
-          const client = createOpenAIClient(apiKey);
-          const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
           const prompt = [
             'Ты помощник Директора игры. Тебе дано сообщение игрока и список возможных выходов из сцены.',
             'Если доступны "Правила Локации" — учитывай их. Твоя задача: выбрать уместный выход (или вернуть none).',
@@ -4097,18 +4360,22 @@ app.post('/api/engine/session/:id/act', async (req, res) => {
               return `- id=${e.id} [${e.type}] ${label}`;
             }),
           ].join('\n');
-          const r = await client.chat.completions.create({
-            model,
-            temperature: 0.0,
-            max_tokens: 50,
-            response_format: { type: 'json_object' } as any,
-            messages: [
-              { role: 'system', content: 'Отвечай только валидным JSON.' },
-              { role: 'user', content: prompt },
-            ],
+          const { text } = await generateChatCompletion({
+            systemPrompt: 'Отвечай только валидным JSON.',
+            userPrompt: prompt,
+            history: []
           });
-          const content = r.choices?.[0]?.message?.content || '{}';
-          const parsed = JSON.parse(content) as { exitId?: string };
+          const content = text || '{}';
+          let parsed: { exitId?: string } = {};
+          try {
+            // Пытаемся извлечь JSON из ответа
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              parsed = JSON.parse(jsonMatch[0]) as { exitId?: string };
+            }
+          } catch (e) {
+            console.error('[ACT] Failed to parse AI response:', e);
+          }
           const picked = parsed.exitId && parsed.exitId !== 'none' ? exits.find((e: any) => e.id === parsed.exitId) : null;
           if (picked) chosen = picked;
         } catch {}
@@ -5115,7 +5382,6 @@ async function generateChatCompletion(params: {
 
 
 async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameId: string, context: string, outcomeText: string): Promise<{ text: string; fallback: boolean }> {
-  const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
   const game = await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true } }).catch(() => null);
   const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
   const baseLines: string[] = [];
@@ -5144,53 +5410,30 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
     'Продолжи сцену согласно исходу. Опиши обнаруженное/последствия/альтернативы. В конце задай, что герой делает дальше.'
   ].filter(Boolean).join('\n\n');
 
-  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
-  if (geminiKey) {
-    try {
-      const text = await generateViaGeminiText({
-        apiKey: geminiKey,
-        systemPrompt: sys,
-        userPrompt: user,
-        modelName: process.env.GEMINI_MODEL || 'gemini-2.5-pro'
-      });
-      if (text) return { text, fallback: false };
-    } catch (e) {
-      console.error('[NARRATIVE] Gemini failed, falling back to OpenAI/Hardcode:', e);
-    }
+  try {
+    const { text } = await generateChatCompletion({
+      systemPrompt: sys,
+      userPrompt: user,
+      history: []
+    });
+    if (text && text.trim()) return { text: text.trim(), fallback: false };
+  } catch (e) {
+    console.error('[NARRATIVE] AI generation failed:', e);
   }
 
-  if (!apiKey) {
-    const low = outcomeText.toLowerCase();
-    const successText = 'Вы замечаете важную деталь: в стене едва виден шов, холодный поток воздуха указывает направление. За каменной плитой скрывается узкий проход. Что вы сделаете дальше?';
-    const critSuccessText = 'Ваши действия идеальны: скрытый механизм щёлкает, плита мягко отъезжает, открывая проход с еле заметной голубой подсветкой. Внутри слышится дальний шёпот. Куда направитесь?';
-    const partialText = 'Вы находите следы старого механизма, но он заедает. Дверь приоткрывается лишь на ладонь, из щели веет сыростью. Можно попытаться расширить проход или поискать иной способ. Что выберете?';
-    const failText = 'Несмотря на усилия, стена кажется монолитной, а следы уходят в темноту. Где-то рядом скрипит камень — возможно, сработала ловушка, но вы успели отпрянуть. Как поступите?';
-    const critFailText = 'Механизм срабатывает грубо: камни осыпаются, воздух свистит, где-то щёлкают зубцы. Вы едва избегаете травмы. Путь закрывается. Попробуете обойти или искать другой подход?';
-    const pick = low.includes('критический успех') ? critSuccessText
-      : low.includes('успех') ? successText
-      : low.includes('частичный') ? partialText
-      : low.includes('критический провал') ? critFailText
-      : failText;
-    return { text: pick, fallback: true };
-  }
-  try {
-    const client = createOpenAIClient(apiKey);
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-    const r = await client.chat.completions.create({
-      model,
-      temperature: 0.45,
-      max_tokens: 400,
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: user },
-      ],
-    });
-    const text = r.choices?.[0]?.message?.content?.trim() || '';
-    if (text) return { text, fallback: false };
-    return { text: 'Сцена продолжается. Что вы сделаете дальше?', fallback: true };
-  } catch {
-    return { text: 'Сцена продолжается. Что вы сделаете дальше?', fallback: true };
-  }
+  // Fallback на захардкоженные ответы
+  const low = outcomeText.toLowerCase();
+  const successText = 'Вы замечаете важную деталь: в стене едва виден шов, холодный поток воздуха указывает направление. За каменной плитой скрывается узкий проход. Что вы сделаете дальше?';
+  const critSuccessText = 'Ваши действия идеальны: скрытый механизм щёлкает, плита мягко отъезжает, открывая проход с еле заметной голубой подсветкой. Внутри слышится дальний шёпот. Куда направитесь?';
+  const partialText = 'Вы находите следы старого механизма, но он заедает. Дверь приоткрывается лишь на ладонь, из щели веет сыростью. Можно попытаться расширить проход или поискать иной способ. Что выберете?';
+  const failText = 'Несмотря на усилия, стена кажется монолитной, а следы уходят в темноту. Где-то рядом скрипит камень — возможно, сработала ловушка, но вы успели отпрянуть. Как поступите?';
+  const critFailText = 'Механизм срабатывает грубо: камни осыпаются, воздух свистит, где-то щёлкают зубцы. Вы едва избегаете травмы. Путь закрывается. Попробуете обойти или искать другой подход?';
+  const pick = low.includes('критический успех') ? critSuccessText
+    : low.includes('успех') ? successText
+    : low.includes('частичный') ? partialText
+    : low.includes('критический провал') ? critFailText
+    : failText;
+  return { text: pick, fallback: true };
 }
 
 async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params: {
@@ -5306,6 +5549,296 @@ function rollSingleDie(sides: number): number {
 
 function getDndModifier(score: number): number {
   return Math.floor((score - 10) / 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СИСТЕМА СОСТОЯНИЙ D&D 5e С РЕАЛЬНОЙ ЛОГИКОЙ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type ConditionEffect = {
+  name: string;
+  duration?: number; // в ходах, undefined = до снятия
+  onTurnStart?: (charState: any, baseChar: any) => { hpChange?: number; statChanges?: Record<string, number>; message?: string };
+  onCheck?: (stat: string, baseValue: number, modifier: number) => { advantage?: boolean; disadvantage?: boolean; blocked?: boolean; modifierChange?: number };
+  onSave?: (stat: string, baseValue: number, modifier: number) => { advantage?: boolean; disadvantage?: boolean; modifierChange?: number };
+  onAttack?: (baseModifier: number) => { advantage?: boolean; disadvantage?: boolean; modifierChange?: number; blocked?: boolean };
+  blocksActions?: boolean;
+  blocksMovement?: boolean;
+  blocksVision?: boolean;
+};
+
+const CONDITION_EFFECTS: Record<string, ConditionEffect> = {
+  'отравлен': {
+    name: 'Отравлен',
+    duration: undefined, // до снятия
+    onTurnStart: (charState, baseChar) => {
+      // Отравление: урон 1d4 каждый ход (упрощенно - 2 HP)
+      const damage = 2;
+      return {
+        hpChange: -damage,
+        message: `Отравление причиняет ${damage} урона.`
+      };
+    },
+    onCheck: (stat, baseValue, modifier) => {
+      // Отравление: помеха на проверки характеристик
+      if (stat === 'con' || stat === 'dex') {
+        return { disadvantage: true };
+      }
+      return {};
+    },
+    onSave: (stat, baseValue, modifier) => {
+      // Отравление: помеха на спасброски
+      return { disadvantage: true };
+    }
+  },
+  'парализован': {
+    name: 'Парализован',
+    duration: undefined,
+    blocksActions: true,
+    blocksMovement: true,
+    onCheck: () => ({ blocked: true }),
+    onAttack: () => ({ blocked: true }),
+    onSave: (stat) => {
+      // Паралич: автоматический провал спасбросков STR и DEX
+      if (stat === 'str' || stat === 'dex') {
+        return { blocked: true };
+      }
+      return {};
+    }
+  },
+  'оглушен': {
+    name: 'Оглушен',
+    duration: undefined,
+    blocksActions: true,
+    blocksMovement: true,
+    onCheck: () => ({ disadvantage: true, blocked: true }),
+    onAttack: () => ({ disadvantage: true, blocked: true }),
+    onSave: () => ({ disadvantage: true })
+  },
+  'ослеплен': {
+    name: 'Ослеплен',
+    duration: undefined,
+    blocksVision: true,
+    onCheck: (stat) => {
+      // Ослепление: помеха на проверки, требующие зрения
+      if (stat === 'wis' || stat === 'int') {
+        return { disadvantage: true };
+      }
+      return {};
+    },
+    onAttack: () => ({ disadvantage: true })
+  },
+  'очарован': {
+    name: 'Очарован',
+    duration: undefined,
+    blocksActions: true, // не может атаковать очаровавшего
+    onCheck: (stat) => {
+      if (stat === 'cha') {
+        return { disadvantage: true };
+      }
+      return {};
+    }
+  },
+  'испуган': {
+    name: 'Испуган',
+    duration: undefined,
+    blocksMovement: true, // не может добровольно приближаться к источнику страха
+    onCheck: (stat) => {
+      if (stat === 'wis' || stat === 'cha') {
+        return { disadvantage: true };
+      }
+      return {};
+    },
+    onAttack: () => ({ disadvantage: true })
+  },
+  'невидим': {
+    name: 'Невидим',
+    duration: undefined,
+    onAttack: () => ({ advantage: true }),
+    onCheck: () => ({ advantage: true }) // преимущество на скрытность
+  },
+  'невидима': {
+    name: 'Невидима',
+    duration: undefined,
+    onAttack: () => ({ advantage: true }),
+    onCheck: () => ({ advantage: true })
+  },
+  'истощение': {
+    name: 'Истощение',
+    duration: undefined,
+    onTurnStart: (charState, baseChar) => {
+      // Истощение: -1 к проверкам характеристик за каждый уровень
+      const exhaustionLevel = charState.exhaustionLevel || 1;
+      return {
+        statChanges: {
+          str: -exhaustionLevel,
+          dex: -exhaustionLevel,
+          con: -exhaustionLevel,
+          int: -exhaustionLevel,
+          wis: -exhaustionLevel,
+          cha: -exhaustionLevel
+        }
+      };
+    },
+    onCheck: () => ({ modifierChange: -1 }),
+    onSave: () => ({ modifierChange: -1 })
+  },
+  'усталость': {
+    name: 'Усталость',
+    duration: 1, // 1 ход
+    onCheck: () => ({ disadvantage: true }),
+    onAttack: () => ({ disadvantage: true })
+  },
+  'болезнь': {
+    name: 'Болезнь',
+    duration: undefined,
+    onTurnStart: (charState, baseChar) => {
+      // Болезнь: урон 1 HP каждый ход
+      return {
+        hpChange: -1,
+        message: 'Болезнь причиняет урон.'
+      };
+    },
+    onCheck: () => ({ disadvantage: true }),
+    onSave: () => ({ disadvantage: true })
+  }
+};
+
+/**
+ * Применяет эффекты состояний к персонажу в начале хода
+ */
+function applyConditionEffects(charState: any, baseChar: any): { hpChange: number; statChanges: Record<string, number>; messages: string[] } {
+  const conditions = charState.conditions || [];
+  let totalHpChange = 0;
+  const statChanges: Record<string, number> = {};
+  const messages: string[] = [];
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.onTurnStart) {
+      const result = effect.onTurnStart(charState, baseChar);
+      if (result.hpChange) {
+        totalHpChange += result.hpChange;
+      }
+      if (result.statChanges) {
+        for (const [stat, change] of Object.entries(result.statChanges)) {
+          statChanges[stat] = (statChanges[stat] || 0) + change;
+        }
+      }
+      if (result.message) {
+        messages.push(result.message);
+      }
+    }
+  }
+  
+  return { hpChange: totalHpChange, statChanges, messages };
+}
+
+/**
+ * Получает модификаторы для проверки характеристики с учетом состояний
+ */
+function getCheckModifiersWithConditions(charState: any, stat: string, baseValue: number, baseModifier: number): { 
+  modifier: number; 
+  advantage: boolean; 
+  disadvantage: boolean; 
+  blocked: boolean 
+} {
+  const conditions = charState.conditions || [];
+  let modifier = baseModifier;
+  let advantage = false;
+  let disadvantage = false;
+  let blocked = false;
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.onCheck) {
+      const result = effect.onCheck(stat, baseValue, modifier);
+      if (result.blocked) blocked = true;
+      if (result.advantage) advantage = true;
+      if (result.disadvantage) disadvantage = true;
+      if (result.modifierChange) modifier += result.modifierChange;
+    }
+  }
+  
+  return { modifier, advantage, disadvantage, blocked };
+}
+
+/**
+ * Получает модификаторы для спасброска с учетом состояний
+ */
+function getSaveModifiersWithConditions(charState: any, stat: string, baseValue: number, baseModifier: number): { 
+  modifier: number; 
+  advantage: boolean; 
+  disadvantage: boolean; 
+  blocked: boolean 
+} {
+  const conditions = charState.conditions || [];
+  let modifier = baseModifier;
+  let advantage = false;
+  let disadvantage = false;
+  let blocked = false;
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.onSave) {
+      const result = effect.onSave(stat, baseValue, modifier);
+      if (result.blocked) blocked = true;
+      if (result.advantage) advantage = true;
+      if (result.disadvantage) disadvantage = true;
+      if (result.modifierChange) modifier += result.modifierChange;
+    }
+  }
+  
+  return { modifier, advantage, disadvantage, blocked };
+}
+
+/**
+ * Проверяет, может ли персонаж выполнить действие с учетом состояний
+ */
+function canPerformAction(charState: any): { can: boolean; reason?: string } {
+  const conditions = charState.conditions || [];
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.blocksActions) {
+      return { can: false, reason: `Персонаж ${effect.name.toLowerCase()} и не может действовать.` };
+    }
+  }
+  
+  return { can: true };
+}
+
+/**
+ * Обновляет длительность состояний и удаляет истекшие
+ */
+function updateConditionDurations(charState: any): { removed: string[] } {
+  const conditions = charState.conditions || [];
+  const removed: string[] = [];
+  const updated: string[] = [];
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.duration !== undefined) {
+      // Уменьшаем длительность
+      const conditionData = charState.conditionData || {};
+      const conditionKey = condition.toLowerCase();
+      const currentDuration = conditionData[conditionKey]?.duration ?? effect.duration;
+      
+      if (currentDuration <= 1) {
+        removed.push(condition);
+      } else {
+        updated.push(condition);
+        if (!conditionData[conditionKey]) conditionData[conditionKey] = {};
+        conditionData[conditionKey].duration = currentDuration - 1;
+        charState.conditionData = conditionData;
+      }
+    } else {
+      updated.push(condition);
+    }
+  }
+  
+  charState.conditions = updated;
+  return { removed };
 }
 function rollMultiple(count: number, sides: number): number[] {
   const rolls: number[] = [];
@@ -5508,13 +6041,74 @@ app.post('/api/chat/dice', async (req, res) => {
     const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
     const count = req.body?.count;
     const sides = req.body?.sides;
-    const mod = req.body?.mod;
-    const adv = req.body?.adv === true;
-    const dis = req.body?.dis === true;
+    let mod = req.body?.mod;
+    let adv = req.body?.adv === true;
+    let dis = req.body?.dis === true;
     const dc = Number.isFinite(req.body?.dc) ? Number(req.body.dc) : undefined;
     const context = typeof req.body?.context === 'string' ? String(req.body.context).slice(0, 200) : '';
     const kind = typeof req.body?.kind === 'string' ? String(req.body.kind) : '';
+    const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
+    const stat = typeof req.body?.stat === 'string' ? req.body.stat.toLowerCase() : undefined;
     const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    
+    // Определяем тип броска ДО применения эффектов
+    const kindNorm = normalizeRollKind(kind);
+    
+    // Применяем эффекты состояний к броску
+    if (characterId && gameId && stat) {
+      try {
+        let sess: any = null;
+        const uidForSession = await resolveUserIdFromQueryOrBody(req, prisma);
+        if (uidForSession) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uidForSession } });
+        
+        if (sess?.state) {
+          const state = sess.state as any;
+          const charState = state.characters?.[characterId];
+          if (charState) {
+            const baseChar = await prisma.character.findUnique({ where: { id: characterId } });
+            if (baseChar) {
+              const baseStat = (baseChar as any)[stat] || 10;
+              const baseMod = getDndModifier(baseStat);
+              const statMods = charState.statModifiers || {};
+              const statMod = statMods[stat] || 0;
+              const finalMod = baseMod + statMod;
+              
+              // Применяем эффекты состояний
+              if (kindNorm === 'save') {
+                const saveMods = getSaveModifiersWithConditions(charState, stat, baseStat, finalMod);
+                if (saveMods.blocked) {
+                  return res.json({ 
+                    ok: true, 
+                    blocked: true, 
+                    message: `Персонаж не может выполнить спасбросок из-за состояния.`,
+                    roll: { notation: 'N/A', total: 0, natural: 1 }
+                  });
+                }
+                if (saveMods.advantage) adv = true;
+                if (saveMods.disadvantage) dis = true;
+                mod = (mod || 0) + (saveMods.modifier - finalMod);
+              } else if (kindNorm === 'check' || kindNorm === 'attack') {
+                const checkMods = getCheckModifiersWithConditions(charState, stat, baseStat, finalMod);
+                if (checkMods.blocked) {
+                  return res.json({ 
+                    ok: true, 
+                    blocked: true, 
+                    message: `Персонаж не может выполнить действие из-за состояния.`,
+                    roll: { notation: 'N/A', total: 0, natural: 1 }
+                  });
+                }
+                if (checkMods.advantage) adv = true;
+                if (checkMods.disadvantage) dis = true;
+                mod = (mod || 0) + (checkMods.modifier - finalMod);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[DICE] Failed to apply condition effects:', e);
+      }
+    }
+    
     const r = (manual.length
       ? (() => {
           const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
@@ -5527,7 +6121,6 @@ app.post('/api/chat/dice', async (req, res) => {
           return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total, natural };
         })()
       : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
-    const kindNorm = normalizeRollKind(kind);
     const kindLabel = formatKindLabel(kind);
     const dcLabel = kindNorm === 'attack' ? 'AC' : 'DC';
     const { outcome } = evaluateDndOutcome({ roll: r, dc, kind });
