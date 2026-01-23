@@ -6525,21 +6525,13 @@ app.post('/api/tts', async (req, res) => {
     }
     
     try {
-      // Пробуем разные модели Gemini, которые поддерживают TTS
-      // Сначала пробуем специализированные TTS модели, затем обычные с speechConfig
+      // Используем только специализированные TTS модели
+      // Остальные модели не поддерживают TTS или возвращают текст вместо аудио
       const modelsToTry = [
-        // Специализированные TTS модели (приоритет)
         'gemini-2.5-flash-preview-tts',      // Быстрый natural TTS, хорошо для голосовых ассистентов
         'gemini-2.5-pro-preview-tts',        // Лучшее качество, более естественное произношение
-        'gemini-2.5-flash-native-audio',     // Ещё более живая речевая модель (через Live/Studio)
-        // Модели с Native Audio
-        'gemini-2.0-flash-exp',               // Основная модель с Native Audio
-        'gemini-2.0-flash',                  // Альтернатива
-        // Обычные модели (могут поддерживать speechConfig)
-        process.env.GEMINI_MODEL || 'gemini-2.5-pro',
-        'gemini-1.5-pro',
-        'gemini-1.5-flash'
-      ].filter((v, i, a) => a.indexOf(v) === i); // Убираем дубликаты
+        'gemini-2.5-flash-native-audio'      // Ещё более живая речевая модель (через Live/Studio)
+      ];
       
       const proxies = parseGeminiProxies();
       const attempts = proxies.length ? proxies : ['__direct__'];
@@ -6581,19 +6573,46 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
       // Директорские заметки используются только для понимания контекста, но не передаются в TTS
       // Используем generateContent с speechConfig для прямой генерации аудио через Gemini
       // Согласно документации: https://ai.google.dev/gemini-api/docs/speech-generation
-      const requestBody = {
-        contents: [{
-          role: 'user',
-          parts: [{ text: text }] // Только чистый текст для озвучки
-        }],
-        generationConfig: {
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: finalIsNarrator ? 'Aoede' : (finalGender?.toLowerCase().includes('жен') ? 'Kore' : 'Charon')
+      
+      // Функция для создания тела запроса в зависимости от типа модели
+      const createRequestBody = (modelName: string) => {
+        const isTTSModel = modelName.includes('-tts');
+        
+        if (isTTSModel) {
+          // Для специализированных TTS моделей нужен responseModalities: ['AUDIO']
+          return {
+            contents: [{
+              role: 'user',
+              parts: [{ text: text }]
+            }],
+            generationConfig: {
+              responseModalities: ['AUDIO'], // КРИТИЧЕСКИ ВАЖНО: указываем, что хотим получить AUDIO, а не TEXT
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: finalIsNarrator ? 'Aoede' : (finalGender?.toLowerCase().includes('жен') ? 'Kore' : 'Charon')
+                  }
+                }
               }
             }
-          }
+          };
+        } else {
+          // Для обычных моделей используем speechConfig
+          return {
+            contents: [{
+              role: 'user',
+              parts: [{ text: text }]
+            }],
+            generationConfig: {
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: finalIsNarrator ? 'Aoede' : (finalGender?.toLowerCase().includes('жен') ? 'Kore' : 'Charon')
+                  }
+                }
+              }
+            }
+          };
         }
       };
       
