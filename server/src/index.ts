@@ -143,6 +143,51 @@ try {
 function getSysPrompt(): string {
   return aiPrompts.system || DEFAULT_SYSTEM_PROMPT;
 }
+
+/**
+ * Форматирует варианты выбора: преобразует звездочки в нумерованный список
+ * Пример: "* Вариант 1\n* Вариант 2" → "1. Вариант 1\n2. Вариант 2"
+ */
+function formatChoiceOptions(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  
+  // Ищем блоки с вариантами выбора (строки, начинающиеся с * или •)
+  // Паттерн: начало строки или новая строка, опциональные пробелы, звездочка или bullet, пробел, текст до конца строки
+  const lines = text.split('\n');
+  const formattedLines: string[] = [];
+  let inChoiceBlock = false;
+  let choiceNumber = 1;
+  let choiceBlockStart = -1;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Проверяем, является ли строка вариантом выбора (начинается с * или •)
+    const choiceMatch = line.match(/^(\s*)[*•]\s+(.+)$/);
+    
+    if (choiceMatch) {
+      // Начало блока вариантов
+      if (!inChoiceBlock) {
+        inChoiceBlock = true;
+        choiceNumber = 1;
+        choiceBlockStart = formattedLines.length;
+      }
+      // Добавляем нумерованный вариант
+      const indent = choiceMatch[1]; // Сохраняем отступ
+      const choiceText = choiceMatch[2].trim();
+      formattedLines.push(`${indent}${choiceNumber}. ${choiceText}`);
+      choiceNumber++;
+    } else {
+      // Если была серия вариантов и теперь пустая строка или другой текст - завершаем блок
+      if (inChoiceBlock) {
+        inChoiceBlock = false;
+        choiceNumber = 1;
+      }
+      formattedLines.push(line);
+    }
+  }
+  
+  return formattedLines.join('\n');
+}
 app.get('/api/admin/ai-prompts', async (_req, res) => {
   return res.json({ system: getSysPrompt() });
 });
@@ -3158,12 +3203,14 @@ app.post('/api/lobbies/:id/start', async (req, res) => {
           const sys = getSysPrompt();
             'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
             'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
-            'Играй от лица рассказчика, а не игрока: избегай фраз “вы решаете”, “вы начинаете”, “вы выбираете”. ' +
+            'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
             'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
             'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
             'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
             'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
             'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
+            'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
+            'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
             'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
           const sc = await buildGptSceneContext(prisma, { gameId: lob.gameId, lobbyId: lob.id, history: [] });
           const { text: generatedText } = await generateChatCompletion({
@@ -3172,6 +3219,10 @@ app.post('/api/lobbies/:id/start', async (req, res) => {
             history: []
           });
           let text = generatedText;
+          if (text) {
+            // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+            text = formatChoiceOptions(text);
+          }
           if (!text) {
             const firstLoc = await prisma.location.findFirst({ where: { gameId: lob.gameId }, orderBy: { order: 'asc' } });
             const intro = [
@@ -3236,13 +3287,15 @@ app.post('/api/chat/welcome', async (req, res) => {
           const sys = getSysPrompt();
             'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
             'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
-            'Играй от лица рассказчика, а не игрока: избегай фраз “вы решаете”, “вы начинаете”, “вы выбираете”. ' +
+            'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
             'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
             'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
             'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
             'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
             'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
             'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
+            'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
+            'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
             'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
             'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
           const visual = loc?.backgroundUrl ? `Фон (изображение): ${loc.backgroundUrl}` : '';
@@ -3271,7 +3324,11 @@ app.post('/api/chat/welcome', async (req, res) => {
             history: []
           });
           text = generatedText || offlineText;
-          if (text) text = (text || '').trim();
+          if (text) {
+            text = (text || '').trim();
+            // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+            text = formatChoiceOptions(text);
+          }
         } catch {
           text = offlineText;
         }
@@ -3317,6 +3374,10 @@ app.post('/api/chat/welcome', async (req, res) => {
       history: []
     });
     let text = generatedText;
+    if (text) {
+      // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+      text = formatChoiceOptions(text);
+    }
     if (!text) {
       // Сформируем атмосферное вступление из данных сцены
       try {
@@ -3660,6 +3721,9 @@ app.post('/api/chat/reply', async (req, res) => {
       return res.json({ message: text, fallback: true });
     }
 
+    // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+    text = formatChoiceOptions(text);
+
     // Парсинг тега броска от ИИ
     let aiRequestDice: any = null;
     const diceTagRegex = /\[\[ROLL:\s*(.*?),\s*DC:\s*(\d+)\]\]/i;
@@ -3942,7 +4006,11 @@ app.post('/api/engine/session/:id/describe', async (req, res) => {
         history: []
       });
       text = generatedText;
-      if (text) text = text.trim();
+      if (text) {
+        text = text.trim();
+        // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+        text = formatChoiceOptions(text);
+      }
       usedAi = Boolean(text);
     } catch (err) {
       text = offlineText || (base || 'Здесь начинается ваше приключение.');
@@ -4478,6 +4546,50 @@ app.post('/api/tts', async (req, res) => {
     
     console.log('[TTS] Using Yandex TTS fallback');
 
+    // Функция выбора голоса Yandex TTS на основе контекста
+    // Доступные голоса Yandex TTS:
+    // Женские: jane (нейтральный), oksana (дружелюбный), alyss (строгий), omazh (мягкий)
+    // Мужские: zahar (нейтральный), ermil (дружелюбный), filipp (строгий)
+    function selectYandexVoice(): string {
+      // Если голос явно указан в запросе и это валидный Yandex голос
+      if (voiceReq && ['jane', 'oksana', 'alyss', 'omazh', 'zahar', 'ermil', 'filipp'].includes(voiceReq.toLowerCase())) {
+        return voiceReq.toLowerCase();
+      }
+      
+      // Определяем пол для выбора голоса
+      const finalGender = characterGender || gender || null;
+      const isFemale = finalGender && (finalGender.toLowerCase().includes('жен') || finalGender.toLowerCase().includes('female') || finalGender.toLowerCase().includes('f'));
+      const isMale = finalGender && (finalGender.toLowerCase().includes('муж') || finalGender.toLowerCase().includes('male') || finalGender.toLowerCase().includes('m'));
+      
+      // Выбор голоса на основе персонажа
+      if (characterId && !isNarrator) {
+        if (isFemale) {
+          return 'jane'; // Женский, нейтральный
+        } else if (isMale) {
+          return 'zahar'; // Мужской, нейтральный
+        } else {
+          return 'jane'; // По умолчанию
+        }
+      } else if (isNarrator) {
+        return 'ermil'; // Мужской, дружелюбный для рассказчика
+      } else if (locationType) {
+        // Выбор голоса на основе типа локации
+        const locType = locationType.toLowerCase();
+        if (locType.includes('темн') || locType.includes('подзем') || locType.includes('пещер')) {
+          return 'filipp'; // Мужской, строгий для мрачных локаций
+        } else if (locType.includes('светл') || locType.includes('лес') || locType.includes('природ')) {
+          return 'oksana'; // Женский, дружелюбный для светлых локаций
+        } else {
+          return 'jane'; // По умолчанию
+        }
+      }
+      
+      return 'jane'; // Голос по умолчанию
+    }
+
+    const selectedYandexVoice = selectYandexVoice();
+    console.log('[TTS] Selected Yandex voice:', selectedYandexVoice, 'for context:', { characterId, locationId, gender: characterGender || gender, isNarrator, locationType });
+
     async function synth(params: { voice: string; withExtras: boolean }) {
       const form = new FormData();
       form.append('text', text);
@@ -4485,7 +4597,7 @@ app.post('/api/tts', async (req, res) => {
       form.append('voice', params.voice);
       if (params.withExtras) {
         form.append('emotion', 'friendly'); // Yandex emotion
-        form.append('speed', String(speedReq)); // Используем speedReq из запроса
+        form.append('speed', String(speedReq || 1.0)); // Используем speedReq из запроса или 1.0 по умолчанию
       }
       form.append('format', format);
       const r = await undiciFetch('https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize', {
@@ -4496,29 +4608,38 @@ app.post('/api/tts', async (req, res) => {
       return r;
     }
 
-    // 1) Пробуем запрошенный голос с параметрами
-    let r = await synth({ voice: voiceReq, withExtras: true });
+    // 1) Пробуем выбранный голос с параметрами
+    let r = await synth({ voice: selectedYandexVoice, withExtras: true });
     if (!r.ok) {
       const errTxt = await r.text().catch(() => '');
-      // 2) Если неподдерживаемый голос — пробуем jane с теми же параметрами
-      if (/Unsupported voice/i.test(errTxt) || /unsupported voice/i.test(errTxt)) {
-        r = await synth({ voice: 'jane', withExtras: true });
+      console.log('[TTS] Yandex TTS first attempt failed:', r.status, errTxt.slice(0, 200));
+      
+      // 2) Если неподдерживаемый голос или ошибка — пробуем резервные голоса
+      const fallbackVoices = ['jane', 'oksana', 'zahar', 'ermil'];
+      let fallbackTried = false;
+      
+      if (/Unsupported voice/i.test(errTxt) || /unsupported voice/i.test(errTxt) || r.status === 400) {
+        for (const fallbackVoice of fallbackVoices) {
+          if (fallbackVoice === selectedYandexVoice) continue; // Пропускаем уже испробованный
+          console.log('[TTS] Trying Yandex fallback voice:', fallbackVoice);
+          r = await synth({ voice: fallbackVoice, withExtras: true });
+          if (r.ok) {
+            fallbackTried = true;
+            break;
+          }
+        }
       }
-      // 3) Если по-прежнему BAD_REQUEST — убираем extras (emotion/speed)
-      if (!r.ok) {
+      
+      // 3) Если по-прежнему не работает — убираем extras (emotion/speed)
+      if (!r.ok && !fallbackTried) {
         const txt2 = await r.text().catch(() => '');
         if (r.status === 400 || /BAD_REQUEST/i.test(txt2)) {
-          // Сначала пробуем jane без extras
-          r = await synth({ voice: 'jane', withExtras: false });
-          if (!r.ok) {
-            // Затем oksana как последний резерв
-            r = await synth({ voice: 'oksana', withExtras: true });
-            if (!r.ok) {
-              const txt3 = await r.text().catch(() => '');
-              if (r.status === 400 || /BAD_REQUEST/i.test(txt3)) {
-                r = await synth({ voice: 'oksana', withExtras: false });
-              }
-            }
+          // Пробуем без extras
+          for (const fallbackVoice of fallbackVoices) {
+            if (fallbackVoice === selectedYandexVoice) continue;
+            console.log('[TTS] Trying Yandex fallback voice without extras:', fallbackVoice);
+            r = await synth({ voice: fallbackVoice, withExtras: false });
+            if (r.ok) break;
           }
         } else {
           // вернуть оригинальную ошибку
@@ -4700,8 +4821,8 @@ async function generateViaGemini(prompt: string, size: string, apiKey: string): 
   const w = Number(wStr); const h = Number(hStr);
 
   // Список эндпоинтов для проверки (в порядке приоритета)
-  // Примечание: Google Imagen через Vertex AI требует OAuth токен, не API ключ
-  // Поэтому пробуем только варианты с API ключом через generativelanguage API
+  // Примечание: Google Imagen через generativelanguage API может быть недоступен через API ключ
+  // Пробуем разные варианты, включая альтернативные подходы
   const endpoints = [
     // Вариант 1: Imagen 3.0 через generativelanguage API (если доступен)
     {
@@ -4736,6 +4857,29 @@ async function generateViaGemini(prompt: string, size: string, apiKey: string): 
       extractBase64: (data: any) => {
         const gi = Array.isArray(data?.generatedImages) ? data.generatedImages[0] : null;
         return gi?.image?.base64 || gi?.image?.bytesBase64Encoded || gi?.bytesBase64Encoded || gi?.base64 || null;
+      },
+    },
+    // Вариант 3: Попытка через Gemini API с другим форматом (если поддерживается)
+    {
+      name: 'gemini-pro-vision-generate',
+      url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent?key=${apiKey}`,
+      body: {
+        contents: [{
+          parts: [{
+            text: `Generate an image: ${prompt}. Size: ${size}`
+          }]
+        }]
+      },
+      headers: { 'Content-Type': 'application/json' },
+      extractBase64: (data: any) => {
+        // Если Gemini вернет изображение в ответе
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        for (const part of parts) {
+          if (part.inlineData?.mimeType?.startsWith('image/')) {
+            return part.inlineData.data;
+          }
+        }
+        return null;
       },
     },
   ];
