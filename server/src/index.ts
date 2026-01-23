@@ -6526,10 +6526,16 @@ app.post('/api/tts', async (req, res) => {
     
     try {
       // Пробуем разные модели Gemini, которые поддерживают TTS
-      // Согласно документации, TTS поддерживают модели с Native Audio
+      // Сначала пробуем специализированные TTS модели, затем обычные с speechConfig
       const modelsToTry = [
-        'gemini-2.0-flash-exp', // Основная модель с Native Audio
-        'gemini-2.0-flash',     // Альтернатива
+        // Специализированные TTS модели (приоритет)
+        'gemini-2.5-flash-preview-tts',      // Быстрый natural TTS, хорошо для голосовых ассистентов
+        'gemini-2.5-pro-preview-tts',        // Лучшее качество, более естественное произношение
+        'gemini-2.5-flash-native-audio',     // Ещё более живая речевая модель (через Live/Studio)
+        // Модели с Native Audio
+        'gemini-2.0-flash-exp',               // Основная модель с Native Audio
+        'gemini-2.0-flash',                  // Альтернатива
+        // Обычные модели (могут поддерживать speechConfig)
         process.env.GEMINI_MODEL || 'gemini-2.5-pro',
         'gemini-1.5-pro',
         'gemini-1.5-flash'
