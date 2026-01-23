@@ -6612,6 +6612,7 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
             
             if (response.ok) {
               const contentType = response.headers.get('content-type') || '';
+              console.log(`[GEMINI-TTS] ${modelName} response OK, Content-Type: ${contentType}`);
               
               // Проверяем прямой аудио ответ
               if (contentType.includes('audio')) {
@@ -6623,12 +6624,36 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
               }
               
               // Проверяем JSON ответ с аудио в inlineData
-              const json = await response.json().catch(() => null);
+              const responseText = await response.text();
+              console.log(`[GEMINI-TTS] ${modelName} response body preview (first 1000 chars):`, responseText.slice(0, 1000));
+              
+              let json = null;
+              try {
+                json = JSON.parse(responseText);
+              } catch (e) {
+                console.warn(`[GEMINI-TTS] ${modelName} response is not JSON, full response:`, responseText.slice(0, 2000));
+                continue;
+              }
+              
+              // Логируем полную структуру для отладки
+              console.log(`[GEMINI-TTS] ${modelName} JSON structure:`, JSON.stringify(json, null, 2).slice(0, 2000));
+              
               if (json?.candidates?.[0]?.content?.parts) {
-                for (const part of json.candidates[0].content.parts) {
+                console.log(`[GEMINI-TTS] ${modelName} found ${json.candidates[0].content.parts.length} parts`);
+                for (let i = 0; i < json.candidates[0].content.parts.length; i++) {
+                  const part = json.candidates[0].content.parts[i];
+                  console.log(`[GEMINI-TTS] ${modelName} part ${i} keys:`, Object.keys(part));
+                  
                   const inlineData = part.inlineData || part.inline_data;
                   const mimeType = inlineData?.mimeType || inlineData?.mime_type || '';
                   const data = inlineData?.data;
+                  
+                  console.log(`[GEMINI-TTS] ${modelName} part ${i} inlineData:`, {
+                    hasInlineData: !!inlineData,
+                    mimeType,
+                    hasData: !!data,
+                    dataLength: data ? data.length : 0
+                  });
                   
                   if (mimeType.includes('audio') && data) {
                     const audioBuffer = Buffer.from(data, 'base64');
@@ -6637,10 +6662,17 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
                     res.setHeader('Content-Length', String(audioBuffer.length));
                     return res.send(audioBuffer);
                   }
+                  
+                  // Проверяем, может быть текст вместо аудио (модель не поддерживает TTS)
+                  if (part.text) {
+                    console.warn(`[GEMINI-TTS] ${modelName} returned text instead of audio. Text preview:`, part.text.slice(0, 200));
+                  }
                 }
+              } else {
+                console.warn(`[GEMINI-TTS] ${modelName} response structure:`, JSON.stringify(json).slice(0, 1000));
               }
               
-              console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found. Structure:`, JSON.stringify(json).slice(0, 500));
+              console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
             } else {
               const errorText = await response.text().catch(() => '');
               // Пропускаем 404 - модель не поддерживает TTS, пробуем следующую
