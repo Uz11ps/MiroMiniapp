@@ -6525,9 +6525,16 @@ app.post('/api/tts', async (req, res) => {
     }
     
     try {
-      // Используем модель с суффиксом -tts для генерации аудио
-      const baseModel = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
-      const ttsModelName = baseModel.includes('-tts') ? baseModel : `${baseModel}-tts`;
+      // Пробуем разные модели Gemini, которые поддерживают TTS
+      // Суффикс -tts НЕ нужен - это обычные модели с speechConfig
+      const modelsToTry = [
+        process.env.GEMINI_MODEL || 'gemini-2.5-pro',
+        'gemini-2.0-flash-exp',
+        'gemini-2.0-flash',
+        'gemini-1.5-pro',
+        'gemini-1.5-flash'
+      ].filter((v, i, a) => a.indexOf(v) === i); // Убираем дубликаты
+      
       const proxies = parseGeminiProxies();
       const attempts = proxies.length ? proxies : ['__direct__'];
       
@@ -6572,7 +6579,7 @@ ${text}`;
       
       // Используем generateContent с speechConfig для прямой генерации аудио через Gemini
       // Согласно документации: https://ai.google.dev/gemini-api/docs/speech-generation
-      // Используем модель с суффиксом -tts и правильную структуру запроса
+      // НЕ используем суффикс -tts в названии модели - это обычные модели с speechConfig
       const requestBody = {
         contents: [{
           role: 'user',
@@ -6589,62 +6596,77 @@ ${text}`;
         }
       };
       
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${ttsModelName}:generateContent`;
-      
-      for (const p of attempts) {
-        try {
-          const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
-          console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${ttsModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
-          
-          const response = await undiciFetch(url, {
-            method: 'POST',
-            dispatcher,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Goog-Api-Key': geminiApiKey
-            },
-            body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(120000) // 2 минуты для длинных текстов
-          });
-          
-          if (response.ok) {
-            const contentType = response.headers.get('content-type') || '';
+      // Пробуем каждую модель с каждым прокси
+      for (const modelName of modelsToTry) {
+        for (const p of attempts) {
+          try {
+            const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+            console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${modelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
             
-            // Проверяем прямой аудио ответ
-            if (contentType.includes('audio')) {
-              const audioBuffer = Buffer.from(await response.arrayBuffer());
-              console.log(`[GEMINI-TTS] ✅ Success (direct audio), audio size: ${audioBuffer.length} bytes`);
-              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-              res.setHeader('Content-Length', String(audioBuffer.length));
-              return res.send(audioBuffer);
-            }
+            const response = await undiciFetch(url, {
+              method: 'POST',
+              dispatcher,
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': geminiApiKey
+              },
+              body: JSON.stringify(requestBody),
+              signal: AbortSignal.timeout(120000) // 2 минуты для длинных текстов
+            });
             
-            // Проверяем JSON ответ с аудио в inlineData
-            const json = await response.json().catch(() => null);
-            if (json?.candidates?.[0]?.content?.parts) {
-              for (const part of json.candidates[0].content.parts) {
-                const inlineData = part.inlineData || part.inline_data;
-                if ((inlineData?.mimeType?.includes('audio') || inlineData?.mime_type?.includes('audio')) && inlineData?.data) {
-                  const audioBuffer = Buffer.from(inlineData.data, 'base64');
-                  console.log(`[GEMINI-TTS] ✅ Success (inlineData audio), audio size: ${audioBuffer.length} bytes`);
-                  res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-                  res.setHeader('Content-Length', String(audioBuffer.length));
-                  return res.send(audioBuffer);
+            if (response.ok) {
+              const contentType = response.headers.get('content-type') || '';
+              
+              // Проверяем прямой аудио ответ
+              if (contentType.includes('audio')) {
+                const audioBuffer = Buffer.from(await response.arrayBuffer());
+                console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
+                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                res.setHeader('Content-Length', String(audioBuffer.length));
+                return res.send(audioBuffer);
+              }
+              
+              // Проверяем JSON ответ с аудио в inlineData
+              const json = await response.json().catch(() => null);
+              if (json?.candidates?.[0]?.content?.parts) {
+                for (const part of json.candidates[0].content.parts) {
+                  const inlineData = part.inlineData || part.inline_data;
+                  const mimeType = inlineData?.mimeType || inlineData?.mime_type || '';
+                  const data = inlineData?.data;
+                  
+                  if (mimeType.includes('audio') && data) {
+                    const audioBuffer = Buffer.from(data, 'base64');
+                    console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes`);
+                    res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                    res.setHeader('Content-Length', String(audioBuffer.length));
+                    return res.send(audioBuffer);
+                  }
                 }
               }
+              
+              console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found. Structure:`, JSON.stringify(json).slice(0, 500));
+            } else {
+              const errorText = await response.text().catch(() => '');
+              // Пропускаем 404 - модель не поддерживает TTS, пробуем следующую
+              if (response.status === 404) {
+                console.log(`[GEMINI-TTS] ${modelName} doesn't support TTS (404), trying next model...`);
+                continue;
+              }
+              console.warn(`[GEMINI-TTS] ${modelName} returned ${response.status}:`, errorText.slice(0, 500));
             }
-            
-            console.warn('[GEMINI-TTS] Response OK but no audio found, structure:', JSON.stringify(json).slice(0, 500));
-          } else {
-            const errorText = await response.text().catch(() => '');
-            console.warn(`[GEMINI-TTS] ${ttsModelName} returned ${response.status}:`, errorText.slice(0, 500));
+          } catch (e: any) {
+            // Пропускаем ошибки и пробуем следующую модель
+            if (e?.message?.includes('404') || e?.message?.includes('NOT_FOUND')) {
+              console.log(`[GEMINI-TTS] ${modelName} not found, trying next model...`);
+              continue;
+            }
+            console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
           }
-        } catch (e: any) {
-          console.warn(`[GEMINI-TTS] ${ttsModelName} error:`, e?.message || String(e));
         }
       }
       
-      console.error('[GEMINI-TTS] All attempts failed - Gemini audio generation not available');
+      console.error('[GEMINI-TTS] All models failed - Gemini audio generation not available');
     } catch (geminiErr) {
       console.error('[TTS] Gemini audio generation failed:', geminiErr);
     }
