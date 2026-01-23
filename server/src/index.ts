@@ -6618,11 +6618,14 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
       
       // Пробуем каждую модель с каждым прокси
       for (const modelName of modelsToTry) {
+        const requestBody = createRequestBody(modelName);
+        
         for (const p of attempts) {
           try {
             const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
             console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${modelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
+            console.log(`[GEMINI-TTS] Request body for ${modelName}:`, JSON.stringify(requestBody, null, 2).slice(0, 500));
             
             const response = await undiciFetch(url, {
               method: 'POST',
