@@ -1357,12 +1357,20 @@ ${shape}
    - Мотивация персонажей
 
 5. ЛОКАЦИИ (locations[]):
-   - Все разделы "Часть", "Глава", нумерованные подразделы
+   - ВАЖНО: Создавай локацию ТОЛЬКО если это РЕАЛЬНАЯ ИГРОВАЯ ЛОКАЦИЯ, где персонажи могут находиться и взаимодействовать
+   - НЕ создавай локации для:
+     * Описательных разделов (например, "Общая информация", "Введение", "Предыстория")
+     * Мета-информации (правила, советы мастеру)
+     * Разделов с персонажами (статистика НИП)
+     * Разделов с условиями финала (если они не являются локациями)
    - РАСПОЗНАВАЙ ЛОКАЦИИ И ПОДЛОКАЦИИ:
-     * Основные локации: "Часть 1", "Глава 1", крупные разделы
+     * Основные локации: "Часть 1", "Глава 1", крупные разделы с описанием места действия
      * Подлокации: вложенные разделы внутри глав (например, "Помещение с урнами", "Коридор с фальшивой дверью")
-     * Если подлокация входит в основную локацию - укажи parentKey (ключ родительской локации)
-     * Если parentKey указан, то order должен быть больше чем у родителя
+     * Если подлокация входит в основную локацию - используй order больше чем у родителя (например, основная локация order=1, подлокация order=1.1 или order=2)
+   - ПРОВЕРЯЙ СТРУКТУРУ: Локация должна иметь:
+     * Описание места (где находятся персонажи)
+     * Упоминания о возможных действиях или переходах (даже если переходы не описаны явно)
+     * Или явное указание, что это тупик/конечная точка
    - title, description для каждой (и основной, и подлокации)
    - rulesPrompt: НЕ копируй из PDF! Сгенерируй краткое описание (2-3 предложения):
      * Что окружает персонажей в этой локации (окружение, атмосфера)
@@ -1387,13 +1395,33 @@ ${shape}
 
 7. ВЫХОДЫ (exits[]):
    - Связи между локациями (переходы)
+   - КРИТИЧЕСКИ ВАЖНО: Анализируй КАЖДУЮ созданную локацию на наличие переходов:
+     * ПРОВЕРЯЙ текст локации на упоминания: "дверь", "проход", "лестница", "коридор", "вернуться", "пойти", "перейти", "открыть", "спуститься", "подняться", "налево", "направо", "север", "юг", "восток", "запад", "дальше", "следующая", "вход", "выход"
+     * Если в тексте локации ЕСТЬ упоминания о переходах - ОБЯЗАТЕЛЬНО создай exit для каждого перехода
+     * Если в тексте локации НЕТ упоминаний о переходах И локация явно описана как тупик/конец - НЕ создавай выходы
+     * Если локация является подлокацией - проверь, есть ли переходы из неё обратно в основную локацию или в другие подлокации
+   - ВАЖНО: Извлекай ВСЕ переходы, которые описаны в тексте:
+     * Прямые переходы (из локации A в локацию B)
+     * Обратные переходы (возврат назад, например "вернуться к...", "вернуться к Болвару")
+     * Переходы через действия ("открыть дверь", "спуститься", "подняться", "спуститься в грот")
+     * Переходы через выбор ("пойти налево", "пойти направо", "в северное крыло", "в южное крыло")
+     * Переходы из подлокаций обратно в основную локацию (если описаны)
+     * Переходы между подлокациями внутри одной части (если описаны)
+   - ПРАВИЛА ДЛЯ ТУПИКОВ:
+     * Если локация описана как тупик (нет упоминаний о переходах, явно указано "тупик", "конец", "финал") - НЕ создавай для неё выходы
+     * Если локация имеет только вход, но нет выхода (тупик) - это нормально, не создавай искусственные выходы
+     * Если локация является финальной (winCondition/loseCondition/deathCondition) - может не иметь выходов
+   - ПРОВЕРКА СВЯЗНОСТИ:
+     * Стартовая локация (обычно order=1) должна иметь хотя бы один выход (если это не финальная локация)
+     * Если локация не является тупиком и не является финальной - она должна иметь хотя бы один выход
+     * Если создал локацию без выходов - убедись, что это действительно тупик/финал
    - fromKey: ключ локации, откуда переход
-   - toKey: ключ локации, куда переход
+   - toKey: ключ локации, куда переход (может быть null только для явных тупиков/финалов)
    - type: "BUTTON" (кнопка) или "TRIGGER" (триггер-фраза)
-   - buttonText: текст кнопки (если type="BUTTON")
+   - buttonText: текст кнопки (если type="BUTTON"), должен точно соответствовать описанию в PDF
    - triggerText: ОБЯЗАТЕЛЬНО сгенерируй фразы для перехода (если type="TRIGGER" или для дополнения к BUTTON)
      * Это фразы, которые игрок может сказать для перехода
-     * Примеры: "открыть дверь", "спуститься вниз", "осмотреть алтарь", "активировать руны"
+     * Примеры: "открыть дверь", "спуститься вниз", "осмотреть алтарь", "активировать руны", "вернуться назад", "вернуться к Болвару"
      * Генерируй 2-3 варианта фраз через запятую
    - isGameOver: true только если это конец игры
 
@@ -1576,11 +1604,10 @@ ${chunkShape}`;
           
           // НЕТ FALLBACK - если AI не извлек данные, поля остаются пустыми
           // Все данные должны быть извлечены AI из промпта
-          if (!Array.isArray(out.exits) || !out.exits.length) {
+          // НЕ создаем искусственные выходы - если AI не нашел переходы, значит их нет в PDF
+          // Тупики (локации без выходов) - это нормально для D&D приключений
+          if (!Array.isArray(out.exits)) {
             out.exits = [];
-            for (let i = 1; i < out.locations.length; i++) {
-              out.exits.push({ fromKey: `loc${i}`, type: 'BUTTON', buttonText: 'Дальше', triggerText: null, toKey: `loc${i + 1}`, isGameOver: false });
-            }
           }
           if (!Array.isArray(out.characters)) out.characters = [];
           
@@ -1743,6 +1770,70 @@ ${loc.description}
           });
           createdExits++;
         }
+        
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // ПРОВЕРКА СВЯЗНОСТИ ЛОКАЦИЙ И ВЫХОДОВ
+        // ═══════════════════════════════════════════════════════════════════════════════
+        const allLocations = await prisma.location.findMany({
+          where: { gameId: game.id },
+          include: { exits: true },
+        });
+        
+        const locationsWithExits = new Set<string>();
+        const locationsWithIncomingExits = new Set<string>();
+        
+        for (const loc of allLocations) {
+          if (loc.exits && loc.exits.length > 0) {
+            locationsWithExits.add(loc.id);
+            for (const exit of loc.exits) {
+              if (exit.targetLocationId) {
+                locationsWithIncomingExits.add(exit.targetLocationId);
+              }
+            }
+          }
+        }
+        
+        // Проверяем локации без выходов
+        const locationsWithoutExits = allLocations.filter(loc => !locationsWithExits.has(loc.id));
+        if (locationsWithoutExits.length > 0) {
+          console.log(`[INGEST-IMPORT] ⚠️  Найдено ${locationsWithoutExits.length} локаций без выходов:`);
+          for (const loc of locationsWithoutExits) {
+            const isStartLocation = loc.order === 1 || loc.order === Math.min(...allLocations.map(l => l.order || 999));
+            const isFinalLocation = scenario.game?.winCondition || scenario.game?.loseCondition || scenario.game?.deathCondition;
+            const description = loc.description || '';
+            const isDeadEnd = description.toLowerCase().includes('тупик') || 
+                             description.toLowerCase().includes('конец') || 
+                             description.toLowerCase().includes('финал') ||
+                             description.toLowerCase().includes('завершени');
+            
+            if (isStartLocation && !isDeadEnd) {
+              console.log(`[INGEST-IMPORT] ⚠️  СТАРТОВАЯ локация "${loc.title}" (order=${loc.order}) не имеет выходов! Это может быть ошибкой.`);
+            } else if (!isDeadEnd && !isFinalLocation) {
+              console.log(`[INGEST-IMPORT] ⚠️  Локация "${loc.title}" (order=${loc.order}) не имеет выходов. Проверь, является ли она тупиком/финалом.`);
+            } else {
+              console.log(`[INGEST-IMPORT] ✓ Локация "${loc.title}" (order=${loc.order}) без выходов - вероятно, тупик/финал (это нормально).`);
+            }
+          }
+        }
+        
+        // Проверяем изолированные локации (без входящих и исходящих переходов)
+        const isolatedLocations = allLocations.filter(loc => 
+          !locationsWithExits.has(loc.id) && !locationsWithIncomingExits.has(loc.id)
+        );
+        if (isolatedLocations.length > 0) {
+          console.log(`[INGEST-IMPORT] ⚠️  ⚠️  КРИТИЧНО: Найдено ${isolatedLocations.length} ИЗОЛИРОВАННЫХ локаций (без входящих и исходящих переходов):`);
+          for (const loc of isolatedLocations) {
+            console.log(`[INGEST-IMPORT] ⚠️  - "${loc.title}" (order=${loc.order}, id=${loc.id})`);
+          }
+        }
+        
+        // Проверяем стартовую локацию
+        const startLocation = allLocations.find(loc => loc.order === 1 || loc.order === Math.min(...allLocations.map(l => l.order || 999)));
+        if (startLocation && !locationsWithExits.has(startLocation.id)) {
+          console.log(`[INGEST-IMPORT] ⚠️  ⚠️  КРИТИЧНО: Стартовая локация "${startLocation.title}" не имеет выходов! Игра не может начаться.`);
+        }
+        
+        console.log(`[INGEST-IMPORT] ✓ Проверка связности завершена. Всего локаций: ${allLocations.length}, с выходами: ${locationsWithExits.size}, изолированных: ${isolatedLocations.length}`);
         for (const c of (scenario.characters || [])) {
           const abilitiesValue =
             Array.isArray(c.abilities) ? c.abilities.filter((s: any) => typeof s === 'string' && s.trim()).join('\n') :
