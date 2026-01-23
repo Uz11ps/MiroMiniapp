@@ -5288,6 +5288,13 @@ app.post('/api/tts', async (req, res) => {
     // Fallback на Yandex TTS (если Google не настроен)
     const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
     console.log('[TTS] Checking fallback, hasYandexKey:', !!yandexKey);
+    console.log('[TTS] Yandex key sources:', {
+      YANDEX_TTS_API_KEY: !!process.env.YANDEX_TTS_API_KEY,
+      YC_TTS_API_KEY: !!process.env.YC_TTS_API_KEY,
+      YC_API_KEY: !!process.env.YC_API_KEY,
+      YANDEX_API_KEY: !!process.env.YANDEX_API_KEY,
+      found: !!yandexKey
+    });
     
     if (!yandexKey && !googleKey && !googleCreds) {
       console.error('[TTS] No API keys configured');
