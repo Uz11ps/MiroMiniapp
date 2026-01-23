@@ -4464,13 +4464,19 @@ app.post('/api/tts', async (req, res) => {
     
     // Fallback на Yandex TTS (если Google не настроен)
     const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
+    console.log('[TTS] Checking fallback, hasYandexKey:', !!yandexKey);
+    
     if (!yandexKey && !googleKey && !googleCreds) {
+      console.error('[TTS] No API keys configured');
       return res.status(500).json({ error: 'tts_key_missing', message: 'Необходимо настроить GOOGLE_TTS_API_KEY или GOOGLE_APPLICATION_CREDENTIALS для Google TTS' });
     }
     
     if (!yandexKey) {
+      console.error('[TTS] Google TTS failed and no Yandex fallback');
       return res.status(502).json({ error: 'tts_failed', details: 'Google TTS failed and no fallback configured' });
     }
+    
+    console.log('[TTS] Using Yandex TTS fallback');
 
     async function synth(params: { voice: string; withExtras: boolean }) {
       const form = new FormData();
