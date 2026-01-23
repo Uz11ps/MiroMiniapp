@@ -6871,29 +6871,16 @@ async function generateSpeechViaGemini(params: {
     const attempts = proxies.length ? proxies : ['__direct__'];
     const maxRetries = 2;
     
-    // Пробуем разные подходы:
-    // 1. generateContent с responseMimeType: 'audio' (Gemini 2.5 Native Audio)
-    // 2. Отдельный generateSpeech endpoint (если доступен)
+    // Пробуем реальные модели Gemini, которые могут поддерживать TTS
+    // Согласно документации, TTS - это функция API, а не отдельная модель
+    // Пробуем разные варианты endpoint'ов для реальных моделей
     const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
     
     const endpoints = [
+      // Пробуем 1.5 Pro (как запросил пользователь)
       {
-        name: 'gemini-2.5-pro-audio-content',
-        url: `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`,
-        body: {
-          contents: [{
-            role: 'user',
-            parts: [{ text: text }]
-          }],
-          generationConfig: {
-            responseMimeType: 'audio/ogg; codecs=opus',
-            temperature: 0.7
-          }
-        }
-      },
-      {
-        name: 'gemini-2.5-pro-tts-generateSpeech',
-        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-tts:generateSpeech',
+        name: 'gemini-1.5-pro-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateSpeech',
         body: {
           input: { text },
           voiceConfig: {
@@ -6909,8 +6896,26 @@ async function generateSpeechViaGemini(params: {
         }
       },
       {
+        name: 'gemini-1.5-flash-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      // Пробуем 2.5 Pro (текущая модель проекта)
+      {
         name: 'gemini-2.5-pro-generateSpeech',
-        url: `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateSpeech`,
+        url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateSpeech`,
         body: {
           input: { text },
           voiceConfig: {
@@ -6932,10 +6937,31 @@ async function generateSpeechViaGemini(params: {
           input: { text },
           voiceConfig: {
             languageCode: language,
-            name: voice
+            name: voice,
+            emotion: emotion,
+            speed: speed
           },
           audioConfig: {
-            audioEncoding: 'OGG_OPUS'
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      // Пробуем 2.0 Flash
+      {
+        name: 'gemini-2.0-flash-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
           }
         }
       }
@@ -6994,20 +7020,10 @@ async function generateSpeechViaGemini(params: {
               console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
               return audioBuffer;
             } else {
-              // JSON ответ - может быть generateContent с audio или generateSpeech
+              // JSON ответ от generateSpeech endpoint
               const json = await response.json().catch(() => null);
               
-              // Для generateContent с audio: проверяем candidates[0].content.parts[0].inlineData
-              if (json?.candidates?.[0]?.content?.parts?.[0]?.inlineData) {
-                const inlineData = json.candidates[0].content.parts[0].inlineData;
-                if (inlineData.mimeType?.includes('audio') && inlineData.data) {
-                  const audioBuffer = Buffer.from(inlineData.data, 'base64');
-                  console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name} (generateContent audio), audio size: ${audioBuffer.length} bytes`);
-                  return audioBuffer;
-                }
-              }
-              
-              // Для generateSpeech: проверяем стандартные поля
+              // Проверяем стандартные поля для generateSpeech
               if (json?.audioContent) {
                 const audioBuffer = Buffer.from(json.audioContent, 'base64');
                 console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
