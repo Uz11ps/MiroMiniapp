@@ -6512,238 +6512,136 @@ app.post('/api/tts', async (req, res) => {
       isNarrator,
     });
     
-    // ОТКЛЮЧЕНО: Прямой синтез через Gemini TTS модели не работает (все возвращают 400/404)
-    // Используем только рабочий вариант: Gemini генерирует SSML → Google TTS синтезирует аудио
-    
-    // Fallback: Используем Gemini для генерации SSML, затем Google TTS для синтеза
+    // ПОЛНОЦЕННАЯ ГЕНЕРАЦИЯ ЧЕРЕЗ GEMINI - AI сам распознает контекст и озвучивает
+    // Используем Gemini 2.5 Pro для прямой генерации аудио с полным пониманием контекста
     const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
-    const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY;
-    const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     
-    if (!googleKey && !googleCreds) {
-      console.error('[TTS] Google TTS not configured');
+    if (!geminiApiKey) {
+      console.error('[TTS] Gemini API key not configured');
       return res.status(500).json({ 
         error: 'tts_key_missing', 
-        message: 'Необходимо настроить GOOGLE_TTS_API_KEY или GOOGLE_APPLICATION_CREDENTIALS для синтеза речи.'
+        message: 'Необходимо настроить GEMINI_API_KEY для генерации речи через Gemini.'
       });
     }
     
     try {
-      const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+      const proxies = parseGeminiProxies();
+      const attempts = proxies.length ? proxies : ['__direct__'];
       
-      // Генерируем SSML с интонациями через Gemini (семантическое понимание)
-      let ssmlText: string | null = null;
-      let ssmlSource = 'fallback';
-      if (geminiApiKey && (finalCharacterId || finalIsNarrator)) {
-        console.log('[TTS] 🎤 Using Gemini to generate SSML with full semantic understanding');
-        const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
-        ssmlText = await generateSSMLWithIntonation({
-          text: escapedText,
-          isNarrator: finalIsNarrator,
-          characterName: finalCharacterName,
-          characterClass: characterInfo?.class || finalCharacterClass,
-          characterRace: characterInfo?.race || finalCharacterRace,
-          characterPersona: characterInfo?.persona || finalCharacterPersona,
-          characterCha: characterInfo?.cha !== null && characterInfo?.cha !== undefined ? characterInfo.cha : finalCharacterCha,
-          characterInt: characterInfo?.int !== null && characterInfo?.int !== undefined ? characterInfo.int : finalCharacterInt,
-          characterWis: characterInfo?.wis !== null && characterInfo?.wis !== undefined ? characterInfo.wis : finalCharacterWis,
-          emotion: emotion.emotion,
-          intensity: emotion.intensity,
-          basePitch: finalPitch,
-          baseRate: finalSpeed
-        });
-        if (ssmlText) {
-          ssmlSource = 'gemini';
-          console.log('[TTS] ✅ Using Gemini-generated SSML with full semantic understanding and intonation');
+      // Формируем директорские заметки на основе полного контекста персонажа
+      const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
+      let directorsNotes = '';
+      
+      if (finalIsNarrator) {
+        directorsNotes = `### DIRECTORS NOTES
+Style: Soft, warm, female narrator voice. Gentle and inviting tone. Natural, non-robotic speech with full emotional understanding.
+Pacing: Calm and measured, with natural rhythm variations based on content meaning.
+Accent: Natural Russian, clear pronunciation.
+Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
+`;
+      } else {
+        const emotionDesc = emotion.emotion === 'joy' ? 'joyful and enthusiastic' :
+                          emotion.emotion === 'sadness' ? 'sad and melancholic' :
+                          emotion.emotion === 'anger' ? 'angry and intense' :
+                          emotion.emotion === 'fear' ? 'fearful and anxious' :
+                          emotion.emotion === 'surprise' ? 'surprised and excited' :
+                          'neutral';
+        
+        const classDesc = characterInfo?.class ? `Character class: ${characterInfo.class}. ` : '';
+        const raceDesc = characterInfo?.race ? `Race: ${characterInfo.race}. ` : '';
+        const personaDesc = characterInfo?.persona ? `Personality: ${characterInfo.persona}. ` : '';
+        const statsDesc = characterInfo ? `Stats: CHA=${characterInfo.cha || finalCharacterCha}, INT=${characterInfo.int || finalCharacterInt}, WIS=${characterInfo.wis || finalCharacterWis}. ` : '';
+        
+        directorsNotes = `### DIRECTORS NOTES
+Style: ${emotionDesc}, natural and expressive. ${classDesc}${raceDesc}${personaDesc}${statsDesc}
+Pacing: ${finalSpeed > 1.0 ? 'faster, energetic' : finalSpeed < 1.0 ? 'slower, thoughtful' : 'normal, natural rhythm'}.
+Accent: Natural Russian, character-appropriate.
+Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
+Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?.toLowerCase().includes('муж') ? 'male' : 'neutral'}
+`;
+      }
+      
+      // Формируем полный текст с директорскими заметками для Gemini
+      const fullText = `${directorsNotes}
+
+### SCRIPT
+${text}`;
+      
+      // Используем generateContent с responseMimeType: 'audio/ogg' для прямой генерации аудио
+      const requestBody = {
+        contents: [{
+          role: 'user',
+          parts: [{ text: fullText }]
+        }],
+        generationConfig: {
+          responseMimeType: 'audio/ogg'
         }
-      }
+      };
       
-      // Если Gemini не сгенерировал SSML, используем улучшенный fallback SSML
-      if (!ssmlText) {
-        console.log('[TTS-SSML] Using enhanced fallback SSML for natural intonation');
-        const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
-        const rateStr = finalSpeed.toFixed(2);
-        
-        let enhancedText = escapedText;
-        enhancedText = enhancedText.replace(/([^.!?]*\?)/g, (match) => `<prosody pitch="+2st">${match}</prosody>`);
-        enhancedText = enhancedText.replace(/([^.!?]*!)/g, (match) => `<emphasis level="moderate">${match}</emphasis>`);
-        
-        const textWithPauses = finalIsNarrator 
-          ? enhancedText.replace(/([.!?])\s+/g, '$1<break time="100ms"/>').replace(/([,;:])\s+/g, '$1<break time="60ms"/>')
-          : enhancedText.replace(/([.!?])\s+/g, '$1<break time="150ms"/>').replace(/([,;:])\s+/g, '$1<break time="80ms"/>');
-        
-        const hasQuestion = text.includes('?');
-        const hasExclamation = text.includes('!');
-        const basePitchValue = parseFloat(pitchStr);
-        const dynamicPitch = hasQuestion ? `+${(basePitchValue + 1.0).toFixed(1)}` : 
-                         hasExclamation ? `+${(basePitchValue + 0.5).toFixed(1)}` : pitchStr;
-        
-        ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+2dB">${textWithPauses}</prosody></speak>`;
-      }
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
       
-      // Выбираем голос для Google TTS
-      let voiceName = finalIsNarrator ? 'ru-RU-Wavenet-E' : finalVoice;
-      if (voiceReq && voiceReq.includes('ru-RU')) {
-        voiceName = voiceReq;
-      } else if (voiceReq === 'female' || voiceReq === 'jane' || voiceReq === 'oksana') {
-        voiceName = 'ru-RU-Wavenet-E';
-      } else if (voiceReq === 'male') {
-        voiceName = 'ru-RU-Wavenet-B';
-      } else if (finalIsNarrator) {
-        voiceName = 'ru-RU-Wavenet-E';
-      }
-      
-      console.log(`[TTS] 🔊 Synthesizing speech with Google TTS using ${ssmlSource === 'gemini' ? 'Gemini-generated SSML' : 'fallback SSML'}, voice: ${voiceName}, format: ${format}`);
-      
-      // Проверяем размер SSML (лимит Google TTS: 5000 байт)
-      const ssmlBytes = Buffer.from(ssmlText, 'utf8').length;
-      console.log(`[TTS] SSML size: ${ssmlBytes} bytes (limit: 5000 bytes)`);
-      
-      if (ssmlBytes > 5000) {
-        console.log('[TTS] SSML превышает лимит 5000 байт, разбиваем на части');
-        
-        // Умное разбиение SSML на части по ~4500 байт (с запасом)
-        // Извлекаем содержимое между <speak> и </speak>
-        const speakMatch = ssmlText.match(/<speak[^>]*>(.*?)<\/speak>/s);
-        const parts: string[] = [];
-        const maxPartSize = 4500; // С запасом от лимита 5000
-        
-        if (speakMatch) {
-          const speakTag = ssmlText.match(/<speak[^>]*>/)?.[0] || '<speak>';
-          const content = speakMatch[1];
+      for (const p of attempts) {
+        try {
+          const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+          console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${modelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
           
-          // Разбиваем по предложениям, сохраняя SSML теги
-          // Ищем точки, восклицательные и вопросительные знаки с последующими пробелами или тегами
-          const sentences = content.split(/(?<=[.!?])\s+(?=<|$|[А-ЯЁ])/);
-          
-          let currentPart = '';
-          let currentSize = Buffer.from(speakTag + currentPart + '</speak>', 'utf8').length;
-          
-          for (const sentence of sentences) {
-            const sentenceSize = Buffer.from(sentence, 'utf8').length;
-            const newSize = currentSize + sentenceSize;
-            
-            if (newSize > maxPartSize && currentPart) {
-              // Сохраняем текущую часть
-              parts.push(speakTag + currentPart + '</speak>');
-              currentPart = sentence;
-              currentSize = Buffer.from(speakTag + currentPart + '</speak>', 'utf8').length;
-            } else {
-              currentPart += (currentPart ? ' ' : '') + sentence;
-              currentSize = Buffer.from(speakTag + currentPart + '</speak>', 'utf8').length;
-            }
-          }
-          
-          if (currentPart) {
-            parts.push(speakTag + currentPart + '</speak>');
-          }
-        } else {
-          // Если не нашли структуру <speak>, разбиваем просто по размеру
-          const chunkSize = 4500;
-          for (let i = 0; i < ssmlText.length; i += chunkSize) {
-            parts.push(ssmlText.slice(i, i + chunkSize));
-          }
-        }
-        
-        console.log(`[TTS] Разбито на ${parts.length} частей`);
-        
-        // Синтезируем каждую часть и объединяем
-        const audioBuffers: Buffer[] = [];
-        for (let i = 0; i < parts.length; i++) {
-          const partSSML = parts[i];
-          const partSize = Buffer.from(partSSML, 'utf8').length;
-          console.log(`[TTS] Синтезируем часть ${i + 1}/${parts.length}, размер: ${partSize} байт`);
-          
-          const requestBody = {
-            input: { ssml: partSSML },
-            voice: {
-              languageCode: lang,
-              name: voiceName,
-              ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
-            },
-            audioConfig: {
-              audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-              speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)),
-              pitch: Math.max(-4.0, Math.min(4.0, finalPitch)),
-              volumeGainDb: 2.0,
-            },
-          };
-          
-          const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
-          const apiResponse = await undiciFetch(apiUrl, {
+          const response = await undiciFetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            dispatcher,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Goog-Api-Key': geminiApiKey
+            },
             body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(120000) // 2 минуты для длинных текстов
           });
           
-          if (apiResponse.ok) {
-            const jsonResponse = await apiResponse.json() as any;
-            if (jsonResponse.audioContent) {
-              audioBuffers.push(Buffer.from(jsonResponse.audioContent, 'base64'));
+          if (response.ok) {
+            const contentType = response.headers.get('content-type') || '';
+            
+            // Проверяем прямой аудио ответ
+            if (contentType.includes('audio')) {
+              const audioBuffer = Buffer.from(await response.arrayBuffer());
+              console.log(`[GEMINI-TTS] ✅ Success (direct audio), audio size: ${audioBuffer.length} bytes`);
+              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+              res.setHeader('Content-Length', String(audioBuffer.length));
+              return res.send(audioBuffer);
             }
+            
+            // Проверяем JSON ответ с аудио в inlineData
+            const json = await response.json().catch(() => null);
+            if (json?.candidates?.[0]?.content?.parts) {
+              for (const part of json.candidates[0].content.parts) {
+                const inlineData = part.inlineData || part.inline_data;
+                if ((inlineData?.mimeType?.includes('audio') || inlineData?.mime_type?.includes('audio')) && inlineData?.data) {
+                  const audioBuffer = Buffer.from(inlineData.data, 'base64');
+                  console.log(`[GEMINI-TTS] ✅ Success (inlineData audio), audio size: ${audioBuffer.length} bytes`);
+                  res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                  res.setHeader('Content-Length', String(audioBuffer.length));
+                  return res.send(audioBuffer);
+                }
+              }
+            }
+            
+            console.warn('[GEMINI-TTS] Response OK but no audio found, structure:', JSON.stringify(json).slice(0, 500));
           } else {
-            const errorText = await apiResponse.text().catch(() => '');
-            console.error(`[TTS] Ошибка при синтезе части ${i + 1}:`, apiResponse.status, errorText.slice(0, 200));
+            const errorText = await response.text().catch(() => '');
+            console.warn(`[GEMINI-TTS] ${modelName} returned ${response.status}:`, errorText.slice(0, 500));
           }
-        }
-        
-        if (audioBuffers.length > 0) {
-          // Объединяем все аудио буферы
-          const combinedAudio = Buffer.concat(audioBuffers);
-          console.log(`[TTS] ✅ Success (объединено ${audioBuffers.length} частей), total audio size: ${combinedAudio.length} bytes`);
-          res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-          res.setHeader('Content-Length', String(combinedAudio.length));
-          return res.send(combinedAudio);
-        } else {
-          console.error('[TTS] Не удалось синтезировать ни одну часть');
-        }
-      } else {
-        // Обычный синтез для коротких SSML
-        const requestBody = {
-          input: { ssml: ssmlText },
-          voice: {
-            languageCode: lang,
-            name: voiceName,
-            ssmlGender: voiceName.includes('E') || voiceName.includes('C') ? 'FEMALE' : 'MALE',
-          },
-          audioConfig: {
-            audioEncoding: format === 'oggopus' ? 'OGG_OPUS' : 'MP3',
-            speakingRate: Math.max(0.85, Math.min(1.15, finalSpeed)),
-            pitch: Math.max(-4.0, Math.min(4.0, finalPitch)),
-            volumeGainDb: 2.0,
-          },
-        };
-        
-        const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
-        const apiResponse = await undiciFetch(apiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody),
-        });
-        
-        if (apiResponse.ok) {
-          const jsonResponse = await apiResponse.json() as any;
-          if (jsonResponse.audioContent) {
-            const audioBuffer = Buffer.from(jsonResponse.audioContent, 'base64');
-            console.log(`[TTS] ✅ Success (${ssmlSource === 'gemini' ? 'Gemini SSML' : 'fallback SSML'}), audio size: ${audioBuffer.length} bytes`);
-            res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-            res.setHeader('Content-Length', String(audioBuffer.length));
-            return res.send(audioBuffer);
-          } else {
-            console.error('[TTS] Google TTS response missing audioContent');
-          }
-        } else {
-          const errorText = await apiResponse.text().catch(() => '');
-          console.error('[TTS] Google TTS REST API failed:', apiResponse.status, errorText.slice(0, 500));
+        } catch (e: any) {
+          console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
         }
       }
-    } catch (googleErr) {
-      console.error('[TTS] Google TTS failed:', googleErr);
+      
+      console.error('[GEMINI-TTS] All attempts failed - Gemini audio generation not available');
+    } catch (geminiErr) {
+      console.error('[TTS] Gemini audio generation failed:', geminiErr);
     }
     
     return res.status(502).json({ 
       error: 'tts_failed', 
-      message: 'Не удалось синтезировать речь. Проверьте настройки API.'
+      message: 'Gemini не удалось сгенерировать аудио. Убедитесь, что модель поддерживает генерацию аудио.'
     });
   } catch (e) {
     console.error('[TTS] TTS endpoint error:', e);
@@ -7031,7 +6929,7 @@ async function generateViaGemini(prompt: string, size: string, apiKey: string): 
 /**
  * УДАЛЕНО: Gemini API не предоставляет прямой синтез речи через generateSpeech endpoint
  * Все endpoint'ы возвращают 404, так как они не существуют
- * Правильный подход: Gemini генерирует SSML → Google TTS синтезирует аудио
+ * УДАЛЕНО: Теперь используется только Gemini для прямой генерации аудио
  * Эта функция больше не используется
  */
 async function generateSpeechViaGemini_DEPRECATED(params: {
