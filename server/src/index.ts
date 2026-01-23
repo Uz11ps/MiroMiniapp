@@ -922,7 +922,7 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       try {
         const sys = 'Ты помощник-редактор настольных приключений (D&D). Верни строго JSON-схему полного сценария для нашей игры без комментариев и лишнего текста.';
         const shape = '{ "game": {"title":"...","description":"...","author":"...","worldRules":"...","gameplayRules":"...","introduction":"...","backstory":"...","adventureHooks":"...","promoDescription":"...","ageRating":"G16","winCondition":"...","loseCondition":"...","deathCondition":"..."}, "locations":[{"key":"loc1","order":1,"title":"...","description":"...","rulesPrompt":"...","backgroundUrl":null,"musicUrl":null}], "exits":[{"fromKey":"loc1","type":"BUTTON","buttonText":"Дальше","triggerText":null,"toKey":"loc2","isGameOver":false}], "characters":[{"name":"...","isPlayable":true,"race":"...","gender":"...","avatarUrl":null,"voiceId":null,"persona":null,"origin":null,"role":null,"abilities":null,"level":1,"class":"...","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10}], "editions":[{"name":"Стандарт","description":"...","price":990,"badge":null}] }';
-        const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\nТребования: 8-14 локаций, связанный граф переходов, осмысленные названия сцен и короткие (2-3 предложения) описания. Опирайся на D&D 5e и единый мир. Обязательно извлеки условия финала (winCondition, loseCondition, deathCondition) если они есть в тексте.`;
+        const prompt = `Исходный текст PDF:\n---\n${text.slice(0, 150000)}\n---\nВерни только JSON без комментариев, строго формы:\n${shape}\n\nКРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ:\n\n1. ЛОКАЦИИ:\n   - 8-14 локаций, связанный граф переходов\n   - Осмысленные названия сцен и короткие (2-3 предложения) описания\n   - НЕ создавай локации с названиями типа "Часть 1", "Часть 2" - это заголовки разделов, а не локации!\n   - Если в тексте есть заголовки "Часть X", пропускай их при создании локаций\n\n2. ПЕРЕХОДЫ (exits):\n   - Создавай переходы между всеми связанными локациями\n   - Для финальных локаций (где происходит победа/поражение/смерть) создавай выходы с типом "GAMEOVER" и isGameOver: true\n   - Пример финального выхода: {"fromKey":"loc_final","type":"GAMEOVER","buttonText":"Завершить игру","triggerText":null,"toKey":null,"isGameOver":true}\n\n3. УСЛОВИЯ ФИНАЛА (ОБЯЗАТЕЛЬНО!):\n   - winCondition: описание условий победы (например: "Спасти Элиару и победить Тал'Киара", "Остановить ритуал воскрешения Ноктуса")\n   - loseCondition: описание условий поражения (например: "Все персонажи погибли", "Ритуал завершен, Ноктус воскрешен")\n   - deathCondition: описание условий смерти (например: "Персонаж получает смертельный урон и не получает помощи", "HP падает до 0")\n   - ИЩИ в тексте разделы: "Условия победы", "Условия поражения", "Условия смерти", "Победа", "Поражение", "Смерть", "Завершение", "Финал"\n   - Если явных условий нет в тексте - СГЕНЕРИРУЙ их логически на основе сюжета!\n   - НИКОГДА не оставляй winCondition, loseCondition, deathCondition пустыми или равными "..."!\n\n4. ОБЩЕЕ:\n   - Опирайся на D&D 5e и единый мир\n   - Все переходы должны быть двусторонними где это логично (если можно вернуться - создавай обратный переход)\n   - Секретные проходы тоже должны быть переходами`;
         
         const { text: generatedText } = await generateChatCompletion({
           systemPrompt: sys,
@@ -1064,16 +1064,45 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
         return blk ? blk.slice(0, 1800) : null;
       })();
       if (!scenario.game.winCondition) scenario.game.winCondition = ((): string | null => {
-        const blk = (text.match(/(?:Услови[ея]\s+побед[ыы]|Побед[аы])[\s\S]{0,2000}/i)?.[0] || '').trim();
-        return blk ? blk.slice(0, 1800) : null;
+        const patterns = [
+          /(?:Услови[ея]\s+побед[ыы]|Побед[аы]|Завершени[ея]\s+приключени[яя])[\s\S]{0,2000}/i,
+          /(?:Часть\s+3|Финал|Завершение)[\s\S]{0,2000}/i,
+        ];
+        for (const pattern of patterns) {
+          const blk = (text.match(pattern)?.[0] || '').trim();
+          if (blk) return blk.slice(0, 1800);
+        }
+        // Если не найдено, генерируем на основе сюжета
+        if (text.includes('спасти') || text.includes('победить') || text.includes('остановить')) {
+          return 'Завершить основную цель приключения (спасти персонажей, победить главного врага, остановить ритуал)';
+        }
+        return 'Завершить приключение успешно';
       })();
       if (!scenario.game.loseCondition) scenario.game.loseCondition = ((): string | null => {
-        const blk = (text.match(/(?:Услови[ея]\s+поражени[яя]|Поражени[ея])[\s\S]{0,2000}/i)?.[0] || '').trim();
-        return blk ? blk.slice(0, 1800) : null;
+        const patterns = [
+          /(?:Услови[ея]\s+поражени[яя]|Поражени[ея])[\s\S]{0,2000}/i,
+          /(?:Ритуал\s+заверш[её]н|Враг\s+победил)[\s\S]{0,2000}/i,
+        ];
+        for (const pattern of patterns) {
+          const blk = (text.match(pattern)?.[0] || '').trim();
+          if (blk) return blk.slice(0, 1800);
+        }
+        // Если не найдено, генерируем на основе сюжета
+        if (text.includes('ритуал') || text.includes('воскресить')) {
+          return 'Ритуал завершен, главный враг достиг своей цели';
+        }
+        return 'Все персонажи погибли или главная цель не достигнута';
       })();
       if (!scenario.game.deathCondition) scenario.game.deathCondition = ((): string | null => {
-        const blk = (text.match(/(?:Услови[ея]\s+смерти|Смерть)[\s\S]{0,2000}/i)?.[0] || '').trim();
-        return blk ? blk.slice(0, 1800) : null;
+        const patterns = [
+          /(?:Услови[ея]\s+смерти|Смерть)[\s\S]{0,2000}/i,
+        ];
+        for (const pattern of patterns) {
+          const blk = (text.match(pattern)?.[0] || '').trim();
+          if (blk) return blk.slice(0, 1800);
+        }
+        // Стандартное условие смерти для D&D 5e
+        return 'Персонаж получает смертельный урон (HP падает до 0) и не получает помощи в течение времени';
       })();
     }
     try {

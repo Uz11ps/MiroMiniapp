@@ -1074,7 +1074,12 @@ const ScenarioPage: React.FC = () => {
         <div className="muted">Сводка связей сцен. Помогает заметить сцены без выходов или целевой локации.</div>
         <div style={{ height: 8 }} />
         <div style={{ display: 'grid', gap: 8 }}>
-          {(game.locations || []).map((loc: any) => {
+          {(() => {
+            // Группируем локации по частям
+            const locations = Array.isArray(game.locations) ? (game.locations as any[]) : [];
+            const parts: Array<{ title: string; locations: any[] }> = [];
+            let currentPart: { title: string; locations: any[] } | null = null;
+            
             // Подготовим справочник выходов по локациям
             const grouped: Record<string, any[]> = {};
             if (Array.isArray(flowExits)) {
@@ -1085,33 +1090,117 @@ const ScenarioPage: React.FC = () => {
                 grouped[k].push(ex);
               }
             }
-            const fromGrouped = grouped[loc.id];
-            const fromMapArr = exitsMap[loc.id];
-            const fromLoc = Array.isArray(loc.exits) ? (loc.exits as any[]) : [];
-            const outs: any[] = (Array.isArray(fromGrouped) && fromGrouped.length > 0)
-              ? fromGrouped
-              : ((Array.isArray(fromMapArr) && fromMapArr.length > 0) ? fromMapArr : fromLoc);
-            const locsForLookup: any[] = Array.isArray(game?.locations) ? (game.locations as any[]) : [];
-            return (
-              <div key={loc.id} className="card" style={{ padding: 10 }}>
-                <div style={{ fontWeight: 600 }}>{loc.title}</div>
-                {Array.isArray(outs) && outs.length > 0 ? (
-                  <ul style={{ margin: '6px 0 0 16px' }}>
-                    {outs.map((ex: any) => {
-                      const target = locsForLookup.find((l: any) => l && l.id === ex?.targetLocationId);
-                      const exType = ex?.type || '';
-                      const label = exType === 'TRIGGER' ? (ex?.triggerText || 'триггер') : (exType === 'GAMEOVER' ? 'GAMEOVER' : (ex?.buttonText || 'кнопка'));
-                      return (
-                        <li key={ex?.id || Math.random().toString(36)} className="muted">
-                          [{exType}] {label} → {target ? target.title : (ex?.targetLocationId ? ex.targetLocationId : '—')}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (<div className="muted">Нет выходов</div>)}
+            const locsForLookup: any[] = locations;
+            
+            for (const loc of locations) {
+              const title = String(loc.title || '').trim();
+              
+              // Определяем, является ли локация началом новой части
+              const isPartHeader = /^Часть\s+\d+[\.:]?\s*[^\n]*/i.test(title) || 
+                                   /^Часть\s+\d+[\.:]?\s*[^\n]*/i.test(title);
+              
+              if (isPartHeader) {
+                // Сохраняем предыдущую часть
+                if (currentPart && currentPart.locations.length > 0) {
+                  parts.push(currentPart);
+                }
+                // Начинаем новую часть (заголовок не добавляем в локации)
+                currentPart = { title, locations: [] };
+              } else {
+                // Добавляем локацию в текущую часть
+                if (!currentPart) {
+                  // Если нет части, создаем дефолтную
+                  currentPart = { title: 'Локации', locations: [] };
+                }
+                currentPart.locations.push(loc);
+              }
+            }
+            
+            // Добавляем последнюю часть (даже если только заголовок, но без локаций не добавляем)
+            if (currentPart) {
+              if (currentPart.locations.length > 0) {
+                parts.push(currentPart);
+              } else if (parts.length === 0) {
+                // Если только заголовок и это первая часть, все равно добавляем
+                parts.push(currentPart);
+              }
+            }
+            
+            // Если частей не найдено, показываем все локации без группировки (исключая заголовки частей)
+            if (parts.length === 0) {
+              return locations
+                .filter((loc: any) => {
+                  const title = String(loc.title || '').trim();
+                  // Исключаем заголовки частей
+                  return !/^Часть\s+\d+[\.:]?\s*[^\n]*/i.test(title);
+                })
+                .map((loc: any) => {
+                  const fromGrouped = grouped[loc.id];
+                  const fromMapArr = exitsMap[loc.id];
+                  const fromLoc = Array.isArray(loc.exits) ? (loc.exits as any[]) : [];
+                  const outs: any[] = (Array.isArray(fromGrouped) && fromGrouped.length > 0)
+                    ? fromGrouped
+                    : ((Array.isArray(fromMapArr) && fromMapArr.length > 0) ? fromMapArr : fromLoc);
+                  return (
+                    <div key={loc.id} className="card" style={{ padding: 10 }}>
+                      <div style={{ fontWeight: 600 }}>{loc.title}</div>
+                      {Array.isArray(outs) && outs.length > 0 ? (
+                        <ul style={{ margin: '6px 0 0 16px' }}>
+                          {outs.map((ex: any) => {
+                            const target = locsForLookup.find((l: any) => l && l.id === ex?.targetLocationId);
+                            const exType = ex?.type || '';
+                            const isGameOver = ex?.isGameOver || exType === 'GAMEOVER';
+                            const label = exType === 'TRIGGER' ? (ex?.triggerText || 'триггер') : (exType === 'GAMEOVER' || isGameOver ? (ex?.buttonText || 'GAME OVER') : (ex?.buttonText || 'кнопка'));
+                            return (
+                              <li key={ex?.id || Math.random().toString(36)} className={isGameOver ? "muted" : "muted"} style={isGameOver ? { fontWeight: 600, color: '#d32f2f' } : {}}>
+                                [{exType || (isGameOver ? 'GAMEOVER' : 'BUTTON')}] {label} {target ? `→ ${target.title}` : (isGameOver ? '→ КОНЕЦ ИГРЫ' : (ex?.targetLocationId ? `→ ${ex.targetLocationId}` : '—'))}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (<div className="muted">Нет выходов</div>)}
+                    </div>
+                  );
+                });
+            }
+            
+            // Отображаем части с локациями
+            return parts.map((part, partIdx) => (
+              <div key={`part-${partIdx}`} style={{ display: 'grid', gap: 8 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, marginTop: partIdx > 0 ? 16 : 0, marginBottom: 8, paddingBottom: 8, borderBottom: '2px solid #ddd' }}>
+                  {part.title}
+                </div>
+                {part.locations.map((loc: any) => {
+                  const fromGrouped = grouped[loc.id];
+                  const fromMapArr = exitsMap[loc.id];
+                  const fromLoc = Array.isArray(loc.exits) ? (loc.exits as any[]) : [];
+                  const outs: any[] = (Array.isArray(fromGrouped) && fromGrouped.length > 0)
+                    ? fromGrouped
+                    : ((Array.isArray(fromMapArr) && fromMapArr.length > 0) ? fromMapArr : fromLoc);
+                  return (
+                    <div key={loc.id} className="card" style={{ padding: 10, marginLeft: 16 }}>
+                      <div style={{ fontWeight: 600 }}>{loc.title}</div>
+                      {Array.isArray(outs) && outs.length > 0 ? (
+                        <ul style={{ margin: '6px 0 0 16px' }}>
+                          {outs.map((ex: any) => {
+                            const target = locsForLookup.find((l: any) => l && l.id === ex?.targetLocationId);
+                            const exType = ex?.type || '';
+                            const isGameOver = ex?.isGameOver || exType === 'GAMEOVER';
+                            const label = exType === 'TRIGGER' ? (ex?.triggerText || 'триггер') : (exType === 'GAMEOVER' || isGameOver ? (ex?.buttonText || 'GAME OVER') : (ex?.buttonText || 'кнопка'));
+                            return (
+                              <li key={ex?.id || Math.random().toString(36)} className={isGameOver ? "muted" : "muted"} style={isGameOver ? { fontWeight: 600, color: '#d32f2f' } : {}}>
+                                [{exType || (isGameOver ? 'GAMEOVER' : 'BUTTON')}] {label} {target ? `→ ${target.title}` : (isGameOver ? '→ КОНЕЦ ИГРЫ' : (ex?.targetLocationId ? `→ ${ex.targetLocationId}` : '—'))}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (<div className="muted">Нет выходов</div>)}
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
+            ));
+          })()}
         </div>
       </div>
       <div className="card" style={{ padding: 12 }}>

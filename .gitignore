@@ -7,3 +7,5 @@ server/.env
 *.md
 *.pdf
 tools/find-unmatched-braces.cjs
+extract_text.js
+grot_text.txt
