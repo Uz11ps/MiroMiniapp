@@ -3018,13 +3018,9 @@ ${shape}
 
     console.log('[CHARACTER IMPORT] Calling AI for parsing...');
     const aiResponse = await generateChatCompletion({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.3,
-      max_tokens: 2000
+      systemPrompt: sys,
+      userPrompt: prompt,
+      history: []
     });
     
     if (!aiResponse || !aiResponse.text) {

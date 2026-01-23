@@ -2169,10 +2169,80 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
     const j = await r.json().catch(() => ({} as any));
     if (r.ok && j.url) await patch(id, { avatarUrl: j.url });
   };
+  const [importing, setImporting] = useState(false);
+  
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       <div className="card" style={{ padding: 8 }}>
-        <h4>Добавить персонажа / NPC</h4>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <h4 style={{ margin: 0 }}>Добавить персонажа / NPC</h4>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', backgroundColor: '#007bff', color: 'white', borderRadius: 4, cursor: 'pointer', fontSize: 13 }}>
+            <input 
+              type="file" 
+              accept=".pdf" 
+              style={{ display: 'none' }}
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                
+                setImporting(true);
+                try {
+                  const formData = new FormData();
+                  formData.append('file', file);
+                  
+                  const res = await fetch(`${API}/admin/characters/import-pdf`, {
+                    method: 'POST',
+                    body: formData
+                  });
+                  
+                  if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.message || 'Ошибка импорта');
+                  }
+                  
+                  const imported = await res.json();
+                  console.log('Imported character:', imported);
+                  
+                  // Заполняем форму данными из импорта
+                  setForm({
+                    ...form,
+                    name: imported.name || '',
+                    avatarUrl: imported.avatarUrl || '',
+                    gender: imported.gender || '',
+                    race: imported.race || '',
+                    description: imported.description || '',
+                    level: imported.level || 1,
+                    class: imported.class || '',
+                    hp: imported.hp || 10,
+                    maxHp: imported.maxHp || 10,
+                    ac: imported.ac || 10,
+                    str: imported.str || 10,
+                    dex: imported.dex || 10,
+                    con: imported.con || 10,
+                    int: imported.int || 10,
+                    wis: imported.wis || 10,
+                    cha: imported.cha || 10,
+                    role: imported.role || '',
+                    origin: imported.origin || '',
+                    persona: imported.persona || '',
+                    abilities: imported.abilities || '',
+                    isPlayable: imported.isPlayable !== undefined ? imported.isPlayable : true,
+                  });
+                  
+                  alert('Персонаж успешно импортирован! Проверьте данные и нажмите "Добавить".');
+                } catch (e: any) {
+                  console.error('Import error:', e);
+                  alert('Ошибка импорта: ' + (e.message || 'Неизвестная ошибка'));
+                } finally {
+                  setImporting(false);
+                  // Сброс input
+                  e.target.value = '';
+                }
+              }}
+            />
+            {importing ? '⏳ Импорт...' : '📄 Импорт из PDF'}
+          </label>
+        </div>
         <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr 1fr auto' }}>
           <input placeholder="Имя" value={form.name || ''} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input placeholder="Роль (напр. NPC, Guide)" value={form.role || ''} onChange={(e) => setForm({ ...form, role: e.target.value })} />
@@ -2182,7 +2252,7 @@ const CharactersInlineEditor: React.FC<{ gameId: string }> = ({ gameId }) => {
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <input type="checkbox" checked={Boolean(form.isPlayable)} onChange={(e) => setForm({ ...form, isPlayable: e.target.checked })} /> Игровой
           </label>
-          <button onClick={add}>Добавить</button>
+          <button onClick={add} disabled={importing}>Добавить</button>
         </div>
         <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
           <input placeholder="Аватар URL" value={form.avatarUrl || ''} onChange={(e) => setForm({ ...form, avatarUrl: e.target.value })} />
