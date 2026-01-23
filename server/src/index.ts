@@ -2904,6 +2904,196 @@ app.get('/api/characters', async (req, res) => {
     return res.json(list);
   }
 });
+// Импорт одного персонажа из PDF через ИИ
+app.post('/api/admin/characters/import-pdf', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'file_required', message: 'Файл не загружен' });
+    }
+    
+    const fileName = req.file.originalname || '';
+    if (!fileName.toLowerCase().endsWith('.pdf')) {
+      return res.status(400).json({ error: 'invalid_file_type', expected: 'PDF' });
+    }
+    
+    console.log('[CHARACTER IMPORT] Parsing PDF:', fileName);
+    
+    // Парсинг PDF
+    let parsed;
+    try {
+      parsed = await pdfParse(req.file.buffer);
+    } catch (e) {
+      console.error('[CHARACTER IMPORT] Parse error:', e);
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      if (errorMsg.includes('password') || errorMsg.includes('encrypted')) {
+        return res.status(400).json({ error: 'pdf_password_protected', message: 'PDF защищен паролем' });
+      }
+      return res.status(400).json({ error: 'pdf_parse_failed', details: errorMsg });
+    }
+    
+    if (!parsed || !parsed.text) {
+      return res.status(400).json({ error: 'pdf_no_text', message: 'PDF не содержит текста' });
+    }
+    
+    const rawText = parsed.text.replace(/\r/g, '\n');
+    console.log('[CHARACTER IMPORT] Extracted text length:', rawText.length);
+    
+    // Используем ИИ для парсинга персонажа
+    const sys = `Ты интеллектуальный ассистент для анализа карточек персонажей D&D 5e в формате Long Story Short.
+
+Твоя задача - извлечь ВСЕ данные персонажа из PDF карточки и вернуть их в формате JSON.
+
+⚠️ КРИТИЧЕСКИ ВАЖНО: ОБЯЗАТЕЛЬНО заполни ВСЕ поля, включая ВСЕ статы D&D 5e!`;
+
+    const shape = '{ "name":"...","isPlayable":true,"race":"...","gender":"...","role":"...","origin":"...","persona":"...","abilities":"...","description":"...","level":1,"class":"друид","hp":10,"maxHp":10,"ac":10,"str":10,"dex":10,"con":10,"int":10,"wis":13,"cha":10 }';
+
+    const prompt = `Проанализируй карточку персонажа D&D 5e из файла:
+
+═══════════════════════════════════════════════════════════════════════════════
+ФАЙЛ: КАРТОЧКА ПЕРСОНАЖА
+═══════════════════════════════════════════════════════════════════════════════
+${rawText.slice(0, 50000)}
+═══════════════════════════════════════════════════════════════════════════════
+
+Верни только JSON без комментариев, строго формы:
+${shape}
+
+ИНСТРУКЦИИ ПО ИЗВЛЕЧЕНИЮ:
+
+1. ИМЯ (name):
+   - Извлеки имя персонажа из раздела "ИМЯ ПЕРСОНАЖА" или начала карточки
+   - Если имя не указано явно, используй описание для определения имени
+
+2. РАСА (race):
+   - Извлеки расу из раздела "РАСА" (например: "Дварфийка", "Эльф", "Человек")
+   - Приведи к стандартному формату: "дварф", "эльф", "человек", "гном", "орк" и т.д.
+
+3. ПОЛ (gender):
+   - Определи пол из текста (мужской, женский, не указан)
+   - Если указано "Дварфийка" → женский, "Дварф" → мужской
+
+4. КЛАСС (class):
+   - Извлеки класс из раздела "КЛАСС И УРОВЕНЬ" или "КЛАСС ЗАКЛИНАТЕЛЯ"
+   - Приведи к стандартному формату: "друид", "воин", "маг", "жрец", "плут", "варвар", "паладин", "следопыт", "бард", "монах", "колдун", "чародей"
+
+5. УРОВЕНЬ (level):
+   - Извлеки уровень из раздела "КЛАСС И УРОВЕНЬ" или текста
+   - Если не указан, определи по контексту (обычно 1-5 для игровых персонажей)
+
+6. СТАТИСТИКА D&D 5e (ОБЯЗАТЕЛЬНО):
+   - ⚠️ ВСЕ статы должны быть заполнены реальными значениями!
+   - hp, maxHp: извлеки из текста или рассчитай на основе класса и уровня
+   - ac: класс брони (обычно 10-15 для друида)
+   - str, dex, con, int, wis, cha: извлеки из текста или сгенерируй на основе класса
+   - Для друида: WIS должна быть высокой (13-16), CON средняя (12-14)
+   - Если статы не указаны в PDF - СГЕНЕРИРУЙ их на основе класса и уровня
+
+7. ОПИСАНИЕ (description):
+   - Извлеки описание из раздела "ПРЕДЫСТОРИЯ ПЕРСОНАЖА" или общего описания
+   - Объедини всю информацию о персонаже в одно описание
+
+8. РОЛЬ (role):
+   - Определи роль персонажа (например: "Отшельница", "Защитник", "Исследователь")
+
+9. ПРОИСХОЖДЕНИЕ (origin):
+   - Извлеки информацию о происхождении из предыстории
+
+10. ЛИЧНОСТЬ (persona):
+    - Извлеки описание характера и поведения персонажа
+
+11. СПОСОБНОСТИ (abilities):
+    - Извлеки список заклинаний и способностей из раздела "ЗАГОВОРЫ" и списка заклинаний
+    - Укажи все заклинания и способности персонажа
+
+12. ИГРОВОЙ ПЕРСОНАЖ (isPlayable):
+    - Для карточек Long Story Short обычно isPlayable: true
+    - Если это NPC из сценария → isPlayable: false
+
+⚠️ ВАЖНО: Если какие-то статы не указаны в PDF, СГЕНЕРИРУЙ их на основе:
+- Класса персонажа (друид → высокий WIS, средний CON)
+- Уровня персонажа
+- Роли персонажа
+
+НИКОГДА не оставляй статы пустыми или равными 0!`;
+
+    console.log('[CHARACTER IMPORT] Calling AI for parsing...');
+    const aiResponse = await generateChatCompletion({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 2000
+    });
+    
+    if (!aiResponse || !aiResponse.text) {
+      return res.status(500).json({ error: 'ai_parse_failed', message: 'ИИ не смог обработать файл' });
+    }
+    
+    console.log('[CHARACTER IMPORT] AI response received, length:', aiResponse.text.length);
+    
+    // Парсинг JSON из ответа ИИ
+    let characterData: any;
+    try {
+      // Извлекаем JSON из ответа (может быть обернут в markdown код)
+      let jsonText = aiResponse.text.trim();
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonText = jsonMatch[0];
+      }
+      characterData = JSON.parse(jsonText);
+    } catch (e) {
+      console.error('[CHARACTER IMPORT] JSON parse error:', e);
+      console.error('[CHARACTER IMPORT] AI response:', aiResponse.text);
+      return res.status(500).json({ error: 'json_parse_failed', message: 'Не удалось распарсить ответ ИИ', details: String(e) });
+    }
+    
+    // Валидация и нормализация данных
+    if (!characterData.name) {
+      return res.status(400).json({ error: 'missing_name', message: 'Имя персонажа не найдено' });
+    }
+    
+    // Убеждаемся, что все статы заполнены
+    const defaultStats = {
+      level: characterData.level || 1,
+      class: characterData.class || 'друид',
+      hp: characterData.hp || 10,
+      maxHp: characterData.maxHp || 10,
+      ac: characterData.ac || 10,
+      str: characterData.str || 10,
+      dex: characterData.dex || 10,
+      con: characterData.con || 10,
+      int: characterData.int || 10,
+      wis: characterData.wis || 13,
+      cha: characterData.cha || 10,
+    };
+    
+    const normalizedCharacter = {
+      name: characterData.name,
+      isPlayable: characterData.isPlayable !== undefined ? Boolean(characterData.isPlayable) : true,
+      race: characterData.race || 'не указана',
+      gender: characterData.gender || 'не указан',
+      role: characterData.role || null,
+      origin: characterData.origin || null,
+      persona: characterData.persona || null,
+      abilities: characterData.abilities || null,
+      description: characterData.description || null,
+      avatarUrl: characterData.avatarUrl || `https://picsum.photos/seed/${characterData.name}/80/80`,
+      ...defaultStats,
+    };
+    
+    console.log('[CHARACTER IMPORT] Parsed character:', normalizedCharacter.name);
+    
+    // Возвращаем данные персонажа для заполнения формы (без сохранения в базу)
+    // Пользователь сможет проверить и отредактировать данные перед созданием
+    return res.json(normalizedCharacter);
+  } catch (e) {
+    console.error('[CHARACTER IMPORT] Error:', e);
+    return res.status(500).json({ error: 'server_error', message: 'Внутренняя ошибка сервера', details: String(e) });
+  }
+});
+
 app.post('/api/characters', async (req, res) => {
   try {
     const prisma = getPrisma();

@@ -1563,7 +1563,72 @@ const CharactersPage: React.FC = () => {
       </div>
       
       <div className="card" style={{ padding: 12 }}>
-        <h3>Создать персонажа</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Создать персонажа</h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', backgroundColor: '#007bff', color: 'white', borderRadius: 4, cursor: 'pointer' }}>
+              <input 
+                type="file" 
+                accept=".pdf" 
+                style={{ display: 'none' }}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  
+                  setSaving('import');
+                  try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    
+                    const res = await fetch(`${API}/admin/characters/import-pdf`, {
+                      method: 'POST',
+                      body: formData
+                    });
+                    
+                    if (!res.ok) {
+                      const error = await res.json();
+                      throw new Error(error.message || 'Ошибка импорта');
+                    }
+                    
+                    const imported = await res.json();
+                    console.log('Imported character:', imported);
+                    
+                    // Заполняем форму данными из импорта
+                    setForm({
+                      ...form,
+                      name: imported.name || '',
+                      avatarUrl: imported.avatarUrl || 'https://picsum.photos/seed/new_char/80/80',
+                      gender: imported.gender || 'Мужской',
+                      race: imported.race || 'Раса',
+                      description: imported.description || '',
+                      level: imported.level || 1,
+                      class: imported.class || '',
+                      hp: imported.hp || 10,
+                      maxHp: imported.maxHp || 10,
+                      ac: imported.ac || 10,
+                      str: imported.str || 10,
+                      dex: imported.dex || 10,
+                      con: imported.con || 10,
+                      int: imported.int || 10,
+                      wis: imported.wis || 10,
+                      cha: imported.cha || 10,
+                    });
+                    
+                    alert('Персонаж успешно импортирован! Проверьте данные и нажмите "Создать".');
+                  } catch (e: any) {
+                    console.error('Import error:', e);
+                    alert('Ошибка импорта: ' + (e.message || 'Неизвестная ошибка'));
+                  } finally {
+                    setSaving(null);
+                    // Сброс input
+                    e.target.value = '';
+                  }
+                }}
+              />
+              {saving === 'import' ? '⏳ Импорт...' : '📄 Импорт из PDF'}
+            </label>
+          </div>
+        </div>
         <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(3, 1fr)' }}>
           <input placeholder="Имя" value={form.name || ''} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input placeholder="Аватар URL" value={form.avatarUrl || ''} onChange={(e) => setForm({ ...form, avatarUrl: e.target.value })} />
