@@ -5608,11 +5608,11 @@ async function generateSSMLWithIntonation(params: {
   try {
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     if (!geminiKey) {
+      console.warn('[TTS-SSML] Gemini API key not found, falling back to standard SSML');
       return null; // Fallback на обычный SSML
     }
     
-    // Проводим глубокий семантический анализ текста
-    const semanticAnalysis = await analyzeTextSemantics(text);
+    console.log('[TTS-SSML] Using Gemini for dynamic SSML generation with full semantic understanding');
     
     const characterInfo: string[] = [];
     if (characterName) characterInfo.push(`Имя: ${characterName}`);
@@ -5623,17 +5623,6 @@ async function generateSSMLWithIntonation(params: {
     if (characterInt !== null) characterInfo.push(`Интеллект: ${characterInt}`);
     if (characterWis !== null) characterInfo.push(`Мудрость: ${characterWis}`);
     
-    // Добавляем семантический анализ в промпт
-    const semanticInfo = semanticAnalysis ? `
-СЕМАНТИЧЕСКИЙ АНАЛИЗ ТЕКСТА:
-- Главная тема: ${semanticAnalysis.mainTheme}
-- Эмоциональная окраска: ${semanticAnalysis.emotionalTone}
-- Ключевые слова: ${semanticAnalysis.keyWords.join(', ')}
-- Типы предложений: ${semanticAnalysis.sentenceTypes.join(', ')}
-- Семантическая структура: ${semanticAnalysis.semanticStructure.map(s => `${s.text} [${s.importance}, ${s.emotion}]`).join(' | ')}
-
-ИСПОЛЬЗУЙ ЭТОТ АНАЛИЗ для создания SSML с полным пониманием смысла!` : '';
-    
     const systemPrompt = `Ты эксперт по синтезу речи, лингвистике и SSML разметке. Твоя задача - создать SSML разметку с ПОЛНЫМ пониманием семантического смысла текста.
 
 ${isNarrator ? 'Это текст рассказчика (мастера игры). Рассказчик должен говорить мягко, с интонацией, не роботизированно.' : `Это реплика персонажа${characterName ? ` по имени ${characterName}` : ''}.`}
@@ -5641,7 +5630,6 @@ ${isNarrator ? 'Это текст рассказчика (мастера игр�
 ${characterInfo.length > 0 ? `Характеристики персонажа:\n${characterInfo.join('\n')}` : ''}
 
 Эмоция: ${emotion}, интенсивность: ${intensity}
-${semanticInfo}
 
 КРИТИЧЕСКИ ВАЖНО - Ты должен ПОЛНОСТЬЮ понимать семантический смысл текста:
 
@@ -5703,36 +5691,63 @@ ${semanticInfo}
 
 "${text}"
 
-ВАЖНО:
+ВАЖНО - сделай это БЫСТРО и ЭФФЕКТИВНО:
 1. Пойми главную мысль и подтекст текста
 2. Определи эмоциональную окраску каждого фрагмента
-3. Выдели ключевые слова и фразы
-4. Создай естественные паузы в зависимости от смысла
-5. Используй интонации для передачи всего смысла
+3. Выдели ключевые слова и фразы через <emphasis>
+4. Создай естественные паузы в зависимости от смысла через <break>
+5. Используй интонации для передачи всего смысла через <prosody>
 
-Верни только SSML разметку с глубоким семантическим пониманием.`;
+Верни ТОЛЬКО SSML разметку (без объяснений, только SSML).`;
 
-    const { text: ssmlResponse } = await generateChatCompletion({
-      systemPrompt,
-      userPrompt,
-      history: []
-    });
+    console.log('[TTS-SSML] Generating SSML with Gemini for text length:', text.length);
+    const startTime = Date.now();
     
-    if (ssmlResponse) {
-      // Извлекаем SSML из ответа
-      const ssmlMatch = ssmlResponse.match(/<speak>[\s\S]*<\/speak>/i);
-      if (ssmlMatch) {
-        return ssmlMatch[0];
+    try {
+      // Динамический таймаут в зависимости от длины текста (минимум 10 секунд, максимум 30 секунд)
+      // Для длинных текстов даем больше времени
+      const timeoutMs = Math.min(30000, Math.max(10000, text.length * 20));
+      console.log('[TTS-SSML] Using timeout:', timeoutMs, 'ms for text length:', text.length);
+      
+      const ssmlPromise = generateChatCompletion({
+        systemPrompt,
+        userPrompt,
+        history: []
+      });
+      
+      const timeoutPromise = new Promise<{ text: string }>((_, reject) => {
+        setTimeout(() => reject(new Error('SSML generation timeout')), timeoutMs);
+      });
+      
+      const { text: ssmlResponse } = await Promise.race([ssmlPromise, timeoutPromise]);
+      
+      const duration = Date.now() - startTime;
+      console.log('[TTS-SSML] Gemini SSML generation took:', duration, 'ms');
+    
+      if (ssmlResponse) {
+        // Извлекаем SSML из ответа
+        const ssmlMatch = ssmlResponse.match(/<speak>[\s\S]*<\/speak>/i);
+        if (ssmlMatch) {
+          console.log('[TTS-SSML] Successfully generated SSML via Gemini');
+          return ssmlMatch[0];
+        }
+        // Если SSML не найден, но есть теги speak, используем весь ответ
+        if (ssmlResponse.includes('<speak>')) {
+          console.log('[TTS-SSML] Using full response as SSML');
+          return ssmlResponse;
+        }
+        console.warn('[TTS-SSML] Gemini response does not contain SSML tags');
       }
-      // Если SSML не найден, но есть теги speak, используем весь ответ
-      if (ssmlResponse.includes('<speak>')) {
-        return ssmlResponse;
-      }
+    } catch (e) {
+      const duration = Date.now() - startTime;
+      console.error('[TTS-SSML] Gemini SSML generation failed after', duration, 'ms:', e);
+      // Продолжаем с fallback
     }
   } catch (e) {
-    console.error('[TTS-SSML] Gemini SSML generation failed:', e);
+    console.error('[TTS-SSML] Gemini SSML generation error:', e);
   }
   
+  console.log('[TTS-SSML] Falling back to standard SSML');
   return null; // Fallback на обычный SSML
 }
 
@@ -6447,9 +6462,10 @@ app.post('/api/tts', async (req, res) => {
             // Для Service Account используем клиент напрямую
             const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             
-            // Пытаемся сгенерировать SSML с интонациями через Gemini
+            // Пытаемся сгенерировать SSML с интонациями через Gemini (приоритет для всех текстов)
             let ssmlText: string | null = null;
             if (finalCharacterId || finalIsNarrator) {
+              console.log('[TTS] Attempting Gemini SSML generation for text length:', text.length);
               const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
               ssmlText = await generateSSMLWithIntonation({
                 text: escapedText,
@@ -6468,15 +6484,36 @@ app.post('/api/tts', async (req, res) => {
               });
             }
             
-            // Если Gemini не сгенерировал SSML, используем стандартный
+            // Если Gemini не сгенерировал SSML, используем улучшенный стандартный SSML с естественными интонациями
             if (!ssmlText) {
               const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
               const rateStr = finalSpeed.toFixed(2);
+              
+              // Создаем более естественный SSML с вариациями интонации
+              // Выделяем важные слова (заглавные буквы, восклицания, вопросы)
+              let enhancedText = escapedText;
+              
+              // Выделяем восклицания и вопросы для более выразительной интонации
+              enhancedText = enhancedText.replace(/([А-ЯЁA-Z][а-яёa-z]+(?:\s+[а-яёa-z]+)*[!?])/g, '<emphasis level="moderate">$1</emphasis>');
+              
+              // Добавляем естественные паузы
               const textWithPauses = finalIsNarrator 
-                ? escapedText.replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
-                  .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
-                : escapedText.replace(/([.!?])\s+/g, '$1<break time="120ms"/>');
-              ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
+                ? enhancedText
+                    .replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
+                    .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
+                    .replace(/(\s+—\s+)/g, '<break time="150ms"/>') // Тире - более длинная пауза
+                : enhancedText
+                    .replace(/([.!?])\s+/g, '$1<break time="120ms"/>')
+                    .replace(/([,;:])\s+/g, '$1<break time="50ms"/>')
+                    .replace(/(\s+—\s+)/g, '<break time="200ms"/>');
+              
+              // Добавляем небольшие вариации pitch для естественности (особенно для вопросов)
+              const hasQuestion = text.includes('?');
+              const hasExclamation = text.includes('!');
+              const dynamicPitch = hasQuestion ? `+${(finalPitch + 0.5).toFixed(1)}` : 
+                               hasExclamation ? `+${(finalPitch + 0.3).toFixed(1)}` : pitchStr;
+              
+              ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
             }
             
             // Для рассказчика используем женский мягкий голос
@@ -6490,6 +6527,9 @@ app.post('/api/tts', async (req, res) => {
             } else if (finalIsNarrator) {
               voiceName = 'ru-RU-Wavenet-E'; // Рассказчик - женский мягкий голос
             }
+            
+            console.log('[TTS] Calling Google TTS Service Account API, voice:', voiceName, 'format:', format, 'text length:', text.length);
+            const ttsStartTime = Date.now();
             
             const [response] = await client.synthesizeSpeech({
               input: { ssml: ssmlText },
@@ -6508,11 +6548,17 @@ app.post('/api/tts', async (req, res) => {
               },
             });
             
+            const ttsDuration = Date.now() - ttsStartTime;
+            console.log('[TTS] Google TTS Service Account API took:', ttsDuration, 'ms');
+            
             if (response.audioContent) {
               const audioBuffer = Buffer.from(response.audioContent as Uint8Array);
+              console.log('[TTS] Google TTS success, audio size:', audioBuffer.length, 'bytes');
               res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
               res.setHeader('Content-Length', String(audioBuffer.length));
               return res.send(audioBuffer);
+            } else {
+              console.warn('[TTS] Google TTS Service Account returned no audio content');
             }
           } catch (serviceErr) {
             console.error('[TTS] Google Service Account failed:', serviceErr);
@@ -6523,9 +6569,10 @@ app.post('/api/tts', async (req, res) => {
         if (googleKey && !accessToken) {
           const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           
-          // Пытаемся сгенерировать SSML с интонациями через Gemini
+          // Пытаемся сгенерировать SSML с интонациями через Gemini (приоритет для всех текстов)
           let ssmlText: string | null = null;
           if (finalCharacterId || finalIsNarrator) {
+            console.log('[TTS] Attempting Gemini SSML generation for text length:', text.length);
             const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
             ssmlText = await generateSSMLWithIntonation({
               text: escapedText,
@@ -6544,15 +6591,35 @@ app.post('/api/tts', async (req, res) => {
             });
           }
           
-          // Если Gemini не сгенерировал SSML, используем стандартный
+          // Если Gemini не сгенерировал SSML, используем улучшенный стандартный SSML с естественными интонациями
           if (!ssmlText) {
             const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
             const rateStr = finalSpeed.toFixed(2);
+            
+            // Создаем более естественный SSML с вариациями интонации
+            let enhancedText = escapedText;
+            
+            // Выделяем восклицания и вопросы для более выразительной интонации
+            enhancedText = enhancedText.replace(/([А-ЯЁA-Z][а-яёa-z]+(?:\s+[а-яёa-z]+)*[!?])/g, '<emphasis level="moderate">$1</emphasis>');
+            
+            // Добавляем естественные паузы
             const textWithPauses = finalIsNarrator 
-              ? escapedText.replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
-                .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
-              : escapedText.replace(/([.!?])\s+/g, '$1<break time="120ms"/>');
-            ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
+              ? enhancedText
+                  .replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
+                  .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
+                  .replace(/(\s+—\s+)/g, '<break time="150ms"/>') // Тире - более длинная пауза
+              : enhancedText
+                  .replace(/([.!?])\s+/g, '$1<break time="120ms"/>')
+                  .replace(/([,;:])\s+/g, '$1<break time="50ms"/>')
+                  .replace(/(\s+—\s+)/g, '<break time="200ms"/>');
+            
+            // Добавляем небольшие вариации pitch для естественности (особенно для вопросов)
+            const hasQuestion = text.includes('?');
+            const hasExclamation = text.includes('!');
+            const dynamicPitch = hasQuestion ? `+${(finalPitch + 0.5).toFixed(1)}` : 
+                             hasExclamation ? `+${(finalPitch + 0.3).toFixed(1)}` : pitchStr;
+            
+            ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
           }
           
           // Для рассказчика используем женский мягкий голос

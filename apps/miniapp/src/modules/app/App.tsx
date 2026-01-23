@@ -179,9 +179,10 @@ const GameChat: React.FC = () => {
   const playSegment = async (
     segment: { text: string; isNarrator: boolean; characterId?: string; characterName?: string; gender?: string | null },
     seq: number,
-    locationId?: string
+    locationId?: string,
+    nextSegmentBlob?: Blob | null
   ): Promise<void> => {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       // Проверяем, не изменилась ли последовательность
       if (seq !== activeSpeakSeqRef.current) {
         console.log('[TTS-CLIENT] Sequence changed, stopping segment playback');
@@ -189,6 +190,37 @@ const GameChat: React.FC = () => {
         return;
       }
       
+      // Если у нас уже есть предзагруженный blob, используем его
+      if (nextSegmentBlob) {
+        const url = URL.createObjectURL(nextSegmentBlob);
+        const audio = new Audio(url);
+        const volume = Math.max(0, Math.min(1, settings.ttsVolume / 100));
+        audio.volume = volume;
+        try { (audio as any).playbackRate = settings.ttsRate; } catch {}
+        
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        
+        audio.onerror = (e) => {
+          console.error('[TTS-CLIENT] Segment playback error:', e);
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+          playPromise.catch((err) => {
+            console.error('[TTS-CLIENT] Segment play() failed:', err);
+            URL.revokeObjectURL(url);
+            resolve();
+          });
+        }
+        return;
+      }
+      
+      // Иначе загружаем сегмент
       ttsSynthesize(segment.text, {
         gameId: id,
         characterId: segment.characterId,
@@ -217,7 +249,7 @@ const GameChat: React.FC = () => {
         audio.onerror = (e) => {
           console.error('[TTS-CLIENT] Segment playback error:', e);
           URL.revokeObjectURL(url);
-          resolve(); // Продолжаем даже при ошибке
+          resolve();
         };
         
         const playPromise = audio.play();
@@ -230,7 +262,7 @@ const GameChat: React.FC = () => {
         }
       }).catch(err => {
         console.error('[TTS-CLIENT] Segment synthesis failed:', err);
-        resolve(); // Продолжаем даже при ошибке
+        resolve();
       });
     });
   };
@@ -267,57 +299,111 @@ const GameChat: React.FC = () => {
         }
       } catch {}
       
-      // Анализируем текст и разбиваем на сегменты
-      try {
-        const segments = await ttsAnalyzeText(t, id);
-        console.log('[TTS-CLIENT] Text analyzed into segments:', segments.length);
-        
-        // Объединяем соседние сегменты рассказчика, чтобы избежать лишних пауз
-        const mergedSegments: Array<{ text: string; isNarrator: boolean; characterId?: string; characterName?: string; gender?: string | null }> = [];
-        for (let i = 0; i < segments.length; i++) {
-          const current = segments[i];
-          if (!current) continue;
+      // Проверяем, есть ли в тексте явные реплики персонажей перед разбиением на сегменты
+      const hasQuotes = t.includes('"') || t.includes('«') || t.includes('»') || t.includes('„') || t.includes('"');
+      const hasNamePattern = /^([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)[:"]/.test(t);
+      const hasCharacterSpeech = hasQuotes || hasNamePattern;
+      
+      // Анализируем текст и разбиваем на сегменты ТОЛЬКО если есть явные признаки реплик
+      if (hasCharacterSpeech) {
+        try {
+          const segments = await ttsAnalyzeText(t, id);
+          console.log('[TTS-CLIENT] Text analyzed into segments:', segments.length);
           
-          const prev = mergedSegments[mergedSegments.length - 1];
-          
-          // Если текущий сегмент - рассказчик и предыдущий тоже рассказчик, объединяем
-          if (current.isNarrator && prev && prev.isNarrator && !prev.characterId && !current.characterId) {
-            prev.text += ' ' + current.text;
+          // Если сегмент только один - используем обычный синтез без разбиения
+          if (segments.length <= 1) {
+            console.log('[TTS-CLIENT] Only one segment, using single synthesis');
           } else {
-            mergedSegments.push({
-              text: current.text,
-              isNarrator: current.isNarrator,
-              characterId: current.characterId,
-              characterName: current.characterName,
-              gender: current.gender
-            });
-          }
-        }
-        
-        console.log('[TTS-CLIENT] Merged segments:', mergedSegments.length, 'from', segments.length);
-        
-        // Если сегментов больше одного после объединения, воспроизводим последовательно
-        if (mergedSegments.length > 1) {
-          for (const segment of mergedSegments) {
-            // Проверяем, не изменилась ли последовательность
-            if (seq !== activeSpeakSeqRef.current) {
-              console.log('[TTS-CLIENT] Sequence changed, stopping playback');
-              speakingInFlightRef.current = false;
-              return;
+            // Объединяем соседние сегменты рассказчика, чтобы избежать лишних пауз
+            const mergedSegments: Array<{ text: string; isNarrator: boolean; characterId?: string; characterName?: string; gender?: string | null }> = [];
+            for (let i = 0; i < segments.length; i++) {
+              const current = segments[i];
+              if (!current) continue;
+              
+              const prev = mergedSegments[mergedSegments.length - 1];
+              
+              // Если текущий сегмент - рассказчик и предыдущий тоже рассказчик, объединяем
+              if (current.isNarrator && prev && prev.isNarrator && !prev.characterId && !current.characterId) {
+                prev.text += ' ' + current.text;
+              } else {
+                mergedSegments.push({
+                  text: current.text,
+                  isNarrator: current.isNarrator,
+                  characterId: current.characterId,
+                  characterName: current.characterName,
+                  gender: current.gender
+                });
+              }
             }
             
-            await playSegment(segment, seq, context?.locationId);
+            console.log('[TTS-CLIENT] Merged segments:', mergedSegments.length, 'from', segments.length);
+            
+            // Если после объединения остался только один сегмент - используем обычный синтез
+            if (mergedSegments.length <= 1) {
+              console.log('[TTS-CLIENT] After merging, only one segment, using single synthesis');
+            } else {
+              // Если сегментов больше одного после объединения, воспроизводим последовательно с предзагрузкой
+              console.log('[TTS-CLIENT] Playing', mergedSegments.length, 'segments with preloading');
+              
+              let nextBlobPromise: Promise<Blob | null> | null = null;
+              
+              for (let i = 0; i < mergedSegments.length; i++) {
+                // Проверяем, не изменилась ли последовательность
+                if (seq !== activeSpeakSeqRef.current) {
+                  console.log('[TTS-CLIENT] Sequence changed, stopping playback');
+                  speakingInFlightRef.current = false;
+                  return;
+                }
+                
+                const segment = mergedSegments[i];
+                if (!segment) continue;
+                
+                // Если есть предзагруженный blob от предыдущей итерации, используем его
+                let currentBlob: Blob | null = null;
+                if (nextBlobPromise) {
+                  try {
+                    currentBlob = await nextBlobPromise;
+                  } catch (e) {
+                    console.error('[TTS-CLIENT] Error using preloaded blob:', e);
+                  }
+                  nextBlobPromise = null;
+                }
+                
+                // Предзагружаем следующий сегмент параллельно с воспроизведением текущего
+                if (i < mergedSegments.length - 1) {
+                  const nextSegment = mergedSegments[i + 1];
+                  if (nextSegment) {
+                    // Начинаем загрузку следующего сегмента параллельно
+                    nextBlobPromise = ttsSynthesize(nextSegment.text, {
+                      gameId: id,
+                      characterId: nextSegment.characterId,
+                      locationId: context?.locationId || engineLocRef.current || undefined,
+                      gender: nextSegment.gender || undefined,
+                      isNarrator: nextSegment.isNarrator,
+                    }).catch(err => {
+                      console.error('[TTS-CLIENT] Next segment preload failed:', err);
+                      return null;
+                    });
+                  }
+                }
+                
+                // Воспроизводим текущий сегмент (используя предзагруженный blob, если есть)
+                await playSegment(segment, seq, context?.locationId, currentBlob);
+              }
+              
+              // Проверяем финальную последовательность
+              if (seq === activeSpeakSeqRef.current) {
+                lastSpokenRef.current = t;
+                speakingInFlightRef.current = false;
+              }
+              return;
+            }
           }
-          
-          // Проверяем финальную последовательность
-          if (seq === activeSpeakSeqRef.current) {
-            lastSpokenRef.current = t;
-            speakingInFlightRef.current = false;
-          }
-          return;
+        } catch (err) {
+          console.error('[TTS-CLIENT] Segment analysis failed, falling back to single synthesis:', err);
         }
-      } catch (err) {
-        console.error('[TTS-CLIENT] Segment analysis failed, falling back to single synthesis:', err);
+      } else {
+        console.log('[TTS-CLIENT] No character speech detected, using single synthesis');
       }
       
       // Fallback: если анализ не удался или сегмент один, используем обычный синтез
