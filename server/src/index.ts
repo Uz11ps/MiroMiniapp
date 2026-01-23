@@ -6516,7 +6516,8 @@ app.post('/api/tts', async (req, res) => {
     // Используем только рабочий вариант: Gemini генерирует SSML → Google TTS синтезирует аудио
     
     // Fallback: Используем Gemini для генерации SSML, затем Google TTS для синтеза
-    const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
+    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY;
     const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     
     if (!googleKey && !googleCreds) {
@@ -6533,7 +6534,7 @@ app.post('/api/tts', async (req, res) => {
       // Генерируем SSML с интонациями через Gemini (семантическое понимание)
       let ssmlText: string | null = null;
       let ssmlSource = 'fallback';
-      if (geminiKey && (finalCharacterId || finalIsNarrator)) {
+      if (geminiApiKey && (finalCharacterId || finalIsNarrator)) {
         console.log('[TTS] 🎤 Using Gemini to generate SSML with full semantic understanding');
         const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
         ssmlText = await generateSSMLWithIntonation({
