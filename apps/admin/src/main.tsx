@@ -1334,6 +1334,10 @@ type Character = {
 const CharactersPage: React.FC = () => {
   const [list, setList] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [filterPlayable, setFilterPlayable] = useState<'all' | 'playable' | 'npc'>('all');
+  const [editingStats, setEditingStats] = useState<Record<string, Partial<Character>>>({});
   const [form, setForm] = useState<Partial<Character>>({ 
     name: '', 
     avatarUrl: 'https://picsum.photos/seed/new_char/80/80', 
@@ -1351,38 +1355,156 @@ const CharactersPage: React.FC = () => {
     wis: 10,
     cha: 10,
   });
+  
+  const getDndModifier = (score: number) => Math.floor((score - 10) / 2);
+  
   const load = async () => {
     setLoading(true);
-    const res = await fetch(`${API}/admin/characters`);
-    setList(await res.json());
-    setLoading(false);
+    try {
+      const res = await fetch(`${API}/admin/characters`);
+      if (!res.ok) throw new Error('Failed to load');
+      setList(await res.json());
+    } catch (e) {
+      console.error('Failed to load characters:', e);
+      alert('Ошибка загрузки персонажей');
+    } finally {
+      setLoading(false);
+    }
   };
+  
   useEffect(() => { load(); }, []);
+  
   const onCreate = async () => {
-    const payload = { 
-      name: form.name || 'Новый персонаж', 
-      avatarUrl: form.avatarUrl || 'https://picsum.photos/seed/new_char/80/80', 
-      gender: form.gender, 
-      race: form.race, 
-      description: form.description, 
-      rating: Number(form.rating) || 5, 
-      gameId: form.gameId,
-      level: Number(form.level) || 1,
-      class: form.class,
-      hp: Number(form.hp) || 10,
-      maxHp: Number(form.maxHp) || 10,
-      ac: Number(form.ac) || 10,
-      str: Number(form.str) || 10,
-      dex: Number(form.dex) || 10,
-      con: Number(form.con) || 10,
-      int: Number(form.int) || 10,
-      wis: Number(form.wis) || 10,
-      cha: Number(form.cha) || 10,
-    };
-    await fetch(`${API}/characters`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    await load();
+    if (!form.name?.trim()) {
+      alert('Введите имя персонажа');
+      return;
+    }
+    setSaving('create');
+    try {
+      const payload = { 
+        name: form.name || 'Новый персонаж', 
+        avatarUrl: form.avatarUrl || 'https://picsum.photos/seed/new_char/80/80', 
+        gender: form.gender, 
+        race: form.race, 
+        description: form.description, 
+        rating: Number(form.rating) || 5, 
+        gameId: form.gameId,
+        level: Math.max(1, Math.min(20, Number(form.level) || 1)),
+        class: form.class,
+        hp: Math.max(1, Number(form.hp) || 10),
+        maxHp: Math.max(1, Number(form.maxHp) || 10),
+        ac: Math.max(0, Number(form.ac) || 10),
+        str: Math.max(1, Math.min(30, Number(form.str) || 10)),
+        dex: Math.max(1, Math.min(30, Number(form.dex) || 10)),
+        con: Math.max(1, Math.min(30, Number(form.con) || 10)),
+        int: Math.max(1, Math.min(30, Number(form.int) || 10)),
+        wis: Math.max(1, Math.min(30, Number(form.wis) || 10)),
+        cha: Math.max(1, Math.min(30, Number(form.cha) || 10)),
+      };
+      const res = await fetch(`${API}/characters`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      if (!res.ok) throw new Error('Failed to create');
+      // Сброс формы
+      setForm({ 
+        name: '', 
+        avatarUrl: 'https://picsum.photos/seed/new_char/80/80', 
+        gender: 'Мужской', 
+        race: 'Раса',
+        level: 1,
+        class: '',
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        str: 10,
+        dex: 10,
+        con: 10,
+        int: 10,
+        wis: 10,
+        cha: 10,
+      });
+      await load();
+    } catch (e) {
+      console.error('Failed to create character:', e);
+      alert('Ошибка создания персонажа');
+    } finally {
+      setSaving(null);
+    }
   };
-  const onDelete = async (id: string) => { await fetch(`${API}/characters/${id}`, { method: 'DELETE' }); await load(); };
+  
+  const onDelete = async (id: string, name: string) => {
+    if (!confirm(`Удалить персонажа "${name}"?`)) return;
+    try {
+      const res = await fetch(`${API}/characters/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete');
+      await load();
+    } catch (e) {
+      console.error('Failed to delete character:', e);
+      alert('Ошибка удаления персонажа');
+    }
+  };
+  
+  const onUpdateStat = async (id: string, field: string, value: any) => {
+    setSaving(id);
+    try {
+      const res = await fetch(`${API}/characters/${id}`, { 
+        method: 'PATCH', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ [field]: value }) 
+      });
+      if (!res.ok) throw new Error('Failed to update');
+      await load();
+    } catch (e) {
+      console.error('Failed to update character:', e);
+      alert('Ошибка обновления персонажа');
+    } finally {
+      setSaving(null);
+    }
+  };
+  
+  const onUpdateStats = async (id: string, stats: Partial<Character>) => {
+    setSaving(id);
+    try {
+      // Валидация
+      const validated: any = {};
+      if (stats.level !== undefined) validated.level = Math.max(1, Math.min(20, Number(stats.level) || 1));
+      if (stats.hp !== undefined) validated.hp = Math.max(1, Number(stats.hp) || 10);
+      if (stats.maxHp !== undefined) validated.maxHp = Math.max(1, Number(stats.maxHp) || 10);
+      if (stats.ac !== undefined) validated.ac = Math.max(0, Number(stats.ac) || 10);
+      ['str', 'dex', 'con', 'int', 'wis', 'cha'].forEach(stat => {
+        if (stats[stat as keyof Character] !== undefined) {
+          validated[stat] = Math.max(1, Math.min(30, Number(stats[stat as keyof Character]) || 10));
+        }
+      });
+      if (stats.class !== undefined) validated.class = stats.class || null;
+      
+      const res = await fetch(`${API}/characters/${id}`, { 
+        method: 'PATCH', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify(validated) 
+      });
+      if (!res.ok) throw new Error('Failed to update');
+      setEditingStats({});
+      await load();
+    } catch (e) {
+      console.error('Failed to update character:', e);
+      alert('Ошибка обновления персонажа');
+    } finally {
+      setSaving(null);
+    }
+  };
+  
+  const filteredList = list.filter(c => {
+    const matchesSearch = !search || 
+      c.name.toLowerCase().includes(search.toLowerCase()) ||
+      c.race?.toLowerCase().includes(search.toLowerCase()) ||
+      c.class?.toLowerCase().includes(search.toLowerCase());
+    const matchesFilter = filterPlayable === 'all' || 
+      (filterPlayable === 'playable' && c.isPlayable) ||
+      (filterPlayable === 'npc' && !c.isPlayable);
+    return matchesSearch && matchesFilter;
+  });
+  
+  const playableCount = list.filter(c => c.isPlayable).length;
+  const npcCount = list.filter(c => !c.isPlayable).length;
 
   return (
     <div style={{ padding: 16, display: 'grid', gap: 16 }}>
@@ -1393,7 +1515,40 @@ const CharactersPage: React.FC = () => {
         <Link to="/admin/characters">Персонажи</Link>
         <Link to="/admin/feedback">Отзывы</Link>
       </div>
-      <h2>Персонажи</h2>
+      <h2>Персонажи ({list.length})</h2>
+      
+      {/* Фильтры и поиск */}
+      <div className="card" style={{ padding: 12 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input 
+            placeholder="Поиск по имени, расе, классу..." 
+            value={search} 
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ flex: 1, minWidth: 200 }}
+          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button 
+              onClick={() => setFilterPlayable('all')}
+              style={{ backgroundColor: filterPlayable === 'all' ? '#007bff' : '#f0f0f0', color: filterPlayable === 'all' ? 'white' : 'black' }}
+            >
+              Все ({list.length})
+            </button>
+            <button 
+              onClick={() => setFilterPlayable('playable')}
+              style={{ backgroundColor: filterPlayable === 'playable' ? '#007bff' : '#f0f0f0', color: filterPlayable === 'playable' ? 'white' : 'black' }}
+            >
+              Игровые ({playableCount})
+            </button>
+            <button 
+              onClick={() => setFilterPlayable('npc')}
+              style={{ backgroundColor: filterPlayable === 'npc' ? '#007bff' : '#f0f0f0', color: filterPlayable === 'npc' ? 'white' : 'black' }}
+            >
+              NPC ({npcCount})
+            </button>
+          </div>
+        </div>
+      </div>
+      
       <div className="card" style={{ padding: 12 }}>
         <h3>Создать персонажа</h3>
         <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(3, 1fr)' }}>
@@ -1456,73 +1611,272 @@ const CharactersPage: React.FC = () => {
             </div>
           </div>
         </div>
-        <div style={{ marginTop: 8 }}><button onClick={onCreate}>Создать</button></div>
+        <div style={{ marginTop: 8 }}>
+          <button onClick={onCreate} disabled={saving === 'create'}>
+            {saving === 'create' ? 'Создание...' : 'Создать'}
+          </button>
+        </div>
       </div>
       <div className="card" style={{ padding: 12 }}>
-        <h3>Список персонажей</h3>
-        {loading ? 'Загрузка...' : (
+        <h3>Список персонажей {filteredList.length !== list.length ? `(${filteredList.length} из ${list.length})` : ''}</h3>
+        {loading ? 'Загрузка...' : filteredList.length === 0 ? (
+          <div style={{ padding: 20, textAlign: 'center', color: '#666' }}>
+            {search || filterPlayable !== 'all' ? 'Персонажи не найдены' : 'Нет персонажей'}
+          </div>
+        ) : (
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-            {list.map((c) => (
-              <li key={c.id} className="card" style={{ padding: 12, display: 'grid', gap: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <img src={c.avatarUrl} alt="a" width={48} height={48} style={{ borderRadius: 24 }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 'bold' }}>{c.name}</div>
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {c.race} • {c.gender} {c.isPlayable ? '• Игровой' : '• NPC'}
-                      {c.class ? ` • ${c.class} (Ур.${c.level || 1})` : ''}
+            {filteredList.map((c) => {
+              const editing = editingStats[c.id] || {};
+              const isSaving = saving === c.id;
+              const modStr = getDndModifier(c.str || 10);
+              const modDex = getDndModifier(c.dex || 10);
+              const modCon = getDndModifier(c.con || 10);
+              const modInt = getDndModifier(c.int || 10);
+              const modWis = getDndModifier(c.wis || 10);
+              const modCha = getDndModifier(c.cha || 10);
+              
+              return (
+                <li key={c.id} className="card" style={{ padding: 12, display: 'grid', gap: 8, opacity: isSaving ? 0.6 : 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <img src={c.avatarUrl} alt="a" width={48} height={48} style={{ borderRadius: 24, objectFit: 'cover' }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <input 
+                          defaultValue={c.name} 
+                          onBlur={(e) => onUpdateStat(c.id, 'name', e.target.value)}
+                          style={{ fontWeight: 'bold', border: 'none', borderBottom: '1px solid #ddd', padding: '2px 4px', fontSize: 16 }}
+                        />
+                        {c.isPlayable && <span style={{ fontSize: 11, backgroundColor: '#28a745', color: 'white', padding: '2px 6px', borderRadius: 4 }}>ИГРОВОЙ</span>}
+                        {!c.isPlayable && <span style={{ fontSize: 11, backgroundColor: '#6c757d', color: 'white', padding: '2px 6px', borderRadius: 4 }}>NPC</span>}
+                      </div>
+                      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                        <input 
+                          defaultValue={c.race || ''} 
+                          onBlur={(e) => onUpdateStat(c.id, 'race', e.target.value || null)}
+                          placeholder="Раса"
+                          style={{ border: 'none', borderBottom: '1px dashed #ccc', padding: '1px 2px', fontSize: 12, width: 80 }}
+                        />
+                        {' • '}
+                        <input 
+                          defaultValue={c.gender || ''} 
+                          onBlur={(e) => onUpdateStat(c.id, 'gender', e.target.value || null)}
+                          placeholder="Гендер"
+                          style={{ border: 'none', borderBottom: '1px dashed #ccc', padding: '1px 2px', fontSize: 12, width: 80 }}
+                        />
+                        {c.class && ` • ${c.class} (Ур.${c.level || 1})`}
+                        {c.gameId && ` • Игра: ${c.gameId.slice(0, 8)}...`}
+                      </div>
+                    </div>
+                    {isSaving && <span style={{ fontSize: 12, color: '#666' }}>Сохранение...</span>}
+                    <button onClick={() => onDelete(c.id, c.name)} className="header-btn danger" disabled={isSaving}>Удалить</button>
+                  </div>
+                  
+                  {/* Статы с модификаторами */}
+                  <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)', padding: 8, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>HP / Max HP</label>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                      <input 
+                        type="number" 
+                        defaultValue={c.hp ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, hp: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.hp ?? 10)) onUpdateStat(c.id, 'hp', val);
+                        }}
+                        style={{ width: '50%' }} 
+                        min={1}
+                      />
+                      <input 
+                        type="number" 
+                        defaultValue={c.maxHp ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, maxHp: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.maxHp ?? 10)) onUpdateStat(c.id, 'maxHp', val);
+                        }}
+                        style={{ width: '50%' }} 
+                        min={1}
+                      />
+                      </div>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>AC</label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.ac ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, ac: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.ac ?? 10)) onUpdateStat(c.id, 'ac', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={0}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>STR <span style={{ color: '#666' }}>({modStr >= 0 ? '+' : ''}{modStr})</span></label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.str ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, str: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.str ?? 10)) onUpdateStat(c.id, 'str', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={30}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>DEX <span style={{ color: '#666' }}>({modDex >= 0 ? '+' : ''}{modDex})</span></label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.dex ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, dex: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.dex ?? 10)) onUpdateStat(c.id, 'dex', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={30}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CON <span style={{ color: '#666' }}>({modCon >= 0 ? '+' : ''}{modCon})</span></label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.con ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, con: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.con ?? 10)) onUpdateStat(c.id, 'con', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={30}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>INT <span style={{ color: '#666' }}>({modInt >= 0 ? '+' : ''}{modInt})</span></label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.int ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, int: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.int ?? 10)) onUpdateStat(c.id, 'int', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={30}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>WIS <span style={{ color: '#666' }}>({modWis >= 0 ? '+' : ''}{modWis})</span></label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.wis ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, wis: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.wis ?? 10)) onUpdateStat(c.id, 'wis', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={30}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CHA <span style={{ color: '#666' }}>({modCha >= 0 ? '+' : ''}{modCha})</span></label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.cha ?? 10} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, cha: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.cha ?? 10)) onUpdateStat(c.id, 'cha', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={30}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Уровень</label>
+                      <input 
+                        type="number" 
+                        defaultValue={c.level ?? 1} 
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, level: val } });
+                        }}
+                        onBlur={(e) => {
+                          const val = Number(e.target.value);
+                          if (val !== (c.level ?? 1)) onUpdateStat(c.id, 'level', val);
+                        }}
+                        style={{ width: '100%' }} 
+                        min={1}
+                        max={20}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Класс</label>
+                      <input 
+                        defaultValue={c.class ?? ''} 
+                        onChange={(e) => {
+                          setEditingStats({ ...editingStats, [c.id]: { ...editing, class: e.target.value } });
+                        }}
+                        onBlur={(e) => {
+                          const val = e.target.value;
+                          if (val !== (c.class || '')) onUpdateStat(c.id, 'class', val || null);
+                        }}
+                        style={{ width: '100%' }} 
+                        placeholder="Воин, Маг..."
+                      />
+                    </div>
+                    <div style={{ gridColumn: 'span 4' }}>
+                      <button 
+                        onClick={() => onUpdateStats(c.id, editing)}
+                        disabled={Object.keys(editing).length === 0 || isSaving}
+                        style={{ width: '100%', padding: '6px', fontSize: 12 }}
+                      >
+                        {isSaving ? 'Сохранение...' : 'Сохранить все изменения'}
+                      </button>
                     </div>
                   </div>
-                  <button onClick={() => onDelete(c.id)} className="header-btn danger">Удалить</button>
-                </div>
-                <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(6, 1fr)', padding: 8, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>HP</label>
-                    <input type="number" defaultValue={c.hp || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hp: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Max HP</label>
-                    <input type="number" defaultValue={c.maxHp || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxHp: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>AC</label>
-                    <input type="number" defaultValue={c.ac || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ac: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>STR</label>
-                    <input type="number" defaultValue={c.str || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ str: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>DEX</label>
-                    <input type="number" defaultValue={c.dex || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dex: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CON</label>
-                    <input type="number" defaultValue={c.con || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ con: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>INT</label>
-                    <input type="number" defaultValue={c.int || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ int: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>WIS</label>
-                    <input type="number" defaultValue={c.wis || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wis: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>CHA</label>
-                    <input type="number" defaultValue={c.cha || 10} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cha: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Уровень</label>
-                    <input type="number" defaultValue={c.level || 1} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ level: Number(e.target.value) }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>Класс</label>
-                    <input defaultValue={c.class || ''} onBlur={(e) => fetch(`${API}/characters/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ class: e.target.value || null }) }).then(() => load())} style={{ width: '100%' }} />
-                  </div>
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
