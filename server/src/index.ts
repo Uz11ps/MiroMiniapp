@@ -4414,12 +4414,80 @@ app.post('/api/chat/reply', async (req, res) => {
           
           // Парсим состояния (отравление, паралич и т.д.)
           // Формат: "Персонаж отравлен", "Применяется эффект: Паралич"
-          const conditionRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*(?:получает|подвергается|подвержен|подвержена)\s*(?:эффекту|состоянию)?:?\s*)?(отравлен|парализован|оглушен|ослеплен|очарован|испуган|невидим|невидима|болезнь|болезни|усталость|усталости|истощение|истощения)/gi;
+          // ВАЖНО: НЕ применяем состояния из описаний окружения (например, "отравленный воздух", "парализующий газ")
+          
+          // Функция проверки, является ли это описанием окружения/предмета, а не состоянием персонажа
+          const isEnvironmentDescription = (condition: string, beforeMatch: string, fullMatch: string, afterMatch: string, charName: string | null): boolean => {
+            const conditionLower = condition.toLowerCase();
+            
+            // Слова, которые могут указывать на описание окружения/предмета
+            const environmentKeywords = [
+              'воздух', 'вода', 'газ', 'туман', 'облако', 'облака', 'вещество', 'вещества',
+              'среда', 'среды', 'атмосфера', 'атмосферы', 'окружение', 'окружения',
+              'область', 'области', 'зона', 'зоны', 'место', 'места', 'помещение', 'помещения',
+              'комната', 'комнаты', 'зал', 'залы', 'коридор', 'коридоры', 'туннель', 'туннели',
+              'пещера', 'пещеры', 'подземелье', 'подземелья', 'оружие', 'оружия', 'стрела', 'стрелы',
+              'клинок', 'клинки', 'лезвие', 'лезвия', 'яд', 'яды', 'токсин', 'токсины', 'магия',
+              'заклинание', 'заклинания', 'эффект', 'эффекты', 'поле', 'поля', 'барьер', 'барьеры',
+              'ловушка', 'ловушки', 'проклятие', 'проклятия', 'аура', 'ауры'
+            ];
+            
+            // Паттерны для прилагательных (отравленный, парализующий, оглушающий и т.д.)
+            const adjectivePatterns: Record<string, string[]> = {
+              'отравлен': ['отравленн(?:ый|ая|ое|ые)', 'отравляющ(?:ий|ая|ее|ие)'],
+              'парализован': ['парализованн(?:ый|ая|ое|ые)', 'парализующ(?:ий|ая|ее|ие)'],
+              'оглушен': ['оглушенн(?:ый|ая|ое|ые)', 'оглушающ(?:ий|ая|ее|ие)'],
+              'ослеплен': ['ослепленн(?:ый|ая|ое|ые)', 'ослепляющ(?:ий|ая|ее|ие)'],
+              'очарован': ['очарованн(?:ый|ая|ое|ые)', 'очаровывающ(?:ий|ая|ее|ие)'],
+              'испуган': ['испуганн(?:ый|ая|ое|ые)', 'пугающ(?:ий|ая|ее|ие)'],
+              'невидим': ['невидим(?:ый|ая|ое|ые)', 'невидимо'],
+              'болезнь': ['болезненн(?:ый|ая|ое|ые)', 'заболевш(?:ий|ая|ее|ие)'],
+              'усталость': ['устал(?:ый|ая|ое|ые)', 'утомленн(?:ый|ая|ое|ые)'],
+              'истощение': ['истощенн(?:ый|ая|ое|ые)', 'истощающ(?:ий|ая|ее|ие)']
+            };
+            
+            const patterns = adjectivePatterns[conditionLower] || [];
+            const context = (beforeMatch + fullMatch + afterMatch).toLowerCase();
+            
+            // Проверяем, есть ли прилагательное + слово окружения
+            for (const pattern of patterns) {
+              for (const keyword of environmentKeywords) {
+                const regex = new RegExp(`${pattern}\\s+${keyword}`, 'i');
+                if (regex.test(context)) {
+                  return true;
+                }
+              }
+            }
+            
+            // Проверяем, что после условия идет слово окружения (например, "отравлен воздух")
+            for (const keyword of environmentKeywords) {
+              const regex = new RegExp(`${conditionLower}\\s+${keyword}`, 'i');
+              if (regex.test(context)) {
+                return true;
+              }
+            }
+            
+            return false;
+          };
+          
+          const conditionRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*(?:получает|подвергается|подвержен|подвержена|становится|становятся|получил|получила|получили)\s*(?:эффекту|состоянию)?:?\s*)?(отравлен|парализован|оглушен|ослеплен|очарован|испуган|невидим|невидима|болезнь|болезни|усталость|усталости|истощение|истощения)/gi;
           const conditionMatches = text.matchAll(conditionRegex);
           
           for (const condMatch of conditionMatches) {
-            const charName = condMatch[1]?.trim();
+            const charName = condMatch[1]?.trim() || null;
             const condition = condMatch[2]?.toLowerCase();
+            const fullMatch = condMatch[0];
+            const matchIndex = condMatch.index || 0;
+            
+            // Проверяем контекст - если это описание окружения, пропускаем
+            const beforeMatch = text.substring(Math.max(0, matchIndex - 50), matchIndex).toLowerCase();
+            const afterMatch = text.substring(matchIndex + fullMatch.length, Math.min(text.length, matchIndex + fullMatch.length + 30)).toLowerCase();
+            
+            // Проверяем, является ли это описанием окружения/предмета
+            if (isEnvironmentDescription(condition, beforeMatch, fullMatch, afterMatch, charName) && !charName) {
+              console.log(`[CONDITIONS] Skipping condition "${condition}" - appears to be environment/object description, not character condition`);
+              continue;
+            }
             
             if (condition) {
               const chars = charName ? 
@@ -4427,6 +4495,17 @@ app.post('/api/chat/reply', async (req, res) => {
                   p.name.toLowerCase().includes(charName.toLowerCase()) || 
                   charName.toLowerCase().includes(p.name.toLowerCase())
                 ) : playable;
+              
+              // Если нет имени персонажа, применяем только если есть явные глаголы применения состояния
+              const hasActionVerb = /(?:получает|подвергается|подвержен|подвержена|становится|становятся|получил|получила|получили)/i.test(beforeMatch);
+              
+              // Также проверяем, что это не просто упоминание в описании (например, "в комнате отравленный воздух")
+              const isJustMention = !charName && !hasActionVerb && !/(?:персонаж|игрок|герой|член|участник|член группы)/i.test(beforeMatch);
+              
+              if (isJustMention) {
+                console.log(`[CONDITIONS] Skipping condition "${condition}" - appears to be just a mention in description, not application to character`);
+                continue;
+              }
               
               for (const char of chars) {
                 const charState = state.characters[char.id] || {};
@@ -5687,26 +5766,25 @@ ${characterInfo.length > 0 ? `Характеристики персонажа:\n
 - Создавай живую, естественную речь, которая передает ВЕСЬ смысл текста
 - Не делай роботизированным - каждый элемент должен иметь смысл`;
 
-    const userPrompt = `Проанализируй СЕМАНТИЧЕСКИЙ СМЫСЛ следующего текста и создай SSML разметку с полным пониманием:
+    const userPrompt = `Создай SSML разметку для текста с естественной интонацией:
 
 "${text}"
 
-ВАЖНО - сделай это БЫСТРО и ЭФФЕКТИВНО:
-1. Пойми главную мысль и подтекст текста
-2. Определи эмоциональную окраску каждого фрагмента
-3. Выдели ключевые слова и фразы через <emphasis>
-4. Создай естественные паузы в зависимости от смысла через <break>
-5. Используй интонации для передачи всего смысла через <prosody>
+БЫСТРО создай SSML с:
+- Естественными паузами (<break time="50-200ms"/>)
+- Акцентами на ключевых словах (<emphasis level="moderate">)
+- Интонациями для вопросов/восклицаний (<prosody pitch="+2st">)
+- Ритмом в зависимости от смысла
 
-Верни ТОЛЬКО SSML разметку (без объяснений, только SSML).`;
+Верни ТОЛЬКО SSML (без объяснений).`;
 
     console.log('[TTS-SSML] Generating SSML with Gemini for text length:', text.length);
     const startTime = Date.now();
     
     try {
-      // Динамический таймаут в зависимости от длины текста (минимум 10 секунд, максимум 30 секунд)
-      // Для длинных текстов даем больше времени
-      const timeoutMs = Math.min(30000, Math.max(10000, text.length * 20));
+      // Динамический таймаут в зависимости от длины текста (минимум 20 секунд, максимум 60 секунд)
+      // Для длинных текстов даем больше времени, но не слишком много
+      const timeoutMs = Math.min(60000, Math.max(20000, text.length * 50));
       console.log('[TTS-SSML] Using timeout:', timeoutMs, 'ms for text length:', text.length);
       
       const ssmlPromise = generateChatCompletion({
@@ -6486,34 +6564,53 @@ app.post('/api/tts', async (req, res) => {
             
             // Если Gemini не сгенерировал SSML, используем улучшенный стандартный SSML с естественными интонациями
             if (!ssmlText) {
+              console.log('[TTS-SSML] Using enhanced fallback SSML for natural intonation');
               const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
               const rateStr = finalSpeed.toFixed(2);
               
               // Создаем более естественный SSML с вариациями интонации
-              // Выделяем важные слова (заглавные буквы, восклицания, вопросы)
               let enhancedText = escapedText;
               
-              // Выделяем восклицания и вопросы для более выразительной интонации
-              enhancedText = enhancedText.replace(/([А-ЯЁA-Z][а-яёa-z]+(?:\s+[а-яёa-z]+)*[!?])/g, '<emphasis level="moderate">$1</emphasis>');
+              // Выделяем вопросы с восходящей интонацией
+              enhancedText = enhancedText.replace(/([^.!?]*\?)/g, (match) => {
+                return `<prosody pitch="+2st">${match}</prosody>`;
+              });
               
-              // Добавляем естественные паузы
+              // Выделяем восклицания с акцентом
+              enhancedText = enhancedText.replace(/([^.!?]*!)/g, (match) => {
+                return `<emphasis level="moderate">${match}</emphasis>`;
+              });
+              
+              // Выделяем ключевые слова (имена собственные, важные термины)
+              enhancedText = enhancedText.replace(/([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)*)/g, (match) => {
+                // Если это не вопрос и не восклицание, выделяем как важное слово
+                if (!match.includes('?') && !match.includes('!') && match.length > 3) {
+                  return `<emphasis level="moderate">${match}</emphasis>`;
+                }
+                return match;
+              });
+              
+              // Добавляем естественные паузы с вариациями
               const textWithPauses = finalIsNarrator 
                 ? enhancedText
-                    .replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
-                    .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
-                    .replace(/(\s+—\s+)/g, '<break time="150ms"/>') // Тире - более длинная пауза
+                    .replace(/([.!?])\s+/g, '$1<break time="100ms"/>')
+                    .replace(/([,;:])\s+/g, '$1<break time="60ms"/>')
+                    .replace(/(\s+—\s+)/g, '<break time="200ms"/>')
+                    .replace(/(\s+и\s+)/g, '<break time="30ms"/>и<break time="30ms"/>')
                 : enhancedText
-                    .replace(/([.!?])\s+/g, '$1<break time="120ms"/>')
-                    .replace(/([,;:])\s+/g, '$1<break time="50ms"/>')
-                    .replace(/(\s+—\s+)/g, '<break time="200ms"/>');
+                    .replace(/([.!?])\s+/g, '$1<break time="150ms"/>')
+                    .replace(/([,;:])\s+/g, '$1<break time="80ms"/>')
+                    .replace(/(\s+—\s+)/g, '<break time="250ms"/>')
+                    .replace(/(\s+и\s+)/g, '<break time="40ms"/>и<break time="40ms"/>');
               
-              // Добавляем небольшие вариации pitch для естественности (особенно для вопросов)
+              // Добавляем вариации pitch для естественности
               const hasQuestion = text.includes('?');
               const hasExclamation = text.includes('!');
-              const dynamicPitch = hasQuestion ? `+${(finalPitch + 0.5).toFixed(1)}` : 
-                               hasExclamation ? `+${(finalPitch + 0.3).toFixed(1)}` : pitchStr;
+              const basePitchValue = parseFloat(pitchStr);
+              const dynamicPitch = hasQuestion ? `+${(basePitchValue + 1.0).toFixed(1)}` : 
+                               hasExclamation ? `+${(basePitchValue + 0.5).toFixed(1)}` : pitchStr;
               
-              ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
+              ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+2dB">${textWithPauses}</prosody></speak>`;
             }
             
             // Для рассказчика используем женский мягкий голос
@@ -6593,33 +6690,53 @@ app.post('/api/tts', async (req, res) => {
           
           // Если Gemini не сгенерировал SSML, используем улучшенный стандартный SSML с естественными интонациями
           if (!ssmlText) {
+            console.log('[TTS-SSML] Using enhanced fallback SSML for natural intonation');
             const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
             const rateStr = finalSpeed.toFixed(2);
             
             // Создаем более естественный SSML с вариациями интонации
             let enhancedText = escapedText;
             
-            // Выделяем восклицания и вопросы для более выразительной интонации
-            enhancedText = enhancedText.replace(/([А-ЯЁA-Z][а-яёa-z]+(?:\s+[а-яёa-z]+)*[!?])/g, '<emphasis level="moderate">$1</emphasis>');
+            // Выделяем вопросы с восходящей интонацией
+            enhancedText = enhancedText.replace(/([^.!?]*\?)/g, (match) => {
+              return `<prosody pitch="+2st">${match}</prosody>`;
+            });
             
-            // Добавляем естественные паузы
+            // Выделяем восклицания с акцентом
+            enhancedText = enhancedText.replace(/([^.!?]*!)/g, (match) => {
+              return `<emphasis level="moderate">${match}</emphasis>`;
+            });
+            
+            // Выделяем ключевые слова (имена собственные, важные термины)
+            enhancedText = enhancedText.replace(/([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)*)/g, (match) => {
+              // Если это не вопрос и не восклицание, выделяем как важное слово
+              if (!match.includes('?') && !match.includes('!') && match.length > 3) {
+                return `<emphasis level="moderate">${match}</emphasis>`;
+              }
+              return match;
+            });
+            
+            // Добавляем естественные паузы с вариациями
             const textWithPauses = finalIsNarrator 
               ? enhancedText
-                  .replace(/([.!?])\s+/g, '$1<break time="80ms"/>')
-                  .replace(/([,;:])\s+/g, '$1<break time="40ms"/>')
-                  .replace(/(\s+—\s+)/g, '<break time="150ms"/>') // Тире - более длинная пауза
+                  .replace(/([.!?])\s+/g, '$1<break time="100ms"/>')
+                  .replace(/([,;:])\s+/g, '$1<break time="60ms"/>')
+                  .replace(/(\s+—\s+)/g, '<break time="200ms"/>')
+                  .replace(/(\s+и\s+)/g, '<break time="30ms"/>и<break time="30ms"/>')
               : enhancedText
-                  .replace(/([.!?])\s+/g, '$1<break time="120ms"/>')
-                  .replace(/([,;:])\s+/g, '$1<break time="50ms"/>')
-                  .replace(/(\s+—\s+)/g, '<break time="200ms"/>');
+                  .replace(/([.!?])\s+/g, '$1<break time="150ms"/>')
+                  .replace(/([,;:])\s+/g, '$1<break time="80ms"/>')
+                  .replace(/(\s+—\s+)/g, '<break time="250ms"/>')
+                  .replace(/(\s+и\s+)/g, '<break time="40ms"/>и<break time="40ms"/>');
             
-            // Добавляем небольшие вариации pitch для естественности (особенно для вопросов)
+            // Добавляем вариации pitch для естественности
             const hasQuestion = text.includes('?');
             const hasExclamation = text.includes('!');
-            const dynamicPitch = hasQuestion ? `+${(finalPitch + 0.5).toFixed(1)}` : 
-                             hasExclamation ? `+${(finalPitch + 0.3).toFixed(1)}` : pitchStr;
+            const basePitchValue = parseFloat(pitchStr);
+            const dynamicPitch = hasQuestion ? `+${(basePitchValue + 1.0).toFixed(1)}` : 
+                             hasExclamation ? `+${(basePitchValue + 0.5).toFixed(1)}` : pitchStr;
             
-            ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+1dB">${textWithPauses}</prosody></speak>`;
+            ssmlText = `<speak><prosody rate="${rateStr}" pitch="${dynamicPitch}st" volume="+2dB">${textWithPauses}</prosody></speak>`;
           }
           
           // Для рассказчика используем женский мягкий голос

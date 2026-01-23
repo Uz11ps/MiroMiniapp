@@ -300,9 +300,15 @@ const GameChat: React.FC = () => {
       } catch {}
       
       // Проверяем, есть ли в тексте явные реплики персонажей перед разбиением на сегменты
-      const hasQuotes = t.includes('"') || t.includes('«') || t.includes('»') || t.includes('„') || t.includes('"');
+      // Нужны ОБА условия: кавычки ИЛИ имя с двоеточием/кавычками в начале
+      const hasQuotes = (t.includes('"') || t.includes('«') || t.includes('»') || t.includes('„')) && 
+                         (t.match(/["«»„]/g) || []).length >= 2; // Минимум 2 кавычки (открывающая и закрывающая)
       const hasNamePattern = /^([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)[:"]/.test(t);
-      const hasCharacterSpeech = hasQuotes || hasNamePattern;
+      // Также проверяем наличие реплик внутри текста (имя: "реплика")
+      const hasInternalSpeech = /[А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?[:]\s*["«]/.test(t);
+      const hasCharacterSpeech = (hasQuotes && (hasNamePattern || hasInternalSpeech)) || hasNamePattern;
+      
+      console.log('[TTS-CLIENT] Character speech detection:', { hasQuotes, hasNamePattern, hasInternalSpeech, hasCharacterSpeech, textLength: t.length });
       
       // Анализируем текст и разбиваем на сегменты ТОЛЬКО если есть явные признаки реплик
       if (hasCharacterSpeech) {
