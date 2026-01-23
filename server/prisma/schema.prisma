@@ -20,8 +20,10 @@ model Game {
   gallery     String[]
   editions    Edition[]
   // Сценарий: дополнительные поля
-  worldRules       String?    // правила мира
-  gameplayRules    String?    // правила игрового процесса
+  worldRules       String?    // правила мира (краткая версия для UI, до 500 символов)
+  gameplayRules    String?    // правила игрового процесса (краткая версия для UI, до 500 символов)
+  worldRulesFull   String?    @db.Text // полные правила мира для ИИ (не отображаются в UI)
+  gameplayRulesFull String?   @db.Text // полные правила игрового процесса для ИИ (не отображаются в UI)
   introduction     String?    // введение
   backstory        String?    // предыстория
   adventureHooks   String?    // зацепки приключения

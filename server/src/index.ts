@@ -1040,14 +1040,28 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
         });
       };
       const sections = extractSections();
-      const worldRules = pickBlock(/Правила мира/i) || pickBlock(/Особенности местности/i) || '—';
-      const gameplayRules = pickBlock(/Правила игрового процесса/i) || pickBlock(/Дальнейшие события/i) || '—';
+      const worldRules = ((pickBlock(/Правила мира/i) || pickBlock(/Особенности местности/i) || '—').trim()).slice(0, 500);
+      const gameplayRules = ((pickBlock(/Правила игрового процесса/i) || pickBlock(/Дальнейшие события/i) || '—').trim()).slice(0, 500);
       const locations = sections.length ? sections.map((s, i) => ({ key: `loc${i + 1}`, order: i + 1, title: s.title, description: s.body, backgroundUrl: null, musicUrl: null })) :
         [{ key: 'start', order: 1, title: 'Стартовая локация', description: srcText.split('\n').slice(0, 8).join('\n'), backgroundUrl: null, musicUrl: null }];
       const exits = locations.length > 1 ? locations.slice(0, -1).map((_, i) => ({ fromKey: `loc${i + 1}`, type: 'BUTTON', buttonText: 'Дальше', triggerText: null, toKey: `loc${i + 2}`, isGameOver: false })) : [];
       const characters = parseCharacterCards(srcText);
       return {
-        game: { title: fixLatin1(req.file.originalname.replace(/\.pdf$/i, '')), description: 'Импортировано из PDF', author: 'GM', worldRules, gameplayRules, introduction, backstory, adventureHooks, winCondition, loseCondition, deathCondition },
+        game: { 
+          title: fixLatin1(req.file.originalname.replace(/\.pdf$/i, '')), 
+          description: 'Импортировано из PDF', 
+          author: 'GM', 
+          worldRules, 
+          gameplayRules, 
+          worldRulesFull: worldRules, // Сохраняем полные правила для ИИ
+          gameplayRulesFull: gameplayRules, // Сохраняем полные правила для ИИ
+          introduction, 
+          backstory, 
+          adventureHooks, 
+          winCondition, 
+          loseCondition, 
+          deathCondition 
+        },
         locations, exits, characters,
       };
     };
@@ -1056,12 +1070,12 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
     } else {
       if (!scenario.game) scenario.game = {};
       if (!scenario.game.worldRules) scenario.game.worldRules = ((): string | null => {
-        const blk = (text.match(/Правила мира[\s\S]{0,2000}/i)?.[0] || '').trim();
-        return blk ? blk.slice(0, 1800) : null;
+        const blk = (text.match(/Правила мира[\s\S]{0,1000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 500) : null;
       })();
       if (!scenario.game.gameplayRules) scenario.game.gameplayRules = ((): string | null => {
-        const blk = (text.match(/Правила игрового процесса[\s\S]{0,2000}/i)?.[0] || '').trim();
-        return blk ? blk.slice(0, 1800) : null;
+        const blk = (text.match(/Правила игрового процесса[\s\S]{0,1000}/i)?.[0] || '').trim();
+        return blk ? blk.slice(0, 500) : null;
       })();
       if (!scenario.game.winCondition) scenario.game.winCondition = ((): string | null => {
         const patterns = [
@@ -1275,7 +1289,7 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
 
 ВАЖНО: Это часть ${chunkIdx + 1} из ${rulesChunks.length} файла правил. Извлекай информацию из этой части.`;
 
-              const rulesShape = '{ "worldRules": "...", "gameplayRules": "..." }';
+              const rulesShape = '{ "worldRules": "...", "gameplayRules": "...", "worldRulesFull": "...", "gameplayRulesFull": "..." }';
               const chunk = rulesChunks[chunkIdx];
               
               const rulesPrompt = `Проанализируй ЧАСТЬ ${chunkIdx + 1} из ${rulesChunks.length} файла ПРАВИЛ ИГРЫ для настольной ролевой игры D&D 5e:
@@ -1287,79 +1301,65 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
 ${chunk}
 ---
 
-КРИТИЧЕСКИ ВАЖНО: ИСКЛЮЧИ из извлечения всю мета-информацию:
+⚠️ КРИТИЧЕСКИ ВАЖНО: ИЗВЛЕКАЙ ТОЛЬКО ПРАВИЛА ДЛЯ КОНКРЕТНОГО ПРИКЛЮЧЕНИЯ!
+
+ИСКЛЮЧИ из извлечения:
 - Авторские права, торговые марки, логотипы
 - Предупреждения (например, "Предупреждение: Корпорация Wizards of the Coast...")
 - Информацию "НА ОБЛОЖКЕ", "на обложке изображён..."
 - Информацию о художниках, иллюстраторах
 - Техническую информацию о документе
+- ОБЩИЕ описания мультивселенной D&D, планов существования, космологии (если они не относятся к конкретному приключению)
+- ОБЩИЕ описания богов, пантеонов (если они не относятся к конкретному приключению)
+- ОБЩИЕ правила создания персонажей, классов, рас
+- ОБЩИЕ описания магических предметов, артефактов (если они не упоминаются в приключении)
+- ОБЩИЕ описания форм правления, валют, календарей (если они не относятся к конкретному приключению)
 
-ИЗВЛЕКИ из ЭТОЙ ЧАСТИ:
+ИЗВЛЕКИ из ЭТОЙ ЧАСТИ (МАКСИМУМ 500 СИМВОЛОВ для каждого поля!):
 
 1. ПРАВИЛА МИРА (worldRules):
-   КРИТИЧЕСКИ ВАЖНО: Это описание СЕТТИНГА - мира, атмосферы, где происходит игра.
+   ⚠️ КРИТИЧЕСКИ ВАЖНО: Это КРАТКОЕ описание СЕТТИНГА КОНКРЕТНОГО ПРИКЛЮЧЕНИЯ - где происходит действие, атмосфера.
    
-   ВКЛЮЧАЙ:
-   - Название мира, вселенной (например: "Действие происходит в мире Забвенных земель")
-   - Атмосферу, окружение (например: "Подземелье освещает красный каменный пол, из‑за чего везде висит красноватый туман")
-   - Описание того, что видят/слышат/ощущают персонажи (например: "Путешественники слышат тихие мантры культистов и ощущают запах крови")
-   - Описание миров, вселенных, мультивселенной D&D
-   - Боги, пантеоны, религии, божественные ранги
-   - Планы существования (Материальный, Астральный, Эфирный, Страна Фей, Царство Теней, Внутренние Планы, Внешние Планы)
-   - Космология (Великое Колесо, Мировое Древо, Ось Мира и т.д.)
-   - География, карты, масштабы, поселения (деревни, города, мегаполисы)
-   - Формы правления, иерархии, титулы
-   - Фракции и организации (Арфисты, Жентарим и т.д.)
-   - Валюты, торговля, экономика
-   - Календари (Календарь Харптоса и т.д.)
-   - Виды фэнтези (героическое, тёмное, эпичное и т.д.)
-   - Расы, культуры, языки, диалекты
-   - Магия в мире (как она работает в сеттинге, круги телепортации, воскрешение)
-   - Особенности мира (магия повсюду, чудовища редки, боги на земле и т.д.)
+   ВКЛЮЧАЙ ТОЛЬКО:
+   - Название мира/региона, где происходит ЭТО приключение (например: "Действие происходит в мире Забвенных земель, в городе Люмерия")
+   - Атмосферу, окружение ЭТОГО приключения (например: "Подземелье освещает красный каменный пол, из‑за чего везде висит красноватый туман")
+   - Описание того, что видят/слышат/ощущают персонажи В ЭТОМ приключении
+   - Конкретные боги, религии, упомянутые В ЭТОМ приключении (не общие описания пантеонов!)
+   - Конкретные фракции, организации В ЭТОМ приключении
+   - Конкретные особенности мира В ЭТОМ приключении
    
-   ПРИМЕР worldRules:
-   "Действие происходит в мире Забвенных земель. Подземелье освещает красный каменный пол, из‑за чего везде висит красноватый туман. Путешественники слышат тихие мантры культистов и ощущают запах крови."
+   ПРИМЕР worldRules (короткий!):
+   "Действие происходит в мире Забвенных земель, в городе Люмерия. Подземелье под храмом Мистры освещает красный каменный пол, из‑за чего везде висит красноватый туман. Культисты Ноктуса проводят ритуалы в подземелье."
    
    НЕ ВКЛЮЧАЙ:
-   - Мета-информацию (авторские права, предупреждения, "НА ОБЛОЖКЕ", "как использовать эту книгу", информация о художниках)
-   - Механики игры (броски кубиков, проверки, боевая система) - это gameplayRules
-   - Правила использования кубиков, проверок характеристик - это gameplayRules
-   - Уровни персонажей, классы, расы (механика создания) - это gameplayRules
-   - Разделы "ЧАСТЬ 2: СОЗДАТЕЛЬ ПРИКЛЮЧЕНИЙ", "ЧАСТЬ 3: СОЗДАТЕЛЬ ПРАВИЛ" - это gameplayRules
+   - Общие описания мультивселенной D&D, планов существования, космологии
+   - Общие описания всех богов, пантеонов D&D
+   - Общие описания форм правления, валют, календарей
+   - Мета-информацию
+   - Механики игры - это gameplayRules
 
 2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules):
-   КРИТИЧЕСКИ ВАЖНО: Это КОНКРЕТНЫЕ МЕХАНИКИ ИГРЫ - как играть, какие правила использовать.
+   ⚠️ КРИТИЧЕСКИ ВАЖНО: Это КРАТКОЕ описание КОНКРЕТНЫХ МЕХАНИК ДЛЯ ЭТОГО ПРИКЛЮЧЕНИЯ - как играть.
    
-   ВКЛЮЧАЙ:
-   - Уровни персонажей (например: "для персонажей 2–3 уровня")
+   ВКЛЮЧАЙ ТОЛЬКО:
+   - Уровни персонажей для ЭТОГО приключения (например: "для персонажей 2–3 уровня")
    - Редакция правил (например: "Используются правила D&D 5‑й редакции")
-   - Броски кубиков (например: "Все проверки выполняются d20")
-   - Конкретные проверки и их применения (например: "Восприятие (Мудрость) для поиска, Акробатика/Ловкость для уклонения от ловушек, Харизма (Убеждение) для переговоров")
+   - Конкретные проверки, упомянутые В ЭТОМ приключении (например: "Восприятие (Мудрость) Сл. 15 для поиска секретной двери, Ловкость (Акробатика) Сл. 10 для уклонения от ловушки")
+   - Конкретные механики В ЭТОМ приключении (ловушки, спасброски, боевые сцены)
    - Роль AI-ведущего (например: "AI‑ведущий описывает последствия успеха/провала")
-   - Механики игры (броски кубиков, проверки характеристик, спасброски)
-   - Боевая система, инициатива, действия в бою
-   - Система опыта, уровни персонажей
-   - Отдых (короткий, продолжительный)
-   - Опциональные правила (кость мастерства, очки героизма, новые характеристики, страх и ужас, лечение, варианты отдыха, огнестрельное оружие, варианты инициативы, опциональные действия, травмы, массивный урон, мораль)
-   - Создание чудовищ, заклинаний, магических предметов
-   - Создание новых опций персонажа
-   - Варианты правил (очки заклинаний)
-   - Случайные подземелья, списки чудовищ
-   - Погони, осадное оружие
-   - Болезни, яды, безумие
-   - Путешествия по планам (механики перемещения)
-   - Роль мастера (как быть мастером, судьёй, рассказчиком)
-   - Создание приключений, кампаний
    
-   ПРИМЕР gameplayRules:
-   "Используются правила D&D 5‑й редакции для персонажей 2–3 уровня. Все проверки выполняются d20: Восприятие (Мудрость) для поиска, Акробатика/Ловкость для уклонения от ловушек, Харизма (Убеждение) для переговоров и т. д. AI‑ведущий описывает последствия успеха/провала."
+   ПРИМЕР gameplayRules (короткий!):
+   "Используются правила D&D 5‑й редакции для персонажей 2–3 уровня. Все проверки выполняются d20. AI‑ведущий описывает последствия успеха/провала."
    
    НЕ ВКЛЮЧАЙ:
+   - Общие описания всех механик D&D 5e
+   - Общие правила создания персонажей, классов, рас
+   - Общие описания всех опциональных правил
+   - Общие описания создания приключений, кампаний
+   - Общие описания роли мастера
    - Описание миров, богов, планов (это worldRules)
-   - Географию, поселения, фракции (это worldRules)
-   - Атмосферу, окружение, что видят/слышат персонажи (это worldRules)
-   - Мета-информацию (авторские права, предупреждения, "НА ОБЛОЖКЕ", информация о художниках)
-   - Разделы "ЧАСТЬ 1: СОЗДАТЕЛЬ МИРОВ", "ГЛАВА 1: ВАШ СОБСТВЕННЫЙ МИР", "ГЛАВА 2: СОЗДАНИЕ МУЛЬТИВСЕЛЕННОЙ" - это worldRules
+   - Атмосферу, окружение (это worldRules)
+   - Мета-информацию
 
 ПРИМЕРЫ РАЗДЕЛЕНИЯ:
 - "Действие происходит в мире Забвенных земель. Подземелье освещает красный каменный пол..." → worldRules (описание сеттинга, атмосферы)
@@ -1375,7 +1375,13 @@ ${chunk}
 Верни только JSON без комментариев, строго формы:
 ${rulesShape}
 
-ВАЖНО: Извлекай полностью из этой части, не обрезай текст! Если раздел относится к обоим типам - раздели его на части.`;
+⚠️ КРИТИЧЕСКИ ВАЖНО:
+- worldRules: МАКСИМУМ 500 символов! Только краткое описание сеттинга ЭТОГО приключения (для UI).
+- gameplayRules: МАКСИМУМ 500 символов! Только краткое описание механик ЭТОГО приключения (для UI).
+- worldRulesFull: ПОЛНОЕ описание сеттинга (для ИИ, без ограничений длины). Если нет отдельного - используй worldRules.
+- gameplayRulesFull: ПОЛНОЕ описание механик (для ИИ, без ограничений длины). Если нет отдельного - используй gameplayRules.
+- НЕ включай общие описания мультивселенной, планов, богов, механик D&D в краткие версии!
+- Если информации нет в этой части - верни пустую строку "" для соответствующего поля.`;
 
               console.log(`[INGEST-IMPORT] Stage 1: Processing chunk ${chunkIdx + 1}/${rulesChunks.length}...`);
               const rulesResult = await generateChatCompletion({
@@ -1393,11 +1399,14 @@ ${rulesShape}
                     rulesContent = rulesContent.slice(startIdx, endIdx + 1);
                     try {
                       const rulesData = JSON.parse(rulesContent);
-                      if (rulesData.worldRules && rulesData.worldRules.trim()) {
-                        worldRulesParts.push(rulesData.worldRules);
+                      // Сохраняем полные правила (если есть worldRulesFull, используем их, иначе worldRules)
+                      const worldRulesFull = rulesData.worldRulesFull || rulesData.worldRules || '';
+                      const gameplayRulesFull = rulesData.gameplayRulesFull || rulesData.gameplayRules || '';
+                      if (worldRulesFull && worldRulesFull.trim()) {
+                        worldRulesParts.push(worldRulesFull);
                       }
-                      if (rulesData.gameplayRules && rulesData.gameplayRules.trim()) {
-                        gameplayRulesParts.push(rulesData.gameplayRules);
+                      if (gameplayRulesFull && gameplayRulesFull.trim()) {
+                        gameplayRulesParts.push(gameplayRulesFull);
                       }
                     } catch (e) {
                       console.error(`[INGEST-IMPORT] Stage 1: Failed to parse rules JSON for chunk ${chunkIdx + 1}:`, e);
@@ -1411,11 +1420,18 @@ ${rulesShape}
           }
           
           // Объединяем результаты из всех чанков
-          if (worldRulesParts.length > 0) {
-            scenario.game.worldRules = worldRulesParts.join('\n\n---\n\n');
+          // Полные правила для ИИ
+          let worldRulesFull = worldRulesParts.length > 0 ? worldRulesParts.join(' ').trim() : null;
+          let gameplayRulesFull = gameplayRulesParts.length > 0 ? gameplayRulesParts.join(' ').trim() : null;
+          
+          // Краткие правила для UI (максимум 500 символов)
+          if (worldRulesFull) {
+            scenario.game.worldRules = worldRulesFull.slice(0, 500);
+            scenario.game.worldRulesFull = worldRulesFull; // Сохраняем полные правила
           }
-          if (gameplayRulesParts.length > 0) {
-            scenario.game.gameplayRules = gameplayRulesParts.join('\n\n---\n\n');
+          if (gameplayRulesFull) {
+            scenario.game.gameplayRules = gameplayRulesFull.slice(0, 500);
+            scenario.game.gameplayRulesFull = gameplayRulesFull; // Сохраняем полные правила
           }
           console.log(`[INGEST-IMPORT] Stage 1 complete: Rules extracted from ${rulesChunks.length} chunks`);
           
@@ -2131,7 +2147,9 @@ ${loc.description}
           if (done >= 8) break;
           if (loc.backgroundUrl) continue;
           const guidance = 'Атмосферный фон сцены (без текста и водяных знаков). Киношный свет, глубина, без крупных персонажей.';
-          const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), (g.worldRules || ''), (g.gameplayRules || '')].filter(Boolean).join('\n\n').slice(0, 1600);
+          const worldRulesForAI = (g as any)?.worldRulesFull || g.worldRules || '';
+          const gameplayRulesForAI = (g as any)?.gameplayRulesFull || g.gameplayRules || '';
+          const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), worldRulesForAI, gameplayRulesForAI].filter(Boolean).join('\n\n').slice(0, 1600);
           let b64 = '';
           try {
             if (geminiKey) b64 = await generateViaGemini(prompt, '1536x1024', geminiKey);
@@ -2191,7 +2209,9 @@ app.post('/api/admin/locations/:id/generate-background', async (req, res) => {
     const game = await prisma.game.findUnique({ where: { id: loc.gameId } });
     if (!game) return res.status(404).json({ error: 'game_not_found' });
     const guidance = 'Атмосферный реалистичный фон сцены для приключенческой ролевой игры. Без текста и водяных знаков. Киношный свет, глубина, без персонажей крупным планом.';
-    const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), (game.worldRules || ''), (game.gameplayRules || '')]
+    const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
+    const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
+    const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), worldRulesForAI, gameplayRulesForAI]
       .filter(Boolean).join('\n\n').slice(0, 1800);
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     const oaKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
@@ -2427,7 +2447,9 @@ app.post('/api/admin/scenario/import', async (req, res) => {
             if (done >= 10) break; 
             if (loc.backgroundUrl) continue;
             const guidance = 'Сгенерируй атмосферный фон сцены (без текста и водяных знаков). Киношный свет, глубина, без персонажей крупным планом.';
-            const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), (game.worldRules || ''), (game.gameplayRules || '')].filter(Boolean).join('\n\n').slice(0, 1600);
+            const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
+            const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
+            const prompt = [guidance, `Сцена: ${loc.title}`, (loc.description || ''), worldRulesForAI, gameplayRulesForAI].filter(Boolean).join('\n\n').slice(0, 1600);
             let b64: string = '';
             try {
               if (geminiKey) {
@@ -4491,6 +4513,9 @@ app.post('/api/engine/session/:id/describe', async (req, res) => {
       (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
       (game as any)?.author ? `Автор: ${(game as any).author}` : '',
       game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
+      // Используем полные правила для ИИ
+      (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира: ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
+      (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса: ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
       (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
       (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
       (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
