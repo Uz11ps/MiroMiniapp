@@ -178,9 +178,16 @@ const GameChat: React.FC = () => {
   const speak = async (text: string, context?: { characterId?: string; locationId?: string; gender?: string; isNarrator?: boolean }) => {
     try {
       const t = String(text || '');
-      if (!t.trim()) return;
+      if (!t.trim()) {
+        console.log('[TTS-CLIENT] Empty text, skipping');
+        return;
+      }
       // предотвращаем дубли, включая гонки (в полёте)
-      if (t === lastSpokenRef.current && (audioRef.current || speakingInFlightRef.current)) return;
+      if (t === lastSpokenRef.current && (audioRef.current || speakingInFlightRef.current)) {
+        console.log('[TTS-CLIENT] Duplicate text, skipping:', t.slice(0, 50));
+        return;
+      }
+      console.log('[TTS-CLIENT] Starting TTS for text:', t.slice(0, 100), 'context:', context);
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
       speakingInFlightRef.current = true;
@@ -198,14 +205,17 @@ const GameChat: React.FC = () => {
         }
       } catch {}
       // синтез с контекстом для выбора голоса
+      console.log('[TTS-CLIENT] Calling ttsSynthesize...');
       const blob = await ttsSynthesize(t, {
         characterId: context?.characterId || selectedCharId || undefined,
         locationId: context?.locationId || engineLocRef.current || undefined,
         gender: context?.gender || charName ? undefined : undefined, // TODO: получить gender из персонажа
         isNarrator: context?.isNarrator !== undefined ? context.isNarrator : true, // По умолчанию - рассказчик
       });
+      console.log('[TTS-CLIENT] Received blob, size:', blob.size, 'bytes');
       // если с тех пор пришёл новый текст — этот результат игнорируем
       if (seq !== activeSpeakSeqRef.current) {
+        console.log('[TTS-CLIENT] Sequence changed, ignoring result');
         speakingInFlightRef.current = false;
         return;
       }
@@ -213,9 +223,12 @@ const GameChat: React.FC = () => {
       audioUrlRef.current = url;
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.volume = Math.max(0, Math.min(1, settings.ttsVolume / 100));
+      const volume = Math.max(0, Math.min(1, settings.ttsVolume / 100));
+      audio.volume = volume;
+      console.log('[TTS-CLIENT] Audio created, volume:', volume, 'rate:', settings.ttsRate);
       try { (audio as any).playbackRate = settings.ttsRate; } catch {}
       audio.onended = () => {
+        console.log('[TTS-CLIENT] Audio playback ended');
         try {
           if (audioUrlRef.current) {
             URL.revokeObjectURL(audioUrlRef.current);
@@ -225,16 +238,24 @@ const GameChat: React.FC = () => {
           speakingInFlightRef.current = false;
         } catch {}
       };
+      audio.onerror = (e) => {
+        console.error('[TTS-CLIENT] Audio playback error:', e);
+      };
       lastSpokenRef.current = t;
       // проигрываем только последнее: если пока грузились — мог прийти новый текст
+      console.log('[TTS-CLIENT] Starting playback...');
       const playPromise = audio.play();
       if (playPromise && typeof playPromise.then === 'function') {
-        playPromise.catch(() => {
-          // игнорируем ошибки автоплея
+        playPromise.then(() => {
+          console.log('[TTS-CLIENT] Audio playback started successfully');
+        }).catch((err) => {
+          console.error('[TTS-CLIENT] Audio play() failed:', err);
         });
       }
       speakingInFlightRef.current = false;
-    } catch {}
+    } catch (err) {
+      console.error('[TTS-CLIENT] speak() error:', err);
+    }
   };
   const getDeviceIdLocal = () => {
     try {

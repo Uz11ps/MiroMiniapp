@@ -4272,7 +4272,20 @@ app.post('/api/tts', async (req, res) => {
     const gender = typeof req.body?.gender === 'string' ? req.body.gender : undefined;
     const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : false;
     
-    if (!text.trim()) return res.status(400).json({ error: 'text_required' });
+    console.log('[TTS] Request received:', {
+      textLength: text.length,
+      textPreview: text.slice(0, 100),
+      format,
+      characterId,
+      locationId,
+      gender,
+      isNarrator,
+    });
+    
+    if (!text.trim()) {
+      console.warn('[TTS] Empty text received');
+      return res.status(400).json({ error: 'text_required' });
+    }
     
     // Получаем информацию о персонаже/локации из базы данных для выбора голоса
     let characterGender: string | null = null;
@@ -4317,9 +4330,23 @@ app.post('/api/tts', async (req, res) => {
     const finalSpeed = speedReq !== undefined ? speedReq : voiceContext.rate;
     const finalPitch = pitchReq !== undefined ? pitchReq : voiceContext.pitch;
     
+    console.log('[TTS] Voice context:', {
+      finalVoice,
+      finalSpeed,
+      finalPitch,
+      characterGender,
+      locationType,
+      isNarrator,
+    });
+    
     // Google Cloud TTS (приоритет) - используем REST API
     const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
     const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    
+    console.log('[TTS] Google TTS config:', {
+      hasGoogleKey: !!googleKey,
+      hasGoogleCreds: !!googleCreds,
+    });
     
     if (googleKey || googleCreds) {
       try {
@@ -4404,23 +4431,29 @@ app.post('/api/tts', async (req, res) => {
           };
           
           const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
+          console.log('[TTS] Calling Google TTS REST API, voice:', voiceName, 'format:', format);
           const apiResponse = await undiciFetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestBody),
           });
           
+          console.log('[TTS] Google TTS REST API response status:', apiResponse.status);
+          
           if (apiResponse.ok) {
             const jsonResponse = await apiResponse.json() as any;
             if (jsonResponse.audioContent) {
               const audioBuffer = Buffer.from(jsonResponse.audioContent, 'base64');
+              console.log('[TTS] Google TTS success, audio size:', audioBuffer.length, 'bytes');
               res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
               res.setHeader('Content-Length', String(audioBuffer.length));
               return res.send(audioBuffer);
+            } else {
+              console.error('[TTS] Google TTS response missing audioContent');
             }
           } else {
             const errorText = await apiResponse.text().catch(() => '');
-            console.error('[TTS] Google REST API failed:', errorText);
+            console.error('[TTS] Google REST API failed:', apiResponse.status, errorText.slice(0, 500));
           }
         }
       } catch (googleErr) {
