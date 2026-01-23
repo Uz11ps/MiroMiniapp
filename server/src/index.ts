@@ -6525,7 +6525,9 @@ app.post('/api/tts', async (req, res) => {
     }
     
     try {
-      const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+      // Используем модель с суффиксом -tts для генерации аудио
+      const baseModel = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+      const ttsModelName = baseModel.includes('-tts') ? baseModel : `${baseModel}-tts`;
       const proxies = parseGeminiProxies();
       const attempts = proxies.length ? proxies : ['__direct__'];
       
@@ -6568,23 +6570,31 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
 ### SCRIPT
 ${text}`;
       
-      // Используем generateContent с responseMimeType: 'audio/ogg' для прямой генерации аудио
+      // Используем generateContent с speechConfig для прямой генерации аудио через Gemini
+      // Согласно документации: https://ai.google.dev/gemini-api/docs/speech-generation
+      // Используем модель с суффиксом -tts и правильную структуру запроса
       const requestBody = {
         contents: [{
           role: 'user',
           parts: [{ text: fullText }]
         }],
         generationConfig: {
-          responseMimeType: 'audio/ogg'
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: finalIsNarrator ? 'Aoede' : (finalGender?.toLowerCase().includes('жен') ? 'Kore' : 'Charon')
+              }
+            }
+          }
         }
       };
       
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${ttsModelName}:generateContent`;
       
       for (const p of attempts) {
         try {
           const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
-          console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${modelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
+          console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${ttsModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
           
           const response = await undiciFetch(url, {
             method: 'POST',
@@ -6627,10 +6637,10 @@ ${text}`;
             console.warn('[GEMINI-TTS] Response OK but no audio found, structure:', JSON.stringify(json).slice(0, 500));
           } else {
             const errorText = await response.text().catch(() => '');
-            console.warn(`[GEMINI-TTS] ${modelName} returned ${response.status}:`, errorText.slice(0, 500));
+            console.warn(`[GEMINI-TTS] ${ttsModelName} returned ${response.status}:`, errorText.slice(0, 500));
           }
         } catch (e: any) {
-          console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
+          console.warn(`[GEMINI-TTS] ${ttsModelName} error:`, e?.message || String(e));
         }
       }
       
