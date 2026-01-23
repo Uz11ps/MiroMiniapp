@@ -1271,14 +1271,56 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           console.log('[INGEST-IMPORT] Rules text preview:', cleanRulesText.slice(0, 200));
           console.log('[INGEST-IMPORT] Scenario text preview:', cleanScenarioText.slice(0, 200));
           
-          // ЭТАП 1: Анализ правил игры (обрабатываем весь файл по частям)
-          console.log('[INGEST-IMPORT] Stage 1: Analyzing rules...');
+          // ЭТАП 1: Сначала анализируем сценарий, чтобы понять контекст приключения
+          console.log('[INGEST-IMPORT] Stage 1: Analyzing scenario first to understand adventure context...');
+          
+          // Временно сохраняем информацию о сценарии для использования в ЭТАПЕ 2
+          let scenarioSummary = '';
+          let scenarioLocations: any[] = [];
+          let scenarioCharacters: any[] = [];
+          
+          // Быстрый анализ сценария для получения контекста
+          if (cleanScenarioText && cleanScenarioText.length > 0) {
+            try {
+              const scenarioChunkSize = 200000;
+              const firstScenarioChunk = cleanScenarioText.slice(0, scenarioChunkSize);
+              
+              const summaryPrompt = `Проанализируй начало сценария приключения и создай краткое описание контекста:
+              
+${firstScenarioChunk}
+
+Извлеки ключевую информацию:
+- Название мира/региона, где происходит приключение
+- Основные локации (первые 3-5)
+- Основные персонажи/фракции (первые 3-5)
+- Уровни персонажей для приключения
+- Атмосфера и стиль приключения
+
+Верни краткое описание (максимум 1000 символов) для использования при анализе правил.`;
+              
+              const summaryResult = await generateChatCompletion({
+                systemPrompt: 'Ты помощник, который анализирует сценарии приключений D&D и извлекает ключевую информацию о контексте.',
+                userPrompt: summaryPrompt,
+                history: []
+              });
+              
+              if (summaryResult?.text) {
+                scenarioSummary = summaryResult.text.trim();
+                console.log('[INGEST-IMPORT] Stage 1: Scenario context extracted:', scenarioSummary.slice(0, 200));
+              }
+            } catch (e) {
+              console.error('[INGEST-IMPORT] Stage 1: Failed to extract scenario context:', e);
+            }
+          }
+          
+          // ЭТАП 2: Анализ правил игры с учетом контекста сценария (обрабатываем весь файл по частям)
+          console.log('[INGEST-IMPORT] Stage 2: Analyzing rules with scenario context...');
           const chunkSize = 250000; // Размер чанка для обработки
           const rulesChunks: string[] = [];
           for (let i = 0; i < cleanRulesText.length; i += chunkSize) {
             rulesChunks.push(cleanRulesText.slice(i, i + chunkSize));
           }
-          console.log(`[INGEST-IMPORT] Stage 1: Processing ${rulesChunks.length} chunks of rules`);
+          console.log(`[INGEST-IMPORT] Stage 2: Processing ${rulesChunks.length} chunks of rules`);
           
           let worldRulesParts: string[] = [];
           let gameplayRulesParts: string[] = [];
@@ -1300,13 +1342,20 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
               const rulesPrompt = `Проанализируй ЧАСТЬ ${chunkIdx + 1} из ${rulesChunks.length} файла ПРАВИЛ ИГРЫ для настольной ролевой игры D&D 5e:
 
 ═══════════════════════════════════════════════════════════════════════════════
+КОНТЕКСТ ПРИКЛЮЧЕНИЯ (из сценария):
+═══════════════════════════════════════════════════════════════════════════════
+${scenarioSummary || 'Контекст сценария пока не доступен'}
+═══════════════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════════════
 ЧАСТЬ ${chunkIdx + 1}/${rulesChunks.length}: ПРАВИЛА ИГРЫ
 ═══════════════════════════════════════════════════════════════════════════════
 ---
 ${chunk}
 ---
 
-⚠️ КРИТИЧЕСКИ ВАЖНО: ИЗВЛЕКАЙ ТОЛЬКО ПРАВИЛА ДЛЯ КОНКРЕТНОГО ПРИКЛЮЧЕНИЯ!
+⚠️ КРИТИЧЕСКИ ВАЖНО: СОПОСТАВЛЯЙ общие правила D&D с КОНКРЕТНЫМ ПРИКЛЮЧЕНИЕМ из контекста выше!
+Используй контекст приключения, чтобы понять, какие правила относятся к ЭТОМУ приключению, а какие - общие для D&D.
 
 ИСКЛЮЧИ из извлечения:
 - Авторские права, торговые марки, логотипы
@@ -1328,7 +1377,17 @@ ${chunk}
    ⚠️ СОЗДАВАЙ КРАТКУЮ ВЕРСИЮ: Не просто обрезай текст до 500 символов! Сжимай информацию, сохраняя ВЕСЬ СМЫСЛ в 500 символах.
    Используй краткие формулировки, убирай повторы, оставляй только ключевую информацию.
    
-   ВКЛЮЧАЙ ТОЛЬКО (сопоставляя с конкретным приключением):
+   ❌ СТРОГО ЗАПРЕЩЕНО включать общие правила D&D:
+   - "Мир D&D — это древняя магическая вселенная с реальными богами" - это ОБЩЕЕ описание мира D&D!
+   - "Мультивселенная состоит из Материального Плана, его отражений (Страна Фей и Царство Теней)" - это ОБЩЕЕ описание космологии D&D!
+   - "Влиятельные фракции, такие как Арфисты и Жентарим" - это ОБЩЕЕ описание фракций D&D (если они не упомянуты в конкретном приключении)!
+   - "Стиль игры варьируется от героического фэнтези до тёмного ужаса" - это ОБЩЕЕ описание стилей игры!
+   - Общие описания мультивселенной D&D, планов существования, космологии
+   - Общие описания всех богов, пантеонов D&D
+   - Общие описания форм правления, валют, календарей
+   - Общие утверждения о мире D&D без привязки к конкретному приключению
+   
+   ✅ ВКЛЮЧАЙ ТОЛЬКО (если это упомянуто в КОНКРЕТНОМ приключении):
    - Название мира/региона, где происходит ЭТО приключение (например: "Действие происходит в мире Забвенных земель, в городе Люмерия")
    - Атмосферу, окружение ЭТОГО приключения (например: "Подземелье освещает красный каменный пол, из‑за чего везде висит красноватый туман")
    - Описание того, что видят/слышат/ощущают персонажи В ЭТОМ приключении
@@ -1336,16 +1395,11 @@ ${chunk}
    - Конкретные фракции, организации В ЭТОМ приключении
    - Конкретные особенности мира В ЭТОМ приключении
    
-   ПРИМЕР worldRules (короткий!):
+   ПРИМЕР worldRules (короткий, конкретный!):
    "Действие происходит в мире Забвенных земель, в городе Люмерия. Подземелье под храмом Мистры освещает красный каменный пол, из‑за чего везде висит красноватый туман. Культисты Ноктуса проводят ритуалы в подземелье."
    
-   НЕ ВКЛЮЧАЙ (это обобщения, а не сопоставление с конкретным приключением):
-   - Общие описания мультивселенной D&D, планов существования, космологии (например: "Мультивселенная состоит из Материального Плана...")
-   - Общие описания всех богов, пантеонов D&D (например: "Боги реальны и влияют на мир")
-   - Общие описания форм правления, валют, календарей
-   - Общие утверждения о мире D&D без привязки к конкретному приключению
-   - Мета-информацию
-   - Механики игры - это gameplayRules
+   ПРИМЕР НЕПРАВИЛЬНОГО (обобщение):
+   "Мир D&D — это древняя магическая вселенная с реальными богами, обширной дикой местностью и руинами павших империй. Мультивселенная состоит из разли..."
 
 2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules):
    ⚠️ КРИТИЧЕСКИ ВАЖНО: Это КРАТКОЕ описание КОНКРЕТНЫХ МЕХАНИК ДЛЯ ЭТОГО ПРИКЛЮЧЕНИЯ - как играть.
@@ -1353,25 +1407,29 @@ ${chunk}
    ⚠️ СОЗДАВАЙ КРАТКУЮ ВЕРСИЮ: Не просто обрезай текст до 500 символов! Сжимай информацию, сохраняя ВЕСЬ СМЫСЛ в 500 символах.
    Используй краткие формулировки, убирай повторы, оставляй только ключевую информацию.
    
-   ВКЛЮЧАЙ ТОЛЬКО (сопоставляя с конкретным приключением):
+   ❌ СТРОГО ЗАПРЕЩЕНО включать общие правила D&D:
+   - "Игровой процесс разделен на 4 этапа (1-20 уровни)" - это ОБЩЕЕ правило D&D, не для конкретного приключения!
+   - "Введена опциональная система 'Слава'" - это ОБЩЕЕ опциональное правило, не для конкретного приключения!
+   - "Путешествия по планам имеют свои правила" - это ОБЩЕЕ описание планов D&D!
+   - "Приключения строятся на исследовании, социальном взаимодействии и боях" - это ОБЩЕЕ описание структуры приключений!
+   - Общие описания всех механик D&D 5e
+   - Общие правила создания персонажей, классов, рас
+   - Общие описания всех опциональных правил
+   - Общие описания создания приключений, кампаний
+   - Общие описания роли мастера
+   
+   ✅ ВКЛЮЧАЙ ТОЛЬКО (если это упомянуто в КОНКРЕТНОМ приключении):
    - Уровни персонажей для ЭТОГО приключения (например: "для персонажей 2–3 уровня")
    - Редакция правил (например: "Используются правила D&D 5‑й редакции")
    - Конкретные проверки, упомянутые В ЭТОМ приключении (например: "Восприятие (Мудрость) Сл. 15 для поиска секретной двери, Ловкость (Акробатика) Сл. 10 для уклонения от ловушки")
    - Конкретные механики В ЭТОМ приключении (ловушки, спасброски, боевые сцены)
    - Роль AI-ведущего (например: "AI‑ведущий описывает последствия успеха/провала")
    
-   ПРИМЕР gameplayRules (короткий!):
+   ПРИМЕР gameplayRules (короткий, конкретный!):
    "Используются правила D&D 5‑й редакции для персонажей 2–3 уровня. Все проверки выполняются d20. AI‑ведущий описывает последствия успеха/провала."
    
-   НЕ ВКЛЮЧАЙ (это обобщения, а не сопоставление с конкретным приключением):
-   - Общие описания всех механик D&D 5e (например: "Игровой процесс разделен на четыре этапа (тира) в зависимости от уровня персонажей...")
-   - Общие правила создания персонажей, классов, рас
-   - Общие описания всех опциональных правил (например: "Введена опциональная система 'Слава'...")
-   - Общие описания создания приключений, кампаний
-   - Общие описания роли мастера
-   - Описание миров, богов, планов (это worldRules)
-   - Атмосферу, окружение (это worldRules)
-   - Мета-информацию
+   ПРИМЕР НЕПРАВИЛЬНОГО (обобщение):
+   "Игровой процесс разделен на 4 этапа (1-20 уровни), где герои растут от местных спасителей до владык мира. Введена опциональная система 'Слава'..."
 
 ПРИМЕРЫ РАЗДЕЛЕНИЯ:
 - "Действие происходит в мире Забвенных земель. Подземелье освещает красный каменный пол..." → worldRules (описание сеттинга, атмосферы)
@@ -1388,14 +1446,20 @@ ${chunk}
 ${rulesShape}
 
 ⚠️ КРИТИЧЕСКИ ВАЖНО:
-- worldRules: МАКСИМУМ 500 символов! СОЗДАЙ краткое описание сеттинга ЭТОГО приключения (для UI), сжимая информацию, но сохраняя ВЕСЬ СМЫСЛ. Не просто обрезай текст!
-- gameplayRules: МАКСИМУМ 500 символов! СОЗДАЙ краткое описание механик ЭТОГО приключения (для UI), сжимая информацию, но сохраняя ВЕСЬ СМЫСЛ. Не просто обрезай текст!
+- worldRules: МАКСИМУМ 500 символов! СОЗДАЙ краткое описание сеттинга ЭТОГО приключения (для UI), сжимая информацию, но сохраняя ВЕСЬ СМЫСЛ. 
+  ❌ ЗАПРЕЩЕНО: просто обрезать текст до 500 символов (например: "Действие происходит в мультивселенной, состоящей из разли..." - это ОБРЕЗКА!)
+  ✅ ПРАВИЛЬНО: сжать информацию, убрав повторы и обобщения, оставив только конкретные детали этого приключения в 500 символах
+  Пример правильного сжатия: "Действие в Забвенных землях, городе Люмерия. Подземелье с красным каменным полом и туманом. Культисты Ноктуса проводят ритуалы."
+- gameplayRules: МАКСИМУМ 500 символов! СОЗДАЙ краткое описание механик ЭТОГО приключения (для UI), сжимая информацию, но сохраняя ВЕСЬ СМЫСЛ.
+  ❌ ЗАПРЕЩЕНО: просто обрезать текст до 500 символов
+  ✅ ПРАВИЛЬНО: сжать информацию, убрав повторы и обобщения, оставив только конкретные механики этого приключения в 500 символах
+  Пример правильного сжатия: "D&D 5e для персонажей 2-3 уровня. Проверки d20. Восприятие Сл.15 для поиска двери, Ловкость Сл.10 для ловушек."
 - worldRulesFull: ПОЛНОЕ описание сеттинга (для ИИ, без ограничений длины).
 - gameplayRulesFull: ПОЛНОЕ описание механик (для ИИ, без ограничений длины). 
 - НЕ включай общие описания мультивселенной, планов, богов, механик D&D в краткие версии!
 - Если информации нет в этой части - верни пустую строку "" для соответствующего поля.`;
 
-              console.log(`[INGEST-IMPORT] Stage 1: Processing chunk ${chunkIdx + 1}/${rulesChunks.length}...`);
+              console.log(`[INGEST-IMPORT] Stage 2: Processing chunk ${chunkIdx + 1}/${rulesChunks.length}...`);
               const rulesResult = await generateChatCompletion({
                 systemPrompt: rulesSys,
                 userPrompt: rulesPrompt,
@@ -1431,25 +1495,152 @@ ${rulesShape}
                         gameplayRulesParts.push(gameplayRulesFull);
                       }
                     } catch (e) {
-                      console.error(`[INGEST-IMPORT] Stage 1: Failed to parse rules JSON for chunk ${chunkIdx + 1}:`, e);
+                      console.error(`[INGEST-IMPORT] Stage 2: Failed to parse rules JSON for chunk ${chunkIdx + 1}:`, e);
                     }
                   }
                 }
               }
             } catch (e) {
-              console.error(`[INGEST-IMPORT] Stage 1: Chunk ${chunkIdx + 1} analysis failed:`, e);
+              console.error(`[INGEST-IMPORT] Stage 2: Chunk ${chunkIdx + 1} analysis failed:`, e);
             }
           }
           
           // Объединяем результаты из всех чанков
-          // Краткие правила для UI (AI создал их с полным смыслом в 500 символах)
-          let worldRulesShort = worldRulesShortParts.length > 0 ? worldRulesShortParts.join(' ').trim() : null;
-          let gameplayRulesShort = gameplayRulesShortParts.length > 0 ? gameplayRulesShortParts.join(' ').trim() : null;
           // Полные правила для ИИ
           let worldRulesFull = worldRulesParts.length > 0 ? worldRulesParts.join(' ').trim() : null;
           let gameplayRulesFull = gameplayRulesParts.length > 0 ? gameplayRulesParts.join(' ').trim() : null;
           
-          // Используем краткие версии для UI (они уже содержат весь смысл в 500 символах)
+          // Краткие правила для UI
+          // Если есть несколько чанков с краткими версиями, объединяем их и создаем финальную краткую версию через AI
+          // Если чанк один, используем его краткую версию напрямую
+          let worldRulesShort = worldRulesShortParts.length > 0 ? worldRulesShortParts.join(' ').trim() : null;
+          let gameplayRulesShort = gameplayRulesShortParts.length > 0 ? gameplayRulesShortParts.join(' ').trim() : null;
+          
+          // Финальная обработка: создаем краткие версии на основе сценария + правил
+          if (scenarioSummary && (worldRulesFull || gameplayRulesFull)) {
+            try {
+              // Создаем финальные краткие версии с учетом сценария
+              if (worldRulesFull && (!worldRulesShort || worldRulesShort.length > 500)) {
+                const finalWorldRulesPrompt = `На основе КОНТЕКСТА ПРИКЛЮЧЕНИЯ и ОБЩИХ ПРАВИЛ D&D создай краткое описание правил мира для ЭТОГО конкретного приключения (максимум 500 символов, сохраняя весь смысл):
+
+КОНТЕКСТ ПРИКЛЮЧЕНИЯ:
+${scenarioSummary}
+
+ОБЩИЕ ПРАВИЛА D&D (извлеченные из файла правил):
+${worldRulesFull}
+
+⚠️ КРИТИЧЕСКИ ВАЖНО:
+- СОПОСТАВЛЯЙ общие правила D&D с конкретным приключением из контекста
+- Включай только то, что относится к ЭТОМУ приключению
+- Исключи общие описания мультивселенной, планов, богов (если они не упомянуты в приключении)
+- Сожми информацию, сохраняя весь смысл в 500 символах
+- НЕ просто обрезай текст!
+
+Верни только краткое описание правил мира для этого приключения (максимум 500 символов).`;
+                
+                const finalWorldRulesResult = await generateChatCompletion({
+                  systemPrompt: 'Ты помощник, который создает краткие описания правил мира для конкретных приключений D&D, сопоставляя общие правила с контекстом приключения.',
+                  userPrompt: finalWorldRulesPrompt,
+                  history: []
+                });
+                
+                if (finalWorldRulesResult?.text) {
+                  const compressed = finalWorldRulesResult.text.trim();
+                  worldRulesShort = compressed.length > 500 ? compressed.slice(0, 500) : compressed;
+                }
+              }
+              
+              if (gameplayRulesFull && (!gameplayRulesShort || gameplayRulesShort.length > 500)) {
+                const finalGameplayRulesPrompt = `На основе КОНТЕКСТА ПРИКЛЮЧЕНИЯ и ОБЩИХ ПРАВИЛ D&D создай краткое описание правил игрового процесса для ЭТОГО конкретного приключения (максимум 500 символов, сохраняя весь смысл):
+
+КОНТЕКСТ ПРИКЛЮЧЕНИЯ:
+${scenarioSummary}
+
+ОБЩИЕ ПРАВИЛА D&D (извлеченные из файла правил):
+${gameplayRulesFull}
+
+⚠️ КРИТИЧЕСКИ ВАЖНО:
+- СОПОСТАВЛЯЙ общие правила D&D с конкретным приключением из контекста
+- Включай только то, что относится к ЭТОМУ приключению
+- Исключи общие описания всех механик D&D (если они не используются в приключении)
+- Сожми информацию, сохраняя весь смысл в 500 символах
+- НЕ просто обрезай текст!
+
+Верни только краткое описание правил игрового процесса для этого приключения (максимум 500 символов).`;
+                
+                const finalGameplayRulesResult = await generateChatCompletion({
+                  systemPrompt: 'Ты помощник, который создает краткие описания правил игрового процесса для конкретных приключений D&D, сопоставляя общие правила с контекстом приключения.',
+                  userPrompt: finalGameplayRulesPrompt,
+                  history: []
+                });
+                
+                if (finalGameplayRulesResult?.text) {
+                  const compressed = finalGameplayRulesResult.text.trim();
+                  gameplayRulesShort = compressed.length > 500 ? compressed.slice(0, 500) : compressed;
+                }
+              }
+            } catch (e) {
+              console.error('[INGEST-IMPORT] Stage 2: Failed to create final rules with scenario context:', e);
+            }
+          }
+          
+          // Если объединенная краткая версия превышает 500 символов или отсутствует, создаем финальную краткую версию из полных через AI
+          if ((!worldRulesShort || worldRulesShort.length > 500) && worldRulesFull) {
+            try {
+              const sourceText = worldRulesShort && worldRulesShort.length > 500 ? worldRulesShort : worldRulesFull;
+              const compressPrompt = `Создай КРАТКУЮ версию этого текста о правилах мира для конкретного приключения, сохраняя ВЕСЬ СМЫСЛ в максимум 500 символах. 
+⚠️ КРИТИЧЕСКИ ВАЖНО: НЕ просто обрезай текст! Сожми информацию, убрав повторы и обобщения, оставив только КОНКРЕТНЫЕ детали этого приключения.
+Исключи общие описания мультивселенной D&D, планов, богов (если они не относятся к конкретному приключению).
+Включи только: название мира/региона этого приключения, атмосферу, конкретных богов/фракции из приключения, особенности мира в этом приключении.
+
+Текст для сжатия:
+${sourceText}`;
+              const compressResult = await generateChatCompletion({
+                systemPrompt: 'Ты помощник, который создает краткие версии текстов о правилах мира для настольных игр, сохраняя весь смысл и конкретику приключения.',
+                userPrompt: compressPrompt,
+                history: []
+              });
+              if (compressResult?.text) {
+                const compressed = compressResult.text.trim();
+                worldRulesShort = compressed.length > 500 ? compressed.slice(0, 500) : compressed;
+              }
+            } catch (e) {
+              console.error('[INGEST-IMPORT] Failed to compress worldRules:', e);
+              // Fallback: используем первую краткую версию или обрезаем полную
+              if (!worldRulesShort && worldRulesFull) {
+                worldRulesShort = worldRulesFull.slice(0, 500);
+              }
+            }
+          }
+          if ((!gameplayRulesShort || gameplayRulesShort.length > 500) && gameplayRulesFull) {
+            try {
+              const sourceText = gameplayRulesShort && gameplayRulesShort.length > 500 ? gameplayRulesShort : gameplayRulesFull;
+              const compressPrompt = `Создай КРАТКУЮ версию этого текста о правилах игрового процесса для конкретного приключения, сохраняя ВЕСЬ СМЫСЛ в максимум 500 символах.
+⚠️ КРИТИЧЕСКИ ВАЖНО: НЕ просто обрезай текст! Сожми информацию, убрав повторы и обобщения, оставив только КОНКРЕТНЫЕ механики этого приключения.
+Исключи общие описания всех механик D&D 5e, опциональных правил (если они не используются в этом приключении).
+Включи только: уровни персонажей для этого приключения, редакцию правил, конкретные проверки/механики из приключения.
+
+Текст для сжатия:
+${sourceText}`;
+              const compressResult = await generateChatCompletion({
+                systemPrompt: 'Ты помощник, который создает краткие версии текстов о правилах игрового процесса для настольных игр, сохраняя весь смысл и конкретику приключения.',
+                userPrompt: compressPrompt,
+                history: []
+              });
+              if (compressResult?.text) {
+                const compressed = compressResult.text.trim();
+                gameplayRulesShort = compressed.length > 500 ? compressed.slice(0, 500) : compressed;
+              }
+            } catch (e) {
+              console.error('[INGEST-IMPORT] Failed to compress gameplayRules:', e);
+              // Fallback: используем первую краткую версию или обрезаем полную
+              if (!gameplayRulesShort && gameplayRulesFull) {
+                gameplayRulesShort = gameplayRulesFull.slice(0, 500);
+              }
+            }
+          }
+          
+          // Используем краткие версии для UI (они содержат весь смысл в 500 символах)
           if (worldRulesShort) {
             scenario.game.worldRules = worldRulesShort.length > 500 ? worldRulesShort.slice(0, 500) : worldRulesShort;
             scenario.game.worldRulesFull = worldRulesFull || worldRulesShort; // Сохраняем полные правила для AI
@@ -1458,10 +1649,10 @@ ${rulesShape}
             scenario.game.gameplayRules = gameplayRulesShort.length > 500 ? gameplayRulesShort.slice(0, 500) : gameplayRulesShort;
             scenario.game.gameplayRulesFull = gameplayRulesFull || gameplayRulesShort; // Сохраняем полные правила для AI
           }
-          console.log(`[INGEST-IMPORT] Stage 1 complete: Rules extracted from ${rulesChunks.length} chunks`);
+          console.log(`[INGEST-IMPORT] Stage 2 complete: Rules extracted from ${rulesChunks.length} chunks with scenario context`);
           
-          // ЭТАП 2: Анализ сценария игры
-          console.log('[INGEST-IMPORT] Stage 2: Analyzing scenario...');
+          // ЭТАП 3: Анализ сценария игры
+          console.log('[INGEST-IMPORT] Stage 3: Analyzing scenario...');
           try {
             const sys = `Ты интеллектуальный ассистент для анализа сценариев настольных ролевых игр D&D 5e.
 
@@ -1486,7 +1677,7 @@ ${rulesShape}
             for (let i = 0; i < cleanScenarioText.length; i += scenarioChunkSize) {
               scenarioChunks.push(cleanScenarioText.slice(i, i + scenarioChunkSize));
             }
-            console.log(`[INGEST-IMPORT] Stage 2: Processing ${scenarioChunks.length} chunks of scenario`);
+            console.log(`[INGEST-IMPORT] Stage 3: Processing ${scenarioChunks.length} chunks of scenario`);
             
             // Для сценария обрабатываем все части, но первую часть используем для основных полей игры
             let allLocations: any[] = [];
@@ -1701,7 +1892,7 @@ ${chunk}
 Верни только JSON без комментариев, строго формы:
 ${chunkShape}`;
               
-              console.log(`[INGEST-IMPORT] Stage 2: Processing chunk ${chunkIdx + 1}/${scenarioChunks.length}...`);
+              console.log(`[INGEST-IMPORT] Stage 3: Processing chunk ${chunkIdx + 1}/${scenarioChunks.length}...`);
               const result = await generateChatCompletion({
                 systemPrompt: chunkSys,
                 userPrompt: chunkPrompt,
@@ -1750,9 +1941,9 @@ ${chunkShape}`;
                     allCharacters.push(...chunkData.characters);
                   }
                   
-                  console.log(`[INGEST-IMPORT] Stage 2: Chunk ${chunkIdx + 1} processed - locations: ${chunkData.locations?.length || 0}, exits: ${chunkData.exits?.length || 0}, characters: ${chunkData.characters?.length || 0}`);
+                  console.log(`[INGEST-IMPORT] Stage 3: Chunk ${chunkIdx + 1} processed - locations: ${chunkData.locations?.length || 0}, exits: ${chunkData.exits?.length || 0}, characters: ${chunkData.characters?.length || 0}`);
                 } catch (parseError) {
-                  console.error(`[INGEST-IMPORT] Stage 2: Failed to parse JSON for chunk ${chunkIdx + 1}:`, parseError);
+                  console.error(`[INGEST-IMPORT] Stage 3: Failed to parse JSON for chunk ${chunkIdx + 1}:`, parseError);
                 }
               }
             }
@@ -1770,18 +1961,18 @@ ${chunkShape}`;
             
             if (allLocations.length > 0) {
               scenario.locations = allLocations;
-              console.log(`[INGEST-IMPORT] Stage 2: Total locations from all chunks: ${allLocations.length}`);
+              console.log(`[INGEST-IMPORT] Stage 3: Total locations from all chunks: ${allLocations.length}`);
             }
             if (allExits.length > 0) {
               scenario.exits = allExits;
-              console.log(`[INGEST-IMPORT] Stage 2: Total exits from all chunks: ${allExits.length}`);
+              console.log(`[INGEST-IMPORT] Stage 3: Total exits from all chunks: ${allExits.length}`);
             }
             if (allCharacters.length > 0) {
               scenario.characters.push(...allCharacters);
-              console.log(`[INGEST-IMPORT] Stage 2: Total characters from all chunks: ${allCharacters.length}`);
+              console.log(`[INGEST-IMPORT] Stage 3: Total characters from all chunks: ${allCharacters.length}`);
             }
             
-            console.log(`[INGEST-IMPORT] Stage 2 complete: Scenario processed from ${scenarioChunks.length} chunks`);
+            console.log(`[INGEST-IMPORT] Stage 3 complete: Scenario processed from ${scenarioChunks.length} chunks`);
           } catch (e) {
             console.error('[INGEST-IMPORT] Game analysis failed:', e);
             console.error('[INGEST-IMPORT] Error stack:', (e as Error).stack);
