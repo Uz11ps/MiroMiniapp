@@ -5085,112 +5085,26 @@ app.post('/api/tts', async (req, res) => {
     
     console.log('[TTS] Using Yandex TTS fallback');
 
-    // Функция выбора голоса Yandex TTS на основе контекста
-    // Доступные голоса Yandex TTS:
-    // Женские: jane (нейтральный), oksana (дружелюбный), alyss (строгий), omazh (мягкий)
-    // Мужские: zahar (нейтральный), ermil (дружелюбный), filipp (строгий)
-    function selectYandexVoice(): string {
-      // Если голос явно указан в запросе и это валидный Yandex голос
-      if (voiceReq && ['jane', 'oksana', 'alyss', 'omazh', 'zahar', 'ermil', 'filipp'].includes(voiceReq.toLowerCase())) {
-        return voiceReq.toLowerCase();
-      }
-      
-      // Определяем пол для выбора голоса
-      const finalGender = characterGender || gender || null;
-      const isFemale = finalGender && (finalGender.toLowerCase().includes('жен') || finalGender.toLowerCase().includes('female') || finalGender.toLowerCase().includes('f'));
-      const isMale = finalGender && (finalGender.toLowerCase().includes('муж') || finalGender.toLowerCase().includes('male') || finalGender.toLowerCase().includes('m'));
-      
-      // Выбор голоса на основе персонажа
-      if (characterId && !isNarrator) {
-        if (isFemale) {
-          return 'jane'; // Женский, нейтральный
-        } else if (isMale) {
-          return 'zahar'; // Мужской, нейтральный
-        } else {
-          return 'jane'; // По умолчанию
-        }
-      } else if (isNarrator) {
-        return 'ermil'; // Мужской, дружелюбный для рассказчика
-      } else if (locationType) {
-        // Выбор голоса на основе типа локации
-        const locType = locationType.toLowerCase();
-        if (locType.includes('темн') || locType.includes('подзем') || locType.includes('пещер')) {
-          return 'filipp'; // Мужской, строгий для мрачных локаций
-        } else if (locType.includes('светл') || locType.includes('лес') || locType.includes('природ')) {
-          return 'oksana'; // Женский, дружелюбный для светлых локаций
-        } else {
-          return 'jane'; // По умолчанию
-        }
-      }
-      
-      return 'jane'; // Голос по умолчанию
-    }
-
-    const selectedYandexVoice = selectYandexVoice();
-    console.log('[TTS] Selected Yandex voice:', selectedYandexVoice, 'for context:', { characterId, locationId, gender: characterGender || gender, isNarrator, locationType });
-
-    async function synth(params: { voice: string; withExtras: boolean }) {
-      const form = new FormData();
-      form.append('text', text);
-      form.append('lang', lang);
-      form.append('voice', params.voice);
-      if (params.withExtras) {
-        form.append('emotion', 'friendly'); // Yandex emotion
-        form.append('speed', String(speedReq || 1.0)); // Используем speedReq из запроса или 1.0 по умолчанию
-      }
-      form.append('format', format);
-      const r = await undiciFetch('https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize', {
-        method: 'POST',
-        headers: { Authorization: `Api-Key ${yandexKey}` },
-        body: form as any,
-      });
-      return r;
-    }
-
-    // 1) Пробуем выбранный голос с параметрами
-    let r = await synth({ voice: selectedYandexVoice, withExtras: true });
-    if (!r.ok) {
-      const errTxt = await r.text().catch(() => '');
-      console.log('[TTS] Yandex TTS first attempt failed:', r.status, errTxt.slice(0, 200));
-      
-      // 2) Если неподдерживаемый голос или ошибка — пробуем резервные голоса
-      const fallbackVoices = ['jane', 'oksana', 'zahar', 'ermil'];
-      let fallbackTried = false;
-      
-      if (/Unsupported voice/i.test(errTxt) || /unsupported voice/i.test(errTxt) || r.status === 400) {
-        for (const fallbackVoice of fallbackVoices) {
-          if (fallbackVoice === selectedYandexVoice) continue; // Пропускаем уже испробованный
-          console.log('[TTS] Trying Yandex fallback voice:', fallbackVoice);
-          r = await synth({ voice: fallbackVoice, withExtras: true });
-          if (r.ok) {
-            fallbackTried = true;
-            break;
-          }
-        }
-      }
-      
-      // 3) Если по-прежнему не работает — убираем extras (emotion/speed)
-      if (!r.ok && !fallbackTried) {
-        const txt2 = await r.text().catch(() => '');
-        if (r.status === 400 || /BAD_REQUEST/i.test(txt2)) {
-          // Пробуем без extras
-          for (const fallbackVoice of fallbackVoices) {
-            if (fallbackVoice === selectedYandexVoice) continue;
-            console.log('[TTS] Trying Yandex fallback voice without extras:', fallbackVoice);
-            r = await synth({ voice: fallbackVoice, withExtras: false });
-            if (r.ok) break;
-          }
-        } else {
-          // вернуть оригинальную ошибку
-          return res.status(502).json({ error: 'tts_failed', details: errTxt || txt2 });
-        }
-      }
-    }
+    // Простой fallback с одним голосом
+    const yandexVoice = 'oksana'; // Голос, который реально работает
+    const form = new FormData();
+    form.append('text', text);
+    form.append('lang', lang);
+    form.append('voice', yandexVoice);
+    form.append('format', format);
+    
+    const r = await undiciFetch('https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize', {
+      method: 'POST',
+      headers: { Authorization: `Api-Key ${yandexKey}` },
+      body: form as any,
+    });
+    
     if (!r.ok) {
       const err = await r.text().catch(() => '');
       console.error('[TTS] Yandex TTS failed:', r.status, err.slice(0, 500));
       return res.status(502).json({ error: 'tts_failed', details: err || r.statusText });
     }
+    
     const arrayBuf = await r.arrayBuffer();
     const buf = Buffer.from(arrayBuf);
     console.log('[TTS] Yandex TTS success, audio size:', buf.length, 'bytes');
