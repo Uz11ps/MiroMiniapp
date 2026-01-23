@@ -1,4 +1,5 @@
-FROM node:20-slim AS base
+FROM node:20-alpine AS base
+RUN apk add --no-cache openssl libssl3 ca-certificates
 
 FROM base AS build
 WORKDIR /app/server
@@ -14,7 +15,8 @@ COPY server/src ./src
 COPY server/scripts ./scripts
 RUN npx prisma generate && npm run build
 
-FROM node:20-slim AS runner
+FROM node:20-alpine AS runner
+RUN apk add --no-cache openssl libssl3 ca-certificates
 WORKDIR /app/server
 ENV NODE_ENV=production
 COPY --from=build /app/server/package.json ./package.json
