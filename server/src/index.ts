@@ -5300,23 +5300,29 @@ app.post('/api/tts', async (req, res) => {
     }
     
     console.log('[TTS] Using Yandex TTS fallback');
+    console.log('[TTS] Yandex key preview:', yandexKey ? `${yandexKey.slice(0, 10)}...${yandexKey.slice(-5)}` : 'MISSING');
 
-    // Используем дефолтный голос Yandex (не указываем voice)
+    // Используем oksana - голос, который работал раньше
     async function synth(withExtras: boolean) {
       const form = new FormData();
       form.append('text', text);
       form.append('lang', lang);
-      // Не указываем voice - используем дефолтный голос Yandex
+      form.append('voice', 'oksana'); // Явно указываем голос, который работал
       if (withExtras) {
         form.append('emotion', 'friendly'); // Yandex emotion
         form.append('speed', String(speedReq || 1.0));
       }
       form.append('format', format);
+      
+      console.log('[TTS] Yandex request params:', { lang, format, withExtras, textLength: text.length });
+      
       const r = await undiciFetch('https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize', {
         method: 'POST',
         headers: { Authorization: `Api-Key ${yandexKey}` },
         body: form as any,
       });
+      
+      console.log('[TTS] Yandex response status:', r.status, 'headers:', Object.fromEntries(r.headers.entries()));
       return r;
     }
 
@@ -5324,7 +5330,7 @@ app.post('/api/tts', async (req, res) => {
     let r = await synth(true);
     if (!r.ok) {
       const errTxt = await r.text().catch(() => '');
-      console.log('[TTS] Yandex TTS first attempt failed:', r.status, errTxt.slice(0, 200));
+      console.log('[TTS] Yandex TTS first attempt failed:', r.status, errTxt.slice(0, 500));
       
       // Если не работает с параметрами - пробуем без extras (emotion/speed)
       if (r.status === 400 || /BAD_REQUEST/i.test(errTxt)) {
