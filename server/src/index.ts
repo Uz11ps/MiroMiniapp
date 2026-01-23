@@ -4528,15 +4528,18 @@ app.post('/api/tts', async (req, res) => {
     }
     if (!r.ok) {
       const err = await r.text().catch(() => '');
+      console.error('[TTS] Yandex TTS failed:', r.status, err.slice(0, 500));
       return res.status(502).json({ error: 'tts_failed', details: err || r.statusText });
     }
     const arrayBuf = await r.arrayBuffer();
     const buf = Buffer.from(arrayBuf);
+    console.log('[TTS] Yandex TTS success, audio size:', buf.length, 'bytes');
     res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
     res.setHeader('Content-Length', String(buf.length));
     return res.send(buf);
   } catch (e) {
-    return res.status(500).json({ error: 'tts_error' });
+    console.error('[TTS] TTS endpoint error:', e);
+    return res.status(500).json({ error: 'tts_error', details: String(e) });
   }
 });
 
