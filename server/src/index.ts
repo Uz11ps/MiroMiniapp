@@ -7240,6 +7240,23 @@ async function generateSpeechViaGemini(params: {
     
     const endpoints = [
       {
+        name: 'gemini-2.5-pro-tts',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-tts:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      {
         name: 'gemini-2.5-pro-speech',
         url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateSpeech',
         body: {
@@ -7287,20 +7304,6 @@ async function generateSpeechViaGemini(params: {
           audioConfig: {
             audioEncoding: 'OGG_OPUS',
             sampleRateHertz: 24000
-          }
-        }
-      },
-      {
-        name: 'gemini-1.5-flash-speech',
-        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateSpeech',
-        body: {
-          input: { text },
-          voiceConfig: {
-            languageCode: language,
-            name: voice
-          },
-          audioConfig: {
-            audioEncoding: 'OGG_OPUS'
           }
         }
       }
