@@ -6519,7 +6519,54 @@ app.post('/api/tts', async (req, res) => {
       isNarrator,
     });
     
-    // Google Cloud TTS (приоритет) - используем REST API
+    // ПРИОРИТЕТ: Пробуем Gemini Speech Generation для прямого синтеза речи (лучшее качество)
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (geminiKey && (finalCharacterId || finalIsNarrator)) {
+      console.log('[TTS] 🎤 Attempting Gemini Speech Generation for direct audio synthesis');
+      try {
+        // Выбираем голос на основе контекста персонажа
+        // Gemini Speech Generation использует имена голосов типа: aoede, charon, fenrir, kore, puck и т.д.
+        // Для русского языка доступны специальные голоса
+        let voiceName = 'default';
+        if (finalIsNarrator) {
+          voiceName = 'aoede'; // Мягкий женский голос для рассказчика
+        } else {
+          // Выбираем голос на основе пола персонажа
+          const isFemale = finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f');
+          const isMale = finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m');
+          
+          if (isFemale) {
+            voiceName = 'kore'; // Женский голос
+          } else if (isMale) {
+            voiceName = 'charon'; // Мужской голос
+          } else {
+            voiceName = 'puck'; // Нейтральный голос
+          }
+        }
+        
+        const emotion = speechContext.emotion || 'neutral';
+        
+        const geminiAudio = await generateSpeechViaGemini({
+          text: text,
+          apiKey: geminiKey,
+          voice: voiceName,
+          language: 'ru-RU',
+          emotion: emotion,
+          speed: finalSpeed
+        });
+        
+        if (geminiAudio) {
+          console.log('[TTS] ✅ Gemini Speech Generation success, audio size:', geminiAudio.length, 'bytes');
+          res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+          res.setHeader('Content-Length', String(geminiAudio.length));
+          return res.send(geminiAudio);
+        }
+      } catch (e) {
+        console.error('[TTS] Gemini Speech Generation failed, falling back to Google TTS:', e);
+      }
+    }
+    
+    // Fallback: Google Cloud TTS (используем REST API)
     const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
     const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     
@@ -6542,6 +6589,7 @@ app.post('/api/tts', async (req, res) => {
             
             // Пытаемся сгенерировать SSML с интонациями через Gemini (приоритет для всех текстов)
             let ssmlText: string | null = null;
+            let ssmlSource = 'fallback';
             if (finalCharacterId || finalIsNarrator) {
               console.log('[TTS] Attempting Gemini SSML generation for text length:', text.length);
               const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
@@ -6560,6 +6608,10 @@ app.post('/api/tts', async (req, res) => {
                 basePitch: finalPitch,
                 baseRate: finalSpeed
               });
+              if (ssmlText) {
+                ssmlSource = 'gemini';
+                console.log('[TTS] ✅ Using Gemini-generated SSML with full semantic understanding and intonation');
+              }
             }
             
             // Если Gemini не сгенерировал SSML, используем улучшенный стандартный SSML с естественными интонациями
@@ -6625,7 +6677,7 @@ app.post('/api/tts', async (req, res) => {
               voiceName = 'ru-RU-Wavenet-E'; // Рассказчик - женский мягкий голос
             }
             
-            console.log('[TTS] Calling Google TTS Service Account API, voice:', voiceName, 'format:', format, 'text length:', text.length);
+            console.log(`[TTS] 🔊 Synthesizing speech with Google TTS using ${ssmlSource === 'gemini' ? 'Gemini-generated SSML' : 'fallback SSML'}, voice: ${voiceName}, format: ${format}`);
             const ttsStartTime = Date.now();
             
             const [response] = await client.synthesizeSpeech({
@@ -6668,6 +6720,7 @@ app.post('/api/tts', async (req, res) => {
           
           // Пытаемся сгенерировать SSML с интонациями через Gemini (приоритет для всех текстов)
           let ssmlText: string | null = null;
+          let ssmlSource = 'fallback';
           if (finalCharacterId || finalIsNarrator) {
             console.log('[TTS] Attempting Gemini SSML generation for text length:', text.length);
             const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
@@ -6686,6 +6739,10 @@ app.post('/api/tts', async (req, res) => {
               basePitch: finalPitch,
               baseRate: finalSpeed
             });
+            if (ssmlText) {
+              ssmlSource = 'gemini';
+              console.log('[TTS] ✅ Using Gemini-generated SSML with full semantic understanding and intonation');
+            }
           }
           
           // Если Gemini не сгенерировал SSML, используем улучшенный стандартный SSML с естественными интонациями
@@ -6772,7 +6829,7 @@ app.post('/api/tts', async (req, res) => {
           };
           
           const apiUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
-          console.log('[TTS] Calling Google TTS REST API, voice:', voiceName, 'format:', format);
+          console.log(`[TTS] 🔊 Synthesizing speech with Google TTS using ${ssmlSource === 'gemini' ? 'Gemini-generated SSML' : 'fallback SSML'}, voice: ${voiceName}, format: ${format}`);
           const apiResponse = await undiciFetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -7157,6 +7214,167 @@ async function generateViaGemini(prompt: string, size: string, apiKey: string): 
   
   console.warn('[IMG] gemini all endpoints failed');
   return '';
+}
+
+/**
+ * Генерирует аудио через Gemini Speech Generation API
+ * Прямой синтез речи с высоким качеством и естественной интонацией
+ * Использует официальный Gemini API формат (аналогично generateContent)
+ */
+async function generateSpeechViaGemini(params: {
+  text: string;
+  apiKey: string;
+  voice?: string;
+  language?: string;
+  emotion?: string;
+  speed?: number;
+}): Promise<Buffer | null> {
+  const { text, apiKey, voice = 'default', language = 'ru-RU', emotion = 'neutral', speed = 1.0 } = params;
+  
+  try {
+    // Используем стандартный формат Gemini API (как в generateContent)
+    // Пробуем разные варианты endpoint'ов на основе официальной документации
+    const proxies = parseGeminiProxies();
+    const attempts = proxies.length ? proxies : ['__direct__'];
+    const maxRetries = 2;
+    
+    const endpoints = [
+      {
+        name: 'gemini-2.0-flash-speech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      {
+        name: 'gemini-1.5-flash-speech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS'
+          }
+        }
+      },
+      {
+        name: 'gemini-speech-v1',
+        url: 'https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash-exp:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS'
+          }
+        }
+      }
+    ];
+    
+    for (const endpoint of endpoints) {
+      for (const p of attempts) {
+        for (let retry = 0; retry < maxRetries; retry++) {
+          try {
+            if (retry > 0) {
+              const delay = Math.min(1000 * Math.pow(2, retry - 1), 5000);
+              console.log(`[GEMINI-TTS] Retry ${retry}/${maxRetries - 1} for ${endpoint.name} after ${delay}ms`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 30000);
+            const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+            
+            console.log(`[GEMINI-TTS] Trying ${endpoint.name} via ${p === '__direct__' ? 'direct' : 'proxy'}`);
+            
+            const response = await undiciFetch(endpoint.url, {
+              method: 'POST',
+              dispatcher,
+              signal: controller.signal,
+              headers: { 
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': apiKey
+              },
+              body: JSON.stringify(endpoint.body),
+            });
+            
+            clearTimeout(timer);
+            
+            if (!response.ok) {
+              const errorText = await response.text().catch(() => '');
+              console.warn(`[GEMINI-TTS] ${endpoint.name} returned ${response.status}:`, errorText.slice(0, 200));
+              
+              // Если 404 или 400 - endpoint не существует, пробуем следующий
+              if (response.status === 404 || response.status === 400) {
+                break; // Переходим к следующему endpoint
+              }
+              
+              // Для других ошибок - retry
+              if (retry < maxRetries - 1) {
+                continue;
+              }
+              break; // Переходим к следующему прокси
+            }
+            
+            // Проверяем тип ответа
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('audio')) {
+              // Прямой аудио ответ
+              const audioBuffer = Buffer.from(await response.arrayBuffer());
+              console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+              return audioBuffer;
+            } else {
+              // JSON ответ с base64 аудио
+              const json = await response.json().catch(() => null);
+              if (json?.audioContent) {
+                const audioBuffer = Buffer.from(json.audioContent, 'base64');
+                console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+                return audioBuffer;
+              }
+              if (json?.audio) {
+                const audioBuffer = Buffer.from(json.audio, 'base64');
+                console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+                return audioBuffer;
+              }
+              if (json?.data) {
+                const audioBuffer = Buffer.from(json.data, 'base64');
+                console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+                return audioBuffer;
+              }
+              console.warn(`[GEMINI-TTS] ${endpoint.name} returned JSON but no audio field found:`, Object.keys(json || {}));
+            }
+          } catch (e: any) {
+            if (e.name === 'AbortError' || e.message?.includes('timeout')) {
+              console.warn(`[GEMINI-TTS] ${endpoint.name} timeout`);
+              if (retry < maxRetries - 1) continue;
+            } else {
+              console.warn(`[GEMINI-TTS] ${endpoint.name} error:`, e?.message || String(e));
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[GEMINI-TTS] Fatal error:', e);
+  }
+  
+  console.log('[GEMINI-TTS] All endpoints failed, falling back to Google TTS');
+  return null;
 }
 
 /**
