@@ -6526,11 +6526,11 @@ app.post('/api/tts', async (req, res) => {
     
     try {
       // Пробуем разные модели Gemini, которые поддерживают TTS
-      // Суффикс -tts НЕ нужен - это обычные модели с speechConfig
+      // Согласно документации, TTS поддерживают модели с Native Audio
       const modelsToTry = [
+        'gemini-2.0-flash-exp', // Основная модель с Native Audio
+        'gemini-2.0-flash',     // Альтернатива
         process.env.GEMINI_MODEL || 'gemini-2.5-pro',
-        'gemini-2.0-flash-exp',
-        'gemini-2.0-flash',
         'gemini-1.5-pro',
         'gemini-1.5-flash'
       ].filter((v, i, a) => a.indexOf(v) === i); // Убираем дубликаты
@@ -6571,19 +6571,14 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
 `;
       }
       
-      // Формируем полный текст с директорскими заметками для Gemini
-      const fullText = `${directorsNotes}
-
-### SCRIPT
-${text}`;
-      
+      // Для TTS передаем ТОЛЬКО чистый текст без директорских заметок
+      // Директорские заметки используются только для понимания контекста, но не передаются в TTS
       // Используем generateContent с speechConfig для прямой генерации аудио через Gemini
       // Согласно документации: https://ai.google.dev/gemini-api/docs/speech-generation
-      // НЕ используем суффикс -tts в названии модели - это обычные модели с speechConfig
       const requestBody = {
         contents: [{
           role: 'user',
-          parts: [{ text: fullText }]
+          parts: [{ text: text }] // Только чистый текст для озвучки
         }],
         generationConfig: {
           speechConfig: {
