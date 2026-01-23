@@ -7240,6 +7240,40 @@ async function generateSpeechViaGemini(params: {
     
     const endpoints = [
       {
+        name: 'gemini-2.5-pro-speech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      {
+        name: 'gemini-2.5-flash-speech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      {
         name: 'gemini-2.0-flash-speech',
         url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateSpeech',
         body: {
@@ -7259,20 +7293,6 @@ async function generateSpeechViaGemini(params: {
       {
         name: 'gemini-1.5-flash-speech',
         url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateSpeech',
-        body: {
-          input: { text },
-          voiceConfig: {
-            languageCode: language,
-            name: voice
-          },
-          audioConfig: {
-            audioEncoding: 'OGG_OPUS'
-          }
-        }
-      },
-      {
-        name: 'gemini-speech-v1',
-        url: 'https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash-exp:generateSpeech',
         body: {
           input: { text },
           voiceConfig: {
