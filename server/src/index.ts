@@ -5018,16 +5018,558 @@ async function transcribeYandex(buffer: Buffer, filename: string, mime: string, 
   return m ? m[1] : raw;
 }
 
-// Функция выбора голоса Google TTS на основе персонажа/локации
+// Функция для создания хеша строки (для стабильного выбора голоса)
+function simpleHash(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash);
+}
+
+// Расширенный тип персонажа для анализа
+type CharacterForAnalysis = {
+  id: string;
+  name: string;
+  gender: string | null;
+  race?: string | null;
+  class?: string | null;
+  level?: number | null;
+  persona?: string | null;
+  origin?: string | null;
+  description?: string | null;
+  abilities?: string | null;
+  role?: string | null;
+  cha?: number | null; // Харизма для влияния на голос
+  int?: number | null; // Интеллект для влияния на речь
+  wis?: number | null; // Мудрость для влияния на интонацию
+};
+
+// Функция разбиения текста на сегменты (рассказчик и реплики)
+async function parseTextIntoSegments(params: {
+  text: string;
+  gameId?: string;
+  availableCharacters?: Array<CharacterForAnalysis>;
+}): Promise<Array<{
+  text: string;
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}>> {
+  const { text, gameId, availableCharacters = [] } = params;
+  
+  // Если текст очень короткий, возвращаем как один сегмент
+  if (text.length < 50) {
+    const quickEmotion = detectEmotion(text);
+    return [{
+      text: text.trim(),
+      isNarrator: true,
+      emotion: quickEmotion.emotion,
+      intensity: quickEmotion.intensity
+    }];
+  }
+  
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY || 
+                   process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    if (!apiKey) {
+      // Fallback: простое разбиение по кавычкам
+      return parseTextIntoSegmentsSimple(text, availableCharacters);
+    }
+    
+    // Формируем детальный список доступных персонажей для контекста
+    const charactersList = availableCharacters.length > 0
+      ? availableCharacters.map(c => {
+          const parts: string[] = [];
+          parts.push(`Имя: ${c.name}`);
+          if (c.gender) parts.push(`Пол: ${c.gender}`);
+          if (c.race) parts.push(`Раса: ${c.race}`);
+          if (c.class) parts.push(`Класс: ${c.class}${c.level ? ` (${c.level} уровень)` : ''}`);
+          if (c.role) parts.push(`Роль: ${c.role}`);
+          if (c.persona) parts.push(`Характер: ${c.persona}`);
+          if (c.origin) parts.push(`Происхождение: ${c.origin}`);
+          if (c.description) parts.push(`Описание: ${c.description}`);
+          if (c.abilities) parts.push(`Способности: ${c.abilities}`);
+          if (c.cha !== null && c.cha !== undefined) parts.push(`Харизма: ${c.cha}`);
+          if (c.int !== null && c.int !== undefined) parts.push(`Интеллект: ${c.int}`);
+          if (c.wis !== null && c.wis !== undefined) parts.push(`Мудрость: ${c.wis}`);
+          return `- ${parts.join(', ')}`;
+        }).join('\n')
+      : 'Персонажи не указаны';
+    
+    const systemPrompt = `Ты анализируешь текст из настольной ролевой игры D&D 5e и разбиваешь его на сегменты.
+
+Текст может содержать:
+1. Текст рассказчика (мастера) - описания действий, окружения, событий
+2. Реплики персонажей - прямая речь в кавычках или после указания имени
+
+ВАЖНО: Учитывай характеристики персонажей из D&D 5e:
+- Класс персонажа влияет на манеру речи (маг говорит интеллигентно, воин - прямо, друид - мудро, плут - хитро)
+- Раса влияет на акцент и особенности речи
+- Харизма (CHA) влияет на убедительность и красноречие
+- Интеллект (INT) влияет на сложность речи и словарный запас
+- Мудрость (WIS) влияет на интонацию и размеренность речи
+- Persona (характер) описывает манеру общения персонажа
+- Способности и магия могут влиять на голос (например, заклинания могут изменять голос)
+
+Твоя задача:
+1. Разбить текст на сегменты (части)
+2. Для каждого сегмента определить:
+   - Является ли он текстом рассказчика или репликой персонажа
+   - Если это реплика - какой персонаж говорит (используй характеристики для точного определения)
+   - Эмоцию в сегменте (учитывай класс и характер персонажа)
+   - Пол говорящего персонажа (если это реплика)
+   - Учитывай класс, расу, persona и способности персонажа при определении
+
+Доступные персонажи:
+${charactersList}
+
+Верни ТОЛЬКО JSON в следующем формате (без дополнительного текста, только JSON):
+{
+  "segments": [
+    {
+      "text": "текст сегмента",
+      "isNarrator": true/false,
+      "characterName": "имя персонажа или null",
+      "gender": "мужской/женский/null",
+      "emotion": "neutral/joy/sadness/fear/anger/surprise",
+      "intensity": 0.0-1.0
+    }
+  ]
+}
+
+Правила разбиения:
+- Разбивай текст на логические сегменты (предложения или группы предложений)
+- Реплики персонажей выделяй отдельными сегментами
+- Текст рассказчика между репликами тоже выделяй отдельными сегментами
+- Сохраняй порядок сегментов как в оригинальном тексте
+- Не теряй текст - каждый символ должен быть в каком-то сегменте
+- Учитывай характеристики персонажей при определении, кто говорит`;
+
+    const userPrompt = `Разбей следующий текст на сегменты и проанализируй каждый:
+
+"${text}"
+
+Верни JSON с сегментами.`;
+
+    const { text: aiResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt,
+      history: []
+    });
+    
+    if (aiResponse) {
+      // Пытаемся извлечь JSON из ответа
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          if (parsed.segments && Array.isArray(parsed.segments)) {
+            // Обрабатываем сегменты и находим characterId для каждого
+            const segments = parsed.segments.map((seg: any) => {
+              let foundCharacterId: string | undefined;
+              if (seg.characterName && availableCharacters.length > 0) {
+                const found = availableCharacters.find(c => 
+                  c.name.toLowerCase().includes(seg.characterName.toLowerCase()) ||
+                  seg.characterName.toLowerCase().includes(c.name.toLowerCase())
+                );
+                if (found) {
+                  foundCharacterId = found.id;
+                  seg.gender = found.gender || seg.gender;
+                }
+              }
+              
+              return {
+                text: seg.text || '',
+                isNarrator: seg.isNarrator !== false,
+                characterId: foundCharacterId,
+                characterName: seg.characterName || undefined,
+                gender: seg.gender || null,
+                emotion: seg.emotion || 'neutral',
+                intensity: Math.max(0, Math.min(1, seg.intensity || 0))
+              };
+            }).filter((seg: any) => seg.text.trim().length > 0);
+            
+            // Проверяем, что все сегменты покрывают весь текст (приблизительно)
+            const totalSegmentsLength = segments.reduce((sum: number, seg: any) => sum + seg.text.length, 0);
+            if (totalSegmentsLength >= text.length * 0.8) { // Допускаем небольшую потерю
+              return segments;
+            }
+          }
+        } catch (e) {
+          console.error('[TTS-SEGMENTS] Failed to parse AI response:', e);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[TTS-SEGMENTS] AI parsing failed:', e);
+  }
+  
+  // Fallback на простое разбиение
+  return parseTextIntoSegmentsSimple(text, availableCharacters);
+}
+
+// Простое разбиение текста на сегменты (fallback)
+function parseTextIntoSegmentsSimple(
+  text: string, 
+  availableCharacters: Array<CharacterForAnalysis>
+): Array<{
+  text: string;
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}> {
+  const segments: Array<{
+    text: string;
+    isNarrator: boolean;
+    characterId?: string;
+    characterName?: string;
+    gender?: string | null;
+    emotion: string;
+    intensity: number;
+  }> = [];
+  
+  // Разбиваем по кавычкам и паттернам "Имя: текст"
+  const quotePattern = /(["«»„"])([^"«»„"]+)\1/g;
+  const namePattern = /([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)\s*(?:говорит|сказал|сказала|произнес|произнесла|воскликнул|воскликнула|шепчет|кричит):\s*([^.!?]+[.!?])/gi;
+  
+  let lastIndex = 0;
+  const matches: Array<{ start: number; end: number; text: string; isQuote: boolean; characterName?: string }> = [];
+  
+  // Находим все реплики в кавычках
+  let match;
+  while ((match = quotePattern.exec(text)) !== null) {
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: match[2],
+      isQuote: true
+    });
+  }
+  
+  // Находим все реплики с именами
+  while ((match = namePattern.exec(text)) !== null) {
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: match[2],
+      isQuote: false,
+      characterName: match[1]
+    });
+  }
+  
+  // Сортируем по позиции
+  matches.sort((a, b) => a.start - b.start);
+  
+  // Создаем сегменты
+  for (const m of matches) {
+    // Текст перед репликой (рассказчик)
+    if (m.start > lastIndex) {
+      const narratorText = text.slice(lastIndex, m.start).trim();
+      if (narratorText) {
+        const emotion = detectEmotion(narratorText);
+        segments.push({
+          text: narratorText,
+          isNarrator: true,
+          emotion: emotion.emotion,
+          intensity: emotion.intensity
+        });
+      }
+    }
+    
+    // Реплика персонажа
+    const emotion = detectEmotion(m.text);
+    let characterId: string | undefined;
+    let gender: string | null = null;
+    
+    if (m.characterName) {
+      const found = availableCharacters.find(c => 
+        c.name.toLowerCase().includes(m.characterName!.toLowerCase()) ||
+        m.characterName!.toLowerCase().includes(c.name.toLowerCase())
+      );
+      if (found) {
+        characterId = found.id;
+        gender = found.gender;
+      }
+    }
+    
+    segments.push({
+      text: m.text.trim(),
+      isNarrator: false,
+      characterId,
+      characterName: m.characterName,
+      gender,
+      emotion: emotion.emotion,
+      intensity: emotion.intensity
+    });
+    
+    lastIndex = m.end;
+  }
+  
+  // Текст после последней реплики (рассказчик)
+  if (lastIndex < text.length) {
+    const narratorText = text.slice(lastIndex).trim();
+    if (narratorText) {
+      const emotion = detectEmotion(narratorText);
+      segments.push({
+        text: narratorText,
+        isNarrator: true,
+        emotion: emotion.emotion,
+        intensity: emotion.intensity
+      });
+    }
+  }
+  
+  // Если не нашли реплик, возвращаем весь текст как один сегмент рассказчика
+  if (segments.length === 0) {
+    const emotion = detectEmotion(text);
+    segments.push({
+      text: text.trim(),
+      isNarrator: true,
+      emotion: emotion.emotion,
+      intensity: emotion.intensity
+    });
+  }
+  
+  return segments;
+}
+
+// Функция динамического анализа текста через LLM для определения контекста речи
+async function analyzeSpeechContext(params: {
+  text: string;
+  gameId?: string;
+  availableCharacters?: Array<{ id: string; name: string; gender: string | null }>;
+}): Promise<{
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}> {
+  const { text, gameId, availableCharacters = [] } = params;
+  
+  // Если текст очень короткий, используем быстрое определение без LLM
+  if (text.length < 20) {
+    const quickEmotion = detectEmotion(text);
+    return {
+      isNarrator: true,
+      emotion: quickEmotion.emotion,
+      intensity: quickEmotion.intensity
+    };
+  }
+  
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY || 
+                   process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    if (!apiKey) {
+      // Fallback на паттерн-бейзированное определение
+      const quickEmotion = detectEmotion(text);
+      return {
+        isNarrator: !text.includes('"') && !text.includes('«') && !text.includes('»'),
+        emotion: quickEmotion.emotion,
+        intensity: quickEmotion.intensity
+      };
+    }
+    
+    // Формируем список доступных персонажей для контекста
+    const charactersList = availableCharacters.length > 0
+      ? availableCharacters.map(c => `- ${c.name}${c.gender ? ` (${c.gender})` : ''}`).join('\n')
+      : 'Персонажи не указаны';
+    
+    const systemPrompt = `Ты анализируешь текст из настольной ролевой игры D&D 5e для определения контекста речи.
+
+Твоя задача:
+1. Определить, является ли текст репликой персонажа или текстом рассказчика (мастера)
+2. Если это реплика персонажа - определить, какой персонаж говорит
+3. Определить эмоцию в тексте
+4. Определить пол говорящего персонажа (если это реплика)
+
+Доступные персонажи:
+${charactersList}
+
+Верни ТОЛЬКО JSON в следующем формате (без дополнительного текста, только JSON):
+{
+  "isNarrator": true/false,
+  "characterName": "имя персонажа или null",
+  "gender": "мужской/женский/null",
+  "emotion": "neutral/joy/sadness/fear/anger/surprise",
+  "intensity": 0.0-1.0
+}
+
+Правила определения:
+- Реплики персонажей обычно в кавычках или начинаются с имени персонажа
+- Текст рассказчика описывает действия, окружение, события
+- Если персонаж не найден в списке, но текст явно реплика - используй characterName из текста
+- Эмоция должна отражать тон и настроение текста`;
+
+    const userPrompt = `Проанализируй следующий текст:
+
+"${text}"
+
+Определи контекст речи и верни JSON.`;
+
+    const { text: aiResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt,
+      history: []
+    });
+    
+    if (aiResponse) {
+      // Пытаемся извлечь JSON из ответа
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          // Находим characterId по имени, если персонаж найден
+          let foundCharacterId: string | undefined;
+          if (parsed.characterName && availableCharacters.length > 0) {
+            const found = availableCharacters.find(c => 
+              c.name.toLowerCase().includes(parsed.characterName.toLowerCase()) ||
+              parsed.characterName.toLowerCase().includes(c.name.toLowerCase())
+            );
+            if (found) {
+              foundCharacterId = found.id;
+              parsed.gender = found.gender || parsed.gender;
+            }
+          }
+          
+          return {
+            isNarrator: parsed.isNarrator !== false, // По умолчанию рассказчик
+            characterId: foundCharacterId,
+            characterName: parsed.characterName || undefined,
+            gender: parsed.gender || null,
+            emotion: parsed.emotion || 'neutral',
+            intensity: Math.max(0, Math.min(1, parsed.intensity || 0))
+          };
+        } catch (e) {
+          console.error('[TTS-ANALYSIS] Failed to parse AI response:', e);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[TTS-ANALYSIS] AI analysis failed:', e);
+  }
+  
+  // Fallback на паттерн-бейзированное определение
+  const quickEmotion = detectEmotion(text);
+  const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
+  const hasNamePattern = /^([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)[:"]/.test(text);
+  
+  return {
+    isNarrator: !hasQuotes && !hasNamePattern,
+    emotion: quickEmotion.emotion,
+    intensity: quickEmotion.intensity
+  };
+}
+
+// Функция парсинга эмоций из текста (fallback)
+function detectEmotion(text: string): { emotion: string; intensity: number } {
+  const lowerText = text.toLowerCase();
+  
+  // Радость
+  const joyPatterns = [
+    /\b(рад|радост|счастлив|весел|улыб|смех|лику|торжеств|праздн|восторг|восхищ|отличн|прекрасн|замечательн)\b/gi,
+    /[!]{2,}/g, // Множественные восклицательные знаки
+    /\b(да!|ура!|отлично!|прекрасно!)\b/gi
+  ];
+  const joyMatches = joyPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Грусть
+  const sadnessPatterns = [
+    /\b(груст|печал|тоск|скорб|плач|слез|уныл|отчаян|безнадежн|разочарован)\b/gi,
+    /\.{3,}/g, // Многоточие
+    /\b(увы|жаль|к сожалению)\b/gi
+  ];
+  const sadnessMatches = sadnessPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Страх
+  const fearPatterns = [
+    /\b(страх|боюсь|боязн|ужас|испуг|паник|тревог|опасн|жутк|жутко)\b/gi,
+    /\b(что если|вдруг|не дай бог)\b/gi
+  ];
+  const fearMatches = fearPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Злость
+  const angerPatterns = [
+    /\b(зло|зли|ярост|гнев|ненавист|проклят|черт|дьявол|бесит|разозл|раздражен)\b/gi,
+    /\b(как же|как можно|не могу|достало)\b/gi
+  ];
+  const angerMatches = angerPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Удивление
+  const surprisePatterns = [
+    /\b(удивл|невероятн|неожиданн|внезапн|ошеломл|поразительн|не может быть|неужели)\b/gi,
+    /\?{2,}/g // Множественные вопросительные знаки
+  ];
+  const surpriseMatches = surprisePatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Определяем доминирующую эмоцию
+  const emotions = [
+    { name: 'joy', score: joyMatches },
+    { name: 'sadness', score: sadnessMatches },
+    { name: 'fear', score: fearMatches },
+    { name: 'anger', score: angerMatches },
+    { name: 'surprise', score: surpriseMatches }
+  ];
+  
+  emotions.sort((a, b) => b.score - a.score);
+  const dominant = emotions[0];
+  
+  // Интенсивность на основе количества совпадений
+  const intensity = Math.min(1.0, dominant.score / 3.0);
+  
+  return {
+    emotion: dominant.score > 0 ? dominant.name : 'neutral',
+    intensity: dominant.score > 0 ? intensity : 0
+  };
+}
+
+// Функция выбора голоса Google TTS на основе персонажа/локации с поддержкой многоголосости
 function selectVoiceForContext(params: {
   characterId?: string;
+  characterName?: string;
   locationId?: string;
   gender?: string | null;
   characterGender?: string | null;
   isNarrator?: boolean;
   locationType?: string | null;
+  characterClass?: string | null;
+  characterRace?: string | null;
+  characterPersona?: string | null;
+  characterCha?: number | null;
+  characterInt?: number | null;
+  characterWis?: number | null;
+  characterLevel?: number | null;
 }): { voice: string; pitch: number; rate: number } {
-  const { characterId, locationId, gender, characterGender, isNarrator, locationType } = params;
+  const { 
+    characterId, 
+    characterName, 
+    locationId, 
+    gender, 
+    characterGender, 
+    isNarrator, 
+    locationType,
+    characterClass,
+    characterRace,
+    characterPersona,
+    characterCha,
+    characterInt,
+    characterWis,
+    characterLevel
+  } = params;
   
   // Определяем пол для выбора голоса
   const finalGender = characterGender || gender || null;
@@ -5045,22 +5587,117 @@ function selectVoiceForContext(params: {
   let pitch = 0.0; // Нейтральная интонация
   let rate = 1.0; // Нормальный темп
   
-  // Выбор голоса на основе персонажа
+  // Выбор голоса на основе персонажа с уникальностью для каждого персонажа
   if (characterId && !isNarrator) {
+    // Создаем уникальный голос для каждого персонажа на основе его ID
+    const charHash = simpleHash(characterId);
+    const voiceIndex = charHash % 5; // 5 доступных голосов
+    
+    // Базовые настройки на основе пола
     if (isFemale) {
-      voice = 'ru-RU-Wavenet-E'; // Женский, мягкий
-      pitch = 2.0; // Немного выше для женского голоса
+      const femaleVoices = ['ru-RU-Wavenet-E', 'ru-RU-Wavenet-C', 'ru-RU-Wavenet-E', 'ru-RU-Wavenet-C', 'ru-RU-Wavenet-E'];
+      voice = femaleVoices[voiceIndex];
+      pitch = 1.5 + (charHash % 3) * 0.5; // От 1.5 до 3.0
+      rate = 0.95 + (charHash % 5) * 0.05; // От 0.95 до 1.15
     } else if (isMale) {
-      voice = 'ru-RU-Wavenet-B'; // Мужской, нейтральный
-      pitch = -1.0; // Немного ниже для мужского голоса
+      const maleVoices = ['ru-RU-Wavenet-B', 'ru-RU-Wavenet-A', 'ru-RU-Wavenet-B', 'ru-RU-Wavenet-A', 'ru-RU-Wavenet-B'];
+      voice = maleVoices[voiceIndex];
+      pitch = -2.0 + (charHash % 3) * 0.5; // От -2.0 до -0.5
+      rate = 0.9 + (charHash % 5) * 0.05; // От 0.9 до 1.1
     } else {
-      voice = 'ru-RU-Wavenet-D'; // Нейтральный
+      const neutralVoices = ['ru-RU-Wavenet-D', 'ru-RU-Wavenet-B', 'ru-RU-Wavenet-D', 'ru-RU-Wavenet-C', 'ru-RU-Wavenet-D'];
+      voice = neutralVoices[voiceIndex];
+      pitch = -0.5 + (charHash % 3) * 0.5; // От -0.5 до 1.0
+      rate = 0.95 + (charHash % 5) * 0.05; // От 0.95 до 1.15
     }
+    
+    // Корректировки на основе класса персонажа
+    if (characterClass) {
+      const classLower = characterClass.toLowerCase();
+      if (classLower.includes('маг') || classLower.includes('wizard') || classLower.includes('чародей') || classLower.includes('sorcerer')) {
+        // Маги говорят более интеллигентно, размеренно
+        rate = Math.max(0.85, rate - 0.1);
+        pitch += 0.5; // Немного выше для интеллектуальности
+      } else if (classLower.includes('воин') || classLower.includes('fighter') || classLower.includes('варвар') || classLower.includes('barbarian')) {
+        // Воины говорят прямо, уверенно
+        rate = Math.min(1.15, rate + 0.1);
+        pitch -= 0.3; // Немного ниже для уверенности
+      } else if (classLower.includes('друид') || classLower.includes('druid') || classLower.includes('жрец') || classLower.includes('cleric')) {
+        // Друиды и жрецы говорят мудро, размеренно
+        rate = Math.max(0.88, rate - 0.08);
+        pitch += 0.2; // Немного выше для мудрости
+      } else if (classLower.includes('плут') || classLower.includes('rogue') || classLower.includes('бард') || classLower.includes('bard')) {
+        // Плуты и барды говорят быстро, хитро
+        rate = Math.min(1.2, rate + 0.15);
+        pitch += 0.3; // Выше для хитрости
+      } else if (classLower.includes('паладин') || classLower.includes('paladin')) {
+        // Паладины говорят уверенно, благородно
+        rate = Math.max(0.9, rate - 0.05);
+        pitch -= 0.2; // Немного ниже для благородства
+      }
+    }
+    
+    // Корректировки на основе расы
+    if (characterRace) {
+      const raceLower = characterRace.toLowerCase();
+      if (raceLower.includes('эльф') || raceLower.includes('elf')) {
+        // Эльфы говорят изысканно, мелодично
+        pitch += 0.4;
+        rate = Math.max(0.9, rate - 0.05);
+      } else if (raceLower.includes('дварф') || raceLower.includes('dwarf')) {
+        // Дварфы говорят грубовато, низко
+        pitch -= 0.5;
+        rate = Math.min(1.1, rate + 0.05);
+      } else if (raceLower.includes('гном') || raceLower.includes('gnome')) {
+        // Гномы говорят быстро, высоко
+        pitch += 0.6;
+        rate = Math.min(1.15, rate + 0.1);
+      } else if (raceLower.includes('орк') || raceLower.includes('orc') || raceLower.includes('полуорк')) {
+        // Орки говорят грубо, низко
+        pitch -= 0.7;
+        rate = Math.min(1.1, rate + 0.08);
+      }
+    }
+    
+    // Корректировки на основе характеристик
+    if (characterCha !== null && characterCha !== undefined) {
+      // Высокая харизма = более убедительная, красноречивая речь
+      const chaMod = (characterCha - 10) / 2; // Модификатор харизмы
+      rate += chaMod * 0.02; // Более высокая харизма = более быстрая, уверенная речь
+      pitch += chaMod * 0.1; // Более высокая харизма = более выразительная интонация
+    }
+    
+    if (characterInt !== null && characterInt !== undefined) {
+      // Высокий интеллект = более размеренная, продуманная речь
+      const intMod = (characterInt - 10) / 2;
+      rate = Math.max(0.85, rate - intMod * 0.015); // Более высокий интеллект = более медленная, продуманная речь
+    }
+    
+    if (characterWis !== null && characterWis !== undefined) {
+      // Высокая мудрость = более спокойная, размеренная речь
+      const wisMod = (characterWis - 10) / 2;
+      rate = Math.max(0.88, rate - wisMod * 0.01);
+      pitch += wisMod * 0.05; // Более высокая мудрость = более спокойная интонация
+    }
+    
+    // Корректировки на основе уровня
+    if (characterLevel !== null && characterLevel !== undefined) {
+      // Более высокий уровень = более уверенная, опытная речь
+      if (characterLevel >= 10) {
+        rate = Math.max(0.9, rate - 0.05); // Опытные персонажи говорят размереннее
+        pitch -= 0.2; // Более низкий, уверенный голос
+      }
+    }
+    
+    // Ограничиваем значения
+    pitch = Math.max(-5.0, Math.min(5.0, pitch));
+    rate = Math.max(0.75, Math.min(1.25, rate));
   } else if (isNarrator) {
-    // Для рассказчика используем нейтральный голос с небольшими вариациями
+    // Для рассказчика используем уникальный нейтральный голос
+    // Всегда один и тот же голос для рассказчика для консистентности
     voice = 'ru-RU-Wavenet-D';
-    pitch = 0.0;
-    rate = 0.95; // Немного медленнее для повествования
+    pitch = 0.0; // Нейтральная интонация
+    rate = 0.92; // Немного медленнее для повествования, более размеренно
   } else if (locationType) {
     // Выбор голоса на основе типа локации
     const locType = locationType.toLowerCase();
@@ -5080,6 +5717,81 @@ function selectVoiceForContext(params: {
   return { voice, pitch, rate };
 }
 
+// Endpoint для анализа текста и разбиения на сегменты
+app.post('/api/tts/analyze', async (req, res) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+    
+    if (!text.trim()) {
+      return res.status(400).json({ error: 'text_required' });
+    }
+    
+    // Получаем список персонажей для контекста с полной информацией
+    let availableCharacters: Array<CharacterForAnalysis> = [];
+    if (gameId) {
+      try {
+        const prisma = getPrisma();
+        const game = await prisma.game.findUnique({
+          where: { id: gameId },
+          include: { 
+            characters: { 
+              select: { 
+                id: true, 
+                name: true, 
+                gender: true,
+                race: true,
+                class: true,
+                level: true,
+                persona: true,
+                origin: true,
+                description: true,
+                abilities: true,
+                role: true,
+                cha: true,
+                int: true,
+                wis: true
+              } 
+            } 
+          }
+        }).catch(() => null);
+        if (game?.characters) {
+          availableCharacters = game.characters.map(c => ({
+            id: c.id,
+            name: c.name,
+            gender: c.gender,
+            race: c.race,
+            class: c.class,
+            level: c.level,
+            persona: c.persona,
+            origin: c.origin,
+            description: c.description,
+            abilities: c.abilities,
+            role: c.role,
+            cha: c.cha,
+            int: c.int,
+            wis: c.wis
+          }));
+        }
+      } catch (e) {
+        console.error('[TTS-ANALYZE] Failed to fetch characters:', e);
+      }
+    }
+    
+    // Разбиваем текст на сегменты
+    const segments = await parseTextIntoSegments({
+      text,
+      gameId,
+      availableCharacters
+    });
+    
+    return res.json({ segments });
+  } catch (e) {
+    console.error('[TTS-ANALYZE] Error:', e);
+    return res.status(500).json({ error: 'analysis_failed', details: String(e) });
+  }
+});
+
 app.post('/api/tts', async (req, res) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text : '';
@@ -5088,21 +5800,25 @@ app.post('/api/tts', async (req, res) => {
     const speedReq = typeof req.body?.speed === 'string' ? parseFloat(req.body.speed) : undefined;
     const pitchReq = typeof req.body?.pitch === 'string' ? parseFloat(req.body.pitch) : undefined;
     const lang = typeof req.body?.lang === 'string' ? req.body.lang : 'ru-RU';
+    const segmentMode = typeof req.body?.segmentMode === 'boolean' ? req.body.segmentMode : false; // Режим сегментированного текста
     
     // Контекст для выбора голоса
+    const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
     const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
     const locationId = typeof req.body?.locationId === 'string' ? req.body.locationId : undefined;
     const gender = typeof req.body?.gender === 'string' ? req.body.gender : undefined;
-    const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : false;
+    const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : undefined; // undefined = автоопределение
     
     console.log('[TTS] Request received:', {
       textLength: text.length,
       textPreview: text.slice(0, 100),
       format,
+      gameId,
       characterId,
       locationId,
       gender,
       isNarrator,
+      segmentMode,
     });
     
     if (!text.trim()) {
@@ -5110,16 +5826,120 @@ app.post('/api/tts', async (req, res) => {
       return res.status(400).json({ error: 'text_required' });
     }
     
+    // Если включен режим сегментов, разбиваем текст и обрабатываем каждый сегмент
+    if (segmentMode) {
+      // Получаем список персонажей для контекста с полной информацией
+      let availableCharacters: Array<CharacterForAnalysis> = [];
+      if (gameId) {
+        try {
+          const prisma = getPrisma();
+          const game = await prisma.game.findUnique({
+            where: { id: gameId },
+            include: { 
+              characters: { 
+                select: { 
+                  id: true, 
+                  name: true, 
+                  gender: true,
+                  race: true,
+                  class: true,
+                  level: true,
+                  persona: true,
+                  origin: true,
+                  description: true,
+                  abilities: true,
+                  role: true,
+                  cha: true,
+                  int: true,
+                  wis: true
+                } 
+              } 
+            }
+          }).catch(() => null);
+          if (game?.characters) {
+            availableCharacters = game.characters.map(c => ({
+              id: c.id,
+              name: c.name,
+              gender: c.gender,
+              race: c.race,
+              class: c.class,
+              level: c.level,
+              persona: c.persona,
+              origin: c.origin,
+              description: c.description,
+              abilities: c.abilities,
+              role: c.role,
+              cha: c.cha,
+              int: c.int,
+              wis: c.wis
+            }));
+          }
+        } catch (e) {
+          console.error('[TTS] Failed to fetch characters for segments:', e);
+        }
+      }
+      
+      const segments = await parseTextIntoSegments({
+        text,
+        gameId,
+        availableCharacters
+      });
+      
+      // Возвращаем сегменты для последовательной обработки на клиенте
+      return res.json({ 
+        segments: segments.map(seg => ({
+          text: seg.text,
+          isNarrator: seg.isNarrator,
+          characterId: seg.characterId,
+          characterName: seg.characterName,
+          gender: seg.gender,
+          emotion: seg.emotion,
+          intensity: seg.intensity
+        }))
+      });
+    }
+    
     // Получаем информацию о персонаже/локации из базы данных для выбора голоса
     let characterGender: string | null = null;
+    let characterName: string | null = null;
+    let characterClass: string | null = null;
+    let characterRace: string | null = null;
+    let characterPersona: string | null = null;
+    let characterCha: number | null = null;
+    let characterInt: number | null = null;
+    let characterWis: number | null = null;
+    let characterLevel: number | null = null;
     let locationType: string | null = null;
     
     if (characterId || locationId) {
       try {
         const prisma = getPrisma();
         if (characterId) {
-          const char = await prisma.character.findUnique({ where: { id: characterId }, select: { gender: true } });
-          if (char) characterGender = char.gender;
+          const char = await prisma.character.findUnique({ 
+            where: { id: characterId }, 
+            select: { 
+              gender: true, 
+              name: true,
+              race: true,
+              class: true,
+              level: true,
+              persona: true,
+              cha: true,
+              int: true,
+              wis: true
+            } 
+          });
+          if (char) {
+            characterGender = char.gender;
+            characterName = char.name;
+            characterClass = char.class;
+            characterRace = char.race;
+            characterPersona = char.persona;
+            characterCha = char.cha;
+            characterInt = char.int;
+            characterWis = char.wis;
+            characterLevel = char.level;
+          }
         }
         if (locationId) {
           const loc = await prisma.location.findUnique({ where: { id: locationId }, select: { title: true, description: true } });
@@ -5138,20 +5958,204 @@ app.post('/api/tts', async (req, res) => {
       }
     }
     
-    // Выбираем голос на основе контекста
+    // Динамический анализ текста через LLM для определения контекста
+    let speechContext: {
+      isNarrator: boolean;
+      characterId?: string;
+      characterName?: string;
+      gender?: string | null;
+      emotion: string;
+      intensity: number;
+    };
+    
+    // Получаем список персонажей для контекста анализа с полной информацией
+    let availableCharacters: Array<CharacterForAnalysis> = [];
+    if (gameId) {
+      try {
+        const prisma = getPrisma();
+        const game = await prisma.game.findUnique({
+          where: { id: gameId },
+          include: { 
+            characters: { 
+              select: { 
+                id: true, 
+                name: true, 
+                gender: true,
+                race: true,
+                class: true,
+                level: true,
+                persona: true,
+                origin: true,
+                description: true,
+                abilities: true,
+                role: true,
+                cha: true,
+                int: true,
+                wis: true
+              } 
+            } 
+          }
+        }).catch(() => null);
+        if (game?.characters) {
+          availableCharacters = game.characters.map(c => ({
+            id: c.id,
+            name: c.name,
+            gender: c.gender,
+            race: c.race,
+            class: c.class,
+            level: c.level,
+            persona: c.persona,
+            origin: c.origin,
+            description: c.description,
+            abilities: c.abilities,
+            role: c.role,
+            cha: c.cha,
+            int: c.int,
+            wis: c.wis
+          }));
+        }
+      } catch (e) {
+        console.error('[TTS] Failed to fetch characters for analysis:', e);
+      }
+    }
+    
+    // Если characterId передан явно, добавляем его в список с полной информацией
+    if (characterId && characterName && !availableCharacters.find(c => c.id === characterId)) {
+      availableCharacters.push({
+        id: characterId,
+        name: characterName,
+        gender: characterGender,
+        race: characterRace,
+        class: characterClass,
+        level: characterLevel,
+        persona: characterPersona,
+        cha: characterCha,
+        int: characterInt,
+        wis: characterWis
+      });
+    }
+    
+    // Анализируем текст через LLM
+    try {
+      speechContext = await analyzeSpeechContext({
+        text,
+        gameId,
+        availableCharacters
+      });
+      console.log('[TTS] AI analysis result:', speechContext);
+    } catch (e) {
+      console.error('[TTS] AI analysis failed, using fallback:', e);
+      // Fallback на переданные параметры или паттерн-бейзированное определение
+      const emotion = detectEmotion(text);
+      speechContext = {
+        isNarrator: isNarrator !== undefined ? isNarrator : true,
+        characterId: characterId,
+        characterName: characterName || undefined,
+        gender: gender || characterGender,
+        emotion: emotion.emotion,
+        intensity: emotion.intensity
+      };
+    }
+    
+    // Используем результат анализа для выбора голоса
+    // Если isNarrator передан явно, используем его, иначе - результат анализа
+    const finalIsNarrator = isNarrator !== undefined ? isNarrator : speechContext.isNarrator;
+    const finalCharacterId = speechContext.characterId || characterId;
+    const finalCharacterName = speechContext.characterName || characterName;
+    const finalGender = speechContext.gender || gender || characterGender;
+    
+    // Находим полную информацию о персонаже для выбора голоса
+    let finalCharacterClass = characterClass;
+    let finalCharacterRace = characterRace;
+    let finalCharacterPersona = characterPersona;
+    let finalCharacterCha = characterCha;
+    let finalCharacterInt = characterInt;
+    let finalCharacterWis = characterWis;
+    let finalCharacterLevel = characterLevel;
+    
+    if (finalCharacterId && availableCharacters.length > 0) {
+      const foundChar = availableCharacters.find(c => c.id === finalCharacterId);
+      if (foundChar) {
+        finalCharacterClass = foundChar.class || finalCharacterClass;
+        finalCharacterRace = foundChar.race || finalCharacterRace;
+        finalCharacterPersona = foundChar.persona || finalCharacterPersona;
+        finalCharacterCha = foundChar.cha !== null && foundChar.cha !== undefined ? foundChar.cha : finalCharacterCha;
+        finalCharacterInt = foundChar.int !== null && foundChar.int !== undefined ? foundChar.int : finalCharacterInt;
+        finalCharacterWis = foundChar.wis !== null && foundChar.wis !== undefined ? foundChar.wis : finalCharacterWis;
+        finalCharacterLevel = foundChar.level !== null && foundChar.level !== undefined ? foundChar.level : finalCharacterLevel;
+      }
+    }
+    
+    // Выбираем голос на основе контекста с учетом всех характеристик персонажа
     const voiceContext = selectVoiceForContext({
-      characterId,
+      characterId: finalCharacterId,
+      characterName: finalCharacterName,
       locationId,
-      gender: gender || characterGender,
-      characterGender,
-      isNarrator,
+      gender: finalGender,
+      characterGender: finalGender,
+      isNarrator: finalIsNarrator,
       locationType,
+      characterClass: finalCharacterClass,
+      characterRace: finalCharacterRace,
+      characterPersona: finalCharacterPersona,
+      characterCha: finalCharacterCha,
+      characterInt: finalCharacterInt,
+      characterWis: finalCharacterWis,
+      characterLevel: finalCharacterLevel,
+    });
+    
+    // Используем эмоцию из анализа
+    const emotion = {
+      emotion: speechContext.emotion,
+      intensity: speechContext.intensity
+    };
+    console.log('[TTS] Final context:', {
+      isNarrator: finalIsNarrator,
+      characterId: finalCharacterId,
+      characterName: finalCharacterName,
+      emotion: emotion.emotion,
+      intensity: emotion.intensity
     });
     
     // Используем выбранный голос или переданный явно
     const finalVoice = voiceReq || voiceContext.voice;
-    const finalSpeed = speedReq !== undefined ? speedReq : voiceContext.rate;
-    const finalPitch = pitchReq !== undefined ? pitchReq : voiceContext.pitch;
+    let finalSpeed = speedReq !== undefined ? speedReq : voiceContext.rate;
+    let finalPitch = pitchReq !== undefined ? pitchReq : voiceContext.pitch;
+    
+    // Корректируем pitch и rate на основе эмоций
+    if (emotion.emotion !== 'neutral' && emotion.intensity > 0) {
+      const intensity = emotion.intensity;
+      switch (emotion.emotion) {
+        case 'joy':
+          // Радость: выше pitch, быстрее rate
+          finalPitch += 1.5 * intensity;
+          finalSpeed += 0.1 * intensity;
+          break;
+        case 'sadness':
+          // Грусть: ниже pitch, медленнее rate
+          finalPitch -= 1.0 * intensity;
+          finalSpeed -= 0.1 * intensity;
+          break;
+        case 'fear':
+          // Страх: выше pitch, быстрее rate (нервность)
+          finalPitch += 1.0 * intensity;
+          finalSpeed += 0.15 * intensity;
+          break;
+        case 'anger':
+          // Злость: ниже pitch, быстрее rate
+          finalPitch -= 0.5 * intensity;
+          finalSpeed += 0.1 * intensity;
+          break;
+        case 'surprise':
+          // Удивление: выше pitch, быстрее rate
+          finalPitch += 2.0 * intensity;
+          finalSpeed += 0.2 * intensity;
+          break;
+      }
+      // Ограничиваем значения
+      finalPitch = Math.max(-5.0, Math.min(5.0, finalPitch));
+      finalSpeed = Math.max(0.75, Math.min(1.25, finalSpeed));
+    }
     
     console.log('[TTS] Voice context:', {
       finalVoice,
@@ -5182,7 +6186,15 @@ app.post('/api/tts', async (req, res) => {
             const client = new TextToSpeechClient({ keyFilename: googleCreds });
             // Для Service Account используем клиент напрямую
             const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            const ssmlText = `<speak><prosody rate="${Math.max(0.75, Math.min(1.25, speedReq))}" pitch="${pitchReq >= 0 ? '+' : ''}${Math.max(-5.0, Math.min(5.0, pitchReq))}st">${escapedText}</prosody></speak>`;
+            // Создаем улучшенную SSML разметку с эмоциями и интонацией
+            const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
+            const rateStr = finalSpeed.toFixed(2);
+            // Добавляем паузы для лучшей интонации (особенно для рассказчика)
+            const textWithPauses = finalIsNarrator 
+              ? escapedText.replace(/([.!?])\s+/g, '$1<break time="300ms"/>')
+                .replace(/([,;:])\s+/g, '$1<break time="150ms"/>')
+              : escapedText.replace(/([.!?])\s+/g, '$1<break time="200ms"/>');
+            const ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+0dB">${textWithPauses}</prosody></speak>`;
             
             let voiceName = 'ru-RU-Wavenet-D';
             if (voiceReq.includes('ru-RU')) {
@@ -5223,7 +6235,15 @@ app.post('/api/tts', async (req, res) => {
         // Если используется API ключ, используем REST API напрямую
         if (googleKey && !accessToken) {
           const escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          const ssmlText = `<speak><prosody rate="${Math.max(0.75, Math.min(1.25, finalSpeed))}" pitch="${finalPitch >= 0 ? '+' : ''}${Math.max(-5.0, Math.min(5.0, finalPitch))}st">${escapedText}</prosody></speak>`;
+          // Создаем улучшенную SSML разметку с эмоциями и интонацией
+          const pitchStr = finalPitch >= 0 ? `+${finalPitch.toFixed(1)}` : `${finalPitch.toFixed(1)}`;
+          const rateStr = finalSpeed.toFixed(2);
+          // Добавляем паузы для лучшей интонации (особенно для рассказчика)
+          const textWithPauses = finalIsNarrator 
+            ? escapedText.replace(/([.!?])\s+/g, '$1<break time="300ms"/>')
+              .replace(/([,;:])\s+/g, '$1<break time="150ms"/>')
+            : escapedText.replace(/([.!?])\s+/g, '$1<break time="200ms"/>');
+          const ssmlText = `<speak><prosody rate="${rateStr}" pitch="${pitchStr}st" volume="+0dB">${textWithPauses}</prosody></speak>`;
           
           let voiceName = finalVoice;
           if (!voiceName.includes('ru-RU')) {

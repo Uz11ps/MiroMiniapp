@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter } from '../../api';
 
 import '../../styles.css';
 
@@ -175,6 +175,66 @@ const GameChat: React.FC = () => {
     window.addEventListener('storage', onChange);
     return () => { window.removeEventListener('mira_settings_changed', onChange); window.removeEventListener('storage', onChange); };
   }, []);
+  // Функция для последовательного воспроизведения сегментов
+  const playSegment = async (
+    segment: { text: string; isNarrator: boolean; characterId?: string; characterName?: string; gender?: string | null },
+    seq: number,
+    locationId?: string
+  ): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      // Проверяем, не изменилась ли последовательность
+      if (seq !== activeSpeakSeqRef.current) {
+        console.log('[TTS-CLIENT] Sequence changed, stopping segment playback');
+        resolve();
+        return;
+      }
+      
+      ttsSynthesize(segment.text, {
+        gameId: id,
+        characterId: segment.characterId,
+        locationId: locationId || engineLocRef.current || undefined,
+        gender: segment.gender || undefined,
+        isNarrator: segment.isNarrator,
+      }).then(blob => {
+        // Проверяем еще раз после загрузки
+        if (seq !== activeSpeakSeqRef.current) {
+          console.log('[TTS-CLIENT] Sequence changed after blob load, skipping segment');
+          resolve();
+          return;
+        }
+        
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        const volume = Math.max(0, Math.min(1, settings.ttsVolume / 100));
+        audio.volume = volume;
+        try { (audio as any).playbackRate = settings.ttsRate; } catch {}
+        
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        
+        audio.onerror = (e) => {
+          console.error('[TTS-CLIENT] Segment playback error:', e);
+          URL.revokeObjectURL(url);
+          resolve(); // Продолжаем даже при ошибке
+        };
+        
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+          playPromise.catch((err) => {
+            console.error('[TTS-CLIENT] Segment play() failed:', err);
+            URL.revokeObjectURL(url);
+            resolve();
+          });
+        }
+      }).catch(err => {
+        console.error('[TTS-CLIENT] Segment synthesis failed:', err);
+        resolve(); // Продолжаем даже при ошибке
+      });
+    });
+  };
+
   const speak = async (text: string, context?: { characterId?: string; locationId?: string; gender?: string; isNarrator?: boolean }) => {
     try {
       const t = String(text || '');
@@ -187,10 +247,12 @@ const GameChat: React.FC = () => {
         console.log('[TTS-CLIENT] Duplicate text, skipping:', t.slice(0, 50));
         return;
       }
+      
       console.log('[TTS-CLIENT] Starting TTS for text:', t.slice(0, 100), 'context:', context);
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
       speakingInFlightRef.current = true;
+      
       // остановить предыдущее воспроизведение
       try {
         if (audioRef.current) {
@@ -204,21 +266,52 @@ const GameChat: React.FC = () => {
           audioUrlRef.current = null;
         }
       } catch {}
-      // синтез с контекстом для выбора голоса
-      console.log('[TTS-CLIENT] Calling ttsSynthesize...');
+      
+      // Анализируем текст и разбиваем на сегменты
+      try {
+        const segments = await ttsAnalyzeText(t, id);
+        console.log('[TTS-CLIENT] Text analyzed into segments:', segments.length);
+        
+        // Если сегментов больше одного, воспроизводим последовательно
+        if (segments.length > 1) {
+          for (const segment of segments) {
+            // Проверяем, не изменилась ли последовательность
+            if (seq !== activeSpeakSeqRef.current) {
+              console.log('[TTS-CLIENT] Sequence changed, stopping playback');
+              speakingInFlightRef.current = false;
+              return;
+            }
+            
+            await playSegment(segment, seq, context?.locationId);
+          }
+          
+          // Проверяем финальную последовательность
+          if (seq === activeSpeakSeqRef.current) {
+            lastSpokenRef.current = t;
+            speakingInFlightRef.current = false;
+          }
+          return;
+        }
+      } catch (err) {
+        console.error('[TTS-CLIENT] Segment analysis failed, falling back to single synthesis:', err);
+      }
+      
+      // Fallback: если анализ не удался или сегмент один, используем обычный синтез
       const blob = await ttsSynthesize(t, {
+        gameId: id,
         characterId: context?.characterId || selectedCharId || undefined,
         locationId: context?.locationId || engineLocRef.current || undefined,
-        gender: context?.gender || charName ? undefined : undefined, // TODO: получить gender из персонажа
-        isNarrator: context?.isNarrator !== undefined ? context.isNarrator : true, // По умолчанию - рассказчик
+        gender: context?.gender || undefined,
+        isNarrator: context?.isNarrator,
       });
-      console.log('[TTS-CLIENT] Received blob, size:', blob.size, 'bytes');
+      
       // если с тех пор пришёл новый текст — этот результат игнорируем
       if (seq !== activeSpeakSeqRef.current) {
         console.log('[TTS-CLIENT] Sequence changed, ignoring result');
         speakingInFlightRef.current = false;
         return;
       }
+      
       const url = URL.createObjectURL(blob);
       audioUrlRef.current = url;
       const audio = new Audio(url);
@@ -255,6 +348,7 @@ const GameChat: React.FC = () => {
       speakingInFlightRef.current = false;
     } catch (err) {
       console.error('[TTS-CLIENT] speak() error:', err);
+      speakingInFlightRef.current = false;
     }
   };
   const getDeviceIdLocal = () => {

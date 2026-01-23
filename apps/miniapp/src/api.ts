@@ -556,15 +556,52 @@ export async function leaveLobby(lobbyId: string): Promise<void> {
   await fetch(`${API}/lobbies/${encodeURIComponent(lobbyId)}/leave${qs.toString() ? `?${qs}` : ''}`, { method: 'DELETE' }).catch(() => {});
 }
 
+// Анализ текста и разбиение на сегменты
+export async function ttsAnalyzeText(
+  text: string,
+  gameId?: string
+): Promise<Array<{
+  text: string;
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}>> {
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  const root = host.split('.').slice(-2).join('.');
+  const apiBase = root === 'localhost' ? 'http://localhost:4000/api' : `${typeof window !== 'undefined' ? window.location.protocol : 'https:'}//api.${root}/api`;
+  
+  const body: any = { text };
+  if (gameId) body.gameId = gameId;
+  
+  const res = await fetch(`${apiBase}/tts/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`TTS analysis failed: ${errText}`);
+  }
+  
+  const data = await res.json();
+  return data.segments || [];
+}
+
 export async function ttsSynthesize(
   text: string, 
   options?: {
     voice?: string;
     format?: 'mp3' | 'oggopus';
+    gameId?: string;
     characterId?: string;
     locationId?: string;
     gender?: string;
     isNarrator?: boolean;
+    segmentMode?: boolean; // Режим сегментированного текста
   }
 ): Promise<Blob> {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
@@ -584,12 +621,14 @@ export async function ttsSynthesize(
     lang: 'ru-RU',
   };
   
-  // Передаем контекст для выбора голоса
+  // Передаем контекст для выбора голоса и анализа через LLM
+  if (options?.gameId) body.gameId = options.gameId;
   if (options?.characterId) body.characterId = options.characterId;
   if (options?.locationId) body.locationId = options.locationId;
   if (options?.gender) body.gender = options.gender;
   if (options?.isNarrator !== undefined) body.isNarrator = options.isNarrator;
   if (options?.voice) body.voice = options.voice;
+  if (options?.segmentMode !== undefined) body.segmentMode = options.segmentMode;
   
   const res = await fetch(`${apiBase}/tts`, { 
     method: 'POST', 
