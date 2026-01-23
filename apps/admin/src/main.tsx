@@ -1338,6 +1338,8 @@ const CharactersPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [filterPlayable, setFilterPlayable] = useState<'all' | 'playable' | 'npc'>('all');
   const [editingStats, setEditingStats] = useState<Record<string, Partial<Character>>>({});
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 20;
   const [form, setForm] = useState<Partial<Character>>({ 
     name: '', 
     avatarUrl: 'https://picsum.photos/seed/new_char/80/80', 
@@ -1505,6 +1507,17 @@ const CharactersPage: React.FC = () => {
   
   const playableCount = list.filter(c => c.isPlayable).length;
   const npcCount = list.filter(c => !c.isPlayable).length;
+  
+  // Пагинация
+  const totalPages = Math.ceil(filteredList.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedList = filteredList.slice(startIndex, endIndex);
+  
+  // Сброс страницы при изменении фильтров
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, filterPlayable]);
 
   return (
     <div style={{ padding: 16, display: 'grid', gap: 16 }}>
@@ -1618,14 +1631,40 @@ const CharactersPage: React.FC = () => {
         </div>
       </div>
       <div className="card" style={{ padding: 12 }}>
-        <h3>Список персонажей {filteredList.length !== list.length ? `(${filteredList.length} из ${list.length})` : ''}</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>
+            Список персонажей {filteredList.length !== list.length ? `(${filteredList.length} из ${list.length})` : `(${list.length})`}
+            {totalPages > 1 && ` - Страница ${currentPage} из ${totalPages}`}
+          </h3>
+          {totalPages > 1 && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button 
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
+                disabled={currentPage === 1}
+                style={{ padding: '4px 12px' }}
+              >
+                ← Назад
+              </button>
+              <span style={{ fontSize: 14 }}>
+                {startIndex + 1}-{Math.min(endIndex, filteredList.length)} из {filteredList.length}
+              </span>
+              <button 
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
+                disabled={currentPage >= totalPages}
+                style={{ padding: '4px 12px' }}
+              >
+                Вперёд →
+              </button>
+            </div>
+          )}
+        </div>
         {loading ? 'Загрузка...' : filteredList.length === 0 ? (
           <div style={{ padding: 20, textAlign: 'center', color: '#666' }}>
             {search || filterPlayable !== 'all' ? 'Персонажи не найдены' : 'Нет персонажей'}
           </div>
         ) : (
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-            {filteredList.map((c) => {
+            {paginatedList.map((c) => {
               const editing = editingStats[c.id] || {};
               const isSaving = saving === c.id;
               const modStr = getDndModifier(c.str || 10);
@@ -1669,6 +1708,29 @@ const CharactersPage: React.FC = () => {
                     </div>
                     {isSaving && <span style={{ fontSize: 12, color: '#666' }}>Сохранение...</span>}
                     <button onClick={() => onDelete(c.id, c.name)} className="header-btn danger" disabled={isSaving}>Удалить</button>
+                  </div>
+                  
+                  {/* Описание */}
+                  <div>
+                    <label style={{ fontSize: 11, display: 'block', marginBottom: 4, color: '#666' }}>Описание</label>
+                    <textarea 
+                      defaultValue={c.description || ''} 
+                      onBlur={(e) => {
+                        const val = e.target.value;
+                        if (val !== (c.description || '')) onUpdateStat(c.id, 'description', val || null);
+                      }}
+                      placeholder="Описание персонажа..."
+                      style={{ 
+                        width: '100%', 
+                        minHeight: 60, 
+                        padding: 8, 
+                        border: '1px solid #ddd', 
+                        borderRadius: 4,
+                        fontSize: 13,
+                        fontFamily: 'inherit',
+                        resize: 'vertical'
+                      }}
+                    />
                   </div>
                   
                   {/* Статы с модификаторами */}
@@ -1878,6 +1940,53 @@ const CharactersPage: React.FC = () => {
               );
             })}
           </ul>
+        )}
+        {totalPages > 1 && (
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16, paddingTop: 16, borderTop: '1px solid #eee' }}>
+            <button 
+              onClick={() => setCurrentPage(1)} 
+              disabled={currentPage === 1}
+              style={{ padding: '6px 12px' }}
+            >
+              « Первая
+            </button>
+            <button 
+              onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
+              disabled={currentPage === 1}
+              style={{ padding: '6px 12px' }}
+            >
+              ← Назад
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 12px' }}>
+              <span style={{ fontSize: 14 }}>
+                Страница <input 
+                  type="number" 
+                  value={currentPage} 
+                  onChange={(e) => {
+                    const page = Math.max(1, Math.min(totalPages, Number(e.target.value) || 1));
+                    setCurrentPage(page);
+                  }}
+                  style={{ width: 50, textAlign: 'center', padding: '2px 4px' }}
+                  min={1}
+                  max={totalPages}
+                /> из {totalPages}
+              </span>
+            </div>
+            <button 
+              onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
+              disabled={currentPage >= totalPages}
+              style={{ padding: '6px 12px' }}
+            >
+              Вперёд →
+            </button>
+            <button 
+              onClick={() => setCurrentPage(totalPages)} 
+              disabled={currentPage >= totalPages}
+              style={{ padding: '6px 12px' }}
+            >
+              Последняя »
+            </button>
+          </div>
         )}
       </div>
     </div>
