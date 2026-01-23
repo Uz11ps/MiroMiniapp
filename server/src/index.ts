@@ -120,6 +120,9 @@ const DEFAULT_SYSTEM_PROMPT =
   'ОСОБЕННОСТИ ТВОЕЙ РАБОТЫ: ' +
   '1. МИР: Не воспринимай локации как изолированные комнаты. Это части одного большого мира. Переходы между ними должны быть плавными и описываться как движение персонажа. ' +
   '2. ПРАВИЛА: Строго соблюдай правила D&D 5e. Используй характеристики персонажей (STR, DEX, CON, INT, WIS, CHA), классы и навыки. ' +
+  'ВАЖНО: Когда в контексте указаны "Правила мира" или "Правила процесса" - СОПОСТАВЛЯЙ их с текущей сценой и сценарием, а не просто обобщай. ' +
+  'Например, если в правилах написано "Мир D&D основан на ключевых предположениях: боги реальны..." - это обобщение. ' +
+  'Вместо этого используй конкретные детали из текущей сцены: какие боги упомянуты в этой локации, какие фракции действуют здесь, какая атмосфера именно в этой сцене. ' +
   '3. ПРОВЕРКИ: Для любых действий, исход которых не очевиден, запрашивай проверки характеристик (d20 + модификатор). Модификатор = (характеристика-10)/2. ' +
   '4. СПАСБРОСКИ: При опасностях запрашивай спасброски (STR/DEX/CON/INT/WIS/CHA) и учитывай их результат. ' +
   '5. ПРЕИМУЩЕСТВО/ПОМЕХА: Если условия дают преимущество или помеху, явно указывай это при броске d20. ' +
@@ -1279,6 +1282,8 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
           
           let worldRulesParts: string[] = [];
           let gameplayRulesParts: string[] = [];
+          let worldRulesShortParts: string[] = [];
+          let gameplayRulesShortParts: string[] = [];
           
           for (let chunkIdx = 0; chunkIdx < rulesChunks.length; chunkIdx++) {
             try {
@@ -1315,12 +1320,15 @@ ${chunk}
 - ОБЩИЕ описания магических предметов, артефактов (если они не упоминаются в приключении)
 - ОБЩИЕ описания форм правления, валют, календарей (если они не относятся к конкретному приключению)
 
-ИЗВЛЕКИ из ЭТОЙ ЧАСТИ (МАКСИМУМ 500 СИМВОЛОВ для каждого поля!):
+ИЗВЛЕКИ из ЭТОЙ ЧАСТИ:
 
 1. ПРАВИЛА МИРА (worldRules):
    ⚠️ КРИТИЧЕСКИ ВАЖНО: Это КРАТКОЕ описание СЕТТИНГА КОНКРЕТНОГО ПРИКЛЮЧЕНИЯ - где происходит действие, атмосфера.
+   ⚠️ НЕ ОБОБЩАЙ! Сопоставляй общие правила D&D с КОНКРЕТНЫМ приключением из текста.
+   ⚠️ СОЗДАВАЙ КРАТКУЮ ВЕРСИЮ: Не просто обрезай текст до 500 символов! Сжимай информацию, сохраняя ВЕСЬ СМЫСЛ в 500 символах.
+   Используй краткие формулировки, убирай повторы, оставляй только ключевую информацию.
    
-   ВКЛЮЧАЙ ТОЛЬКО:
+   ВКЛЮЧАЙ ТОЛЬКО (сопоставляя с конкретным приключением):
    - Название мира/региона, где происходит ЭТО приключение (например: "Действие происходит в мире Забвенных земель, в городе Люмерия")
    - Атмосферу, окружение ЭТОГО приключения (например: "Подземелье освещает красный каменный пол, из‑за чего везде висит красноватый туман")
    - Описание того, что видят/слышат/ощущают персонажи В ЭТОМ приключении
@@ -1331,17 +1339,21 @@ ${chunk}
    ПРИМЕР worldRules (короткий!):
    "Действие происходит в мире Забвенных земель, в городе Люмерия. Подземелье под храмом Мистры освещает красный каменный пол, из‑за чего везде висит красноватый туман. Культисты Ноктуса проводят ритуалы в подземелье."
    
-   НЕ ВКЛЮЧАЙ:
-   - Общие описания мультивселенной D&D, планов существования, космологии
-   - Общие описания всех богов, пантеонов D&D
+   НЕ ВКЛЮЧАЙ (это обобщения, а не сопоставление с конкретным приключением):
+   - Общие описания мультивселенной D&D, планов существования, космологии (например: "Мультивселенная состоит из Материального Плана...")
+   - Общие описания всех богов, пантеонов D&D (например: "Боги реальны и влияют на мир")
    - Общие описания форм правления, валют, календарей
+   - Общие утверждения о мире D&D без привязки к конкретному приключению
    - Мета-информацию
    - Механики игры - это gameplayRules
 
 2. ПРАВИЛА ИГРОВОГО ПРОЦЕССА (gameplayRules):
    ⚠️ КРИТИЧЕСКИ ВАЖНО: Это КРАТКОЕ описание КОНКРЕТНЫХ МЕХАНИК ДЛЯ ЭТОГО ПРИКЛЮЧЕНИЯ - как играть.
+   ⚠️ НЕ ОБОБЩАЙ! Сопоставляй общие правила D&D с КОНКРЕТНЫМ приключением из текста.
+   ⚠️ СОЗДАВАЙ КРАТКУЮ ВЕРСИЮ: Не просто обрезай текст до 500 символов! Сжимай информацию, сохраняя ВЕСЬ СМЫСЛ в 500 символах.
+   Используй краткие формулировки, убирай повторы, оставляй только ключевую информацию.
    
-   ВКЛЮЧАЙ ТОЛЬКО:
+   ВКЛЮЧАЙ ТОЛЬКО (сопоставляя с конкретным приключением):
    - Уровни персонажей для ЭТОГО приключения (например: "для персонажей 2–3 уровня")
    - Редакция правил (например: "Используются правила D&D 5‑й редакции")
    - Конкретные проверки, упомянутые В ЭТОМ приключении (например: "Восприятие (Мудрость) Сл. 15 для поиска секретной двери, Ловкость (Акробатика) Сл. 10 для уклонения от ловушки")
@@ -1351,10 +1363,10 @@ ${chunk}
    ПРИМЕР gameplayRules (короткий!):
    "Используются правила D&D 5‑й редакции для персонажей 2–3 уровня. Все проверки выполняются d20. AI‑ведущий описывает последствия успеха/провала."
    
-   НЕ ВКЛЮЧАЙ:
-   - Общие описания всех механик D&D 5e
+   НЕ ВКЛЮЧАЙ (это обобщения, а не сопоставление с конкретным приключением):
+   - Общие описания всех механик D&D 5e (например: "Игровой процесс разделен на четыре этапа (тира) в зависимости от уровня персонажей...")
    - Общие правила создания персонажей, классов, рас
-   - Общие описания всех опциональных правил
+   - Общие описания всех опциональных правил (например: "Введена опциональная система 'Слава'...")
    - Общие описания создания приключений, кампаний
    - Общие описания роли мастера
    - Описание миров, богов, планов (это worldRules)
@@ -1376,10 +1388,10 @@ ${chunk}
 ${rulesShape}
 
 ⚠️ КРИТИЧЕСКИ ВАЖНО:
-- worldRules: МАКСИМУМ 500 символов! Только краткое описание сеттинга ЭТОГО приключения (для UI).
-- gameplayRules: МАКСИМУМ 500 символов! Только краткое описание механик ЭТОГО приключения (для UI).
-- worldRulesFull: ПОЛНОЕ описание сеттинга (для ИИ, без ограничений длины). Если нет отдельного - используй worldRules.
-- gameplayRulesFull: ПОЛНОЕ описание механик (для ИИ, без ограничений длины). Если нет отдельного - используй gameplayRules.
+- worldRules: МАКСИМУМ 500 символов! СОЗДАЙ краткое описание сеттинга ЭТОГО приключения (для UI), сжимая информацию, но сохраняя ВЕСЬ СМЫСЛ. Не просто обрезай текст!
+- gameplayRules: МАКСИМУМ 500 символов! СОЗДАЙ краткое описание механик ЭТОГО приключения (для UI), сжимая информацию, но сохраняя ВЕСЬ СМЫСЛ. Не просто обрезай текст!
+- worldRulesFull: ПОЛНОЕ описание сеттинга (для ИИ, без ограничений длины).
+- gameplayRulesFull: ПОЛНОЕ описание механик (для ИИ, без ограничений длины). 
 - НЕ включай общие описания мультивселенной, планов, богов, механик D&D в краткие версии!
 - Если информации нет в этой части - верни пустую строку "" для соответствующего поля.`;
 
@@ -1399,9 +1411,19 @@ ${rulesShape}
                     rulesContent = rulesContent.slice(startIdx, endIdx + 1);
                     try {
                       const rulesData = JSON.parse(rulesContent);
-                      // Сохраняем полные правила (если есть worldRulesFull, используем их, иначе worldRules)
+                      // Сохраняем краткие версии для UI (AI создает их с полным смыслом в 500 символах)
+                      const worldRulesShort = rulesData.worldRules || '';
+                      const gameplayRulesShort = rulesData.gameplayRules || '';
+                      // Сохраняем полные правила для AI (если есть worldRulesFull, используем их, иначе worldRules)
                       const worldRulesFull = rulesData.worldRulesFull || rulesData.worldRules || '';
                       const gameplayRulesFull = rulesData.gameplayRulesFull || rulesData.gameplayRules || '';
+                      
+                      if (worldRulesShort && worldRulesShort.trim()) {
+                        worldRulesShortParts.push(worldRulesShort);
+                      }
+                      if (gameplayRulesShort && gameplayRulesShort.trim()) {
+                        gameplayRulesShortParts.push(gameplayRulesShort);
+                      }
                       if (worldRulesFull && worldRulesFull.trim()) {
                         worldRulesParts.push(worldRulesFull);
                       }
@@ -1420,18 +1442,21 @@ ${rulesShape}
           }
           
           // Объединяем результаты из всех чанков
+          // Краткие правила для UI (AI создал их с полным смыслом в 500 символах)
+          let worldRulesShort = worldRulesShortParts.length > 0 ? worldRulesShortParts.join(' ').trim() : null;
+          let gameplayRulesShort = gameplayRulesShortParts.length > 0 ? gameplayRulesShortParts.join(' ').trim() : null;
           // Полные правила для ИИ
           let worldRulesFull = worldRulesParts.length > 0 ? worldRulesParts.join(' ').trim() : null;
           let gameplayRulesFull = gameplayRulesParts.length > 0 ? gameplayRulesParts.join(' ').trim() : null;
           
-          // Краткие правила для UI (максимум 500 символов)
-          if (worldRulesFull) {
-            scenario.game.worldRules = worldRulesFull.slice(0, 500);
-            scenario.game.worldRulesFull = worldRulesFull; // Сохраняем полные правила
+          // Используем краткие версии для UI (они уже содержат весь смысл в 500 символах)
+          if (worldRulesShort) {
+            scenario.game.worldRules = worldRulesShort.length > 500 ? worldRulesShort.slice(0, 500) : worldRulesShort;
+            scenario.game.worldRulesFull = worldRulesFull || worldRulesShort; // Сохраняем полные правила для AI
           }
-          if (gameplayRulesFull) {
-            scenario.game.gameplayRules = gameplayRulesFull.slice(0, 500);
-            scenario.game.gameplayRulesFull = gameplayRulesFull; // Сохраняем полные правила
+          if (gameplayRulesShort) {
+            scenario.game.gameplayRules = gameplayRulesShort.length > 500 ? gameplayRulesShort.slice(0, 500) : gameplayRulesShort;
+            scenario.game.gameplayRulesFull = gameplayRulesFull || gameplayRulesShort; // Сохраняем полные правила для AI
           }
           console.log(`[INGEST-IMPORT] Stage 1 complete: Rules extracted from ${rulesChunks.length} chunks`);
           
@@ -3565,8 +3590,8 @@ app.post('/api/chat/welcome', async (req, res) => {
       const offlineText = ([
         `Сцена: ${loc?.title || 'Локация'}`,
         base,
-        game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
-        game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+        game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+        game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
       ].filter(Boolean).join('\n\n')).trim();
       let text = offlineText;
       if (apiKey) {
@@ -3589,8 +3614,8 @@ app.post('/api/chat/welcome', async (req, res) => {
             'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
           const visual = loc?.backgroundUrl ? `Фон (изображение): ${loc.backgroundUrl}` : '';
           const rules = [
-            game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
-            game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+            game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+            game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
           ].filter(Boolean).join('\n');
           const npcs = chars && chars.length ? (
             'Персонажи (D&D 5e):\n' + chars.map((c) => {
@@ -3809,8 +3834,8 @@ app.post('/api/chat/reply', async (req, res) => {
     if (game) {
       context.push(`Игра: ${game.title}`);
       if (game.description) context.push(`Описание: ${game.description}`);
-      if (game.worldRules) context.push(`Правила мира: ${game.worldRules}`);
-      if (game.gameplayRules) context.push(`Правила процесса: ${game.gameplayRules}`);
+      if (game.worldRules) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
+      if (game.gameplayRules) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
       if (game.author) context.push(`Автор: ${game.author}`);
       if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
       if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
@@ -4494,8 +4519,8 @@ app.post('/api/engine/session/:id/describe', async (req, res) => {
     const offlineText = ([
       `Сцена: ${loc?.title || 'Локация'}`,
       base,
-      game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
-      game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+      game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+      game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
       (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
       (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
       (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
@@ -4506,16 +4531,16 @@ app.post('/api/engine/session/:id/describe', async (req, res) => {
       loc?.musicUrl ? `Музыка (URL): ${loc.musicUrl}` : '',
     ].filter(Boolean).join('\n');
     const rules = [
-      game?.worldRules ? `Правила мира: ${game.worldRules}` : '',
-      game?.gameplayRules ? `Правила процесса: ${game.gameplayRules}` : '',
+      game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+      game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
       (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
       (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
       (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
       (game as any)?.author ? `Автор: ${(game as any).author}` : '',
       game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
       // Используем полные правила для ИИ
-      (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира: ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
-      (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса: ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
+      (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
+      (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
       (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
       (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
       (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
@@ -5573,8 +5598,8 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
   const baseLines: string[] = [];
   if (game) {
     baseLines.push(`Игра: ${game.title}`);
-    if (game.worldRules) baseLines.push(`Правила мира: ${game.worldRules}`);
-    if (game.gameplayRules) baseLines.push(`Правила процесса: ${game.gameplayRules}`);
+    if (game.worldRules) baseLines.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
+    if (game.gameplayRules) baseLines.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
   }
   if (playable.length) {
     baseLines.push('Игровые персонажи D&D 5e:\n' + playable.map((p: any) => {
