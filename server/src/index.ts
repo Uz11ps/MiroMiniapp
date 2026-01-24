@@ -4379,17 +4379,40 @@ app.post('/api/chat/reply', async (req, res) => {
   const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
   try {
     const prisma = getPrisma();
+    
+    // ОПТИМИЗАЦИЯ: Получаем userId один раз в начале и кэшируем
+    let cachedUserId: string | null = null;
+    const getUserId = async () => {
+      if (cachedUserId !== null) return cachedUserId;
+      if (lobbyId) {
+        cachedUserId = await resolveUserIdFromQueryOrBody(req, prisma) || null;
+      } else {
+        cachedUserId = await resolveUserIdFromQueryOrBody(req, prisma) || null;
+      }
+      return cachedUserId;
+    };
+    
+    // ОПТИМИЗАЦИЯ: Получаем gameSession один раз и кэшируем
+    let cachedGameSession: any = null;
+    const getGameSession = async () => {
+      if (cachedGameSession !== null) return cachedGameSession;
+      if (!gameId) return null;
+      try {
+        if (lobbyId) {
+          cachedGameSession = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+        } else {
+          const uid = await getUserId();
+          if (uid) cachedGameSession = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        }
+      } catch {}
+      return cachedGameSession;
+    };
+    
     // СНАЧАЛА пытаемся смэпить ввод игрока к кнопке/триггеру и сменить сцену (если есть активная сессия)
     let forcedGameOver = false;
     if (gameId) {
       try {
-        let sess: any = null;
-        if (lobbyId) {
-          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-        } else {
-          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-        }
+        const sess = await getGameSession();
         if (sess?.currentLocationId) {
           const curLocId = sess.currentLocationId;
           const exits = await prisma.locationExit.findMany({ where: { locationId: curLocId } });
@@ -4421,6 +4444,8 @@ app.post('/api/chat/reply', async (req, res) => {
               } catch {}
             } else if (chosen.targetLocationId) {
               await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: chosen.targetLocationId } });
+              // Обновляем кэш после изменения локации
+              cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
             }
           }
         }
@@ -4440,7 +4465,7 @@ app.post('/api/chat/reply', async (req, res) => {
         wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
         return res.json({ message: finalText, fallback: false, gameOver: true });
       } else {
-        const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+        const uid = await getUserId();
         if (uid) {
           const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
           const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
@@ -4456,20 +4481,18 @@ app.post('/api/chat/reply', async (req, res) => {
     }
     let actingUserId: string | null = null;
     if (lobbyId) {
-      const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+      const uid = await getUserId();
       if (!uid) return res.status(400).json({ error: 'user_required' });
       const t = lobbyTurns.get(lobbyId);
       if (t && t.order.length && t.order[t.idx] !== uid) return res.status(403).json({ error: 'not_your_turn' });
       actingUserId = uid;
     }
-    const game = gameId ? await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true, locations: { orderBy: { order: 'asc' } } } }) : null;
+    // ОПТИМИЗАЦИЯ: Параллельно загружаем game и npcs
+    const [game, npcs] = await Promise.all([
+      gameId ? prisma.game.findUnique({ where: { id: gameId }, include: { characters: true, locations: { orderBy: { order: 'asc' } } } }) : Promise.resolve(null),
+      gameId ? prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 6 }).catch(() => []) : Promise.resolve([])
+    ]);
     const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
-    let npcs: any[] = [];
-    try {
-      if (gameId) {
-        npcs = await prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 6 });
-      }
-    } catch {}
     const sys = getSysPrompt();
       'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
       'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
@@ -4498,21 +4521,13 @@ app.post('/api/chat/reply', async (req, res) => {
       if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
       if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
       if (playable.length) {
-        // Получаем актуальное состояние персонажей из gameSession
+        // Получаем актуальное состояние персонажей из gameSession (используем кэш)
         let characterStates: Record<string, any> = {};
         try {
-          if (gameId) {
-            let sess: any = null;
-            if (lobbyId) {
-              sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-            } else {
-              const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-              if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-            }
-            if (sess?.state) {
-              const state = sess.state as any;
-              characterStates = state.characters || {};
-            }
+          const sess = await getGameSession();
+          if (sess?.state) {
+            const state = sess.state as any;
+            characterStates = state.characters || {};
           }
         } catch {}
         
@@ -4636,13 +4651,7 @@ app.post('/api/chat/reply', async (req, res) => {
       let allowDice = false;
       try {
         if (gameId) {
-          let sessCur: any = null;
-          if (lobbyId) {
-            sessCur = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-          } else {
-            const uidTmp = await resolveUserIdFromQueryOrBody(req, prisma);
-            if (uidTmp) sessCur = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uidTmp } });
-          }
+          const sessCur = await getGameSession();
           if (sessCur?.currentLocationId) {
             const locCur = await prisma.location.findUnique({ where: { id: sessCur.currentLocationId } });
             const rp = String(locCur?.rulesPrompt || locCur?.description || '').toLowerCase();
@@ -4669,7 +4678,7 @@ app.post('/api/chat/reply', async (req, res) => {
           wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
           return res.json({ message: '', fallback: false, requestDice: { expr: 'd20', dc: s.dc, context: s.context, kind: s.kind } });
         } else {
-          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          const uid = await getUserId();
           if (uid) {
             const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
             const h = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
@@ -4691,14 +4700,7 @@ app.post('/api/chat/reply', async (req, res) => {
     }
     const fallbackBranch = async (): Promise<string> => {
       try {
-        const s = lobbyId
-          ? await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } })
-          : (async () => {
-              const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-              if (!uid) return null;
-              return prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-            })();
-        const sx = (await s) as any;
+        const sx = await getGameSession();
         const locCur = sx?.currentLocationId ? await prisma.location.findUnique({ where: { id: sx.currentLocationId } }) : null;
         const desc = String(locCur?.rulesPrompt || locCur?.description || 'Текущая сцена без описания.');
         return `Техническая ошибка. Описание текущей сцены:\n${desc}`;
@@ -4707,14 +4709,16 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     };
 
+    // ОПТИМИЗАЦИЯ: Передаем кэшированные данные в buildGptSceneContext
     const sc = await (async () => {
       try {
         if (gameId) {
           return await buildGptSceneContext(prisma, {
             gameId,
             lobbyId,
-            userId: lobbyId ? undefined : (await resolveUserIdFromQueryOrBody(req, prisma)),
+            userId: lobbyId ? undefined : (await getUserId()),
             history: baseHistory,
+            cachedGameSession: cachedGameSession, // Передаем кэшированную сессию
           });
         }
       } catch {}
@@ -4743,13 +4747,7 @@ app.post('/api/chat/reply', async (req, res) => {
     if (game?.usePregenMaterials && gameId) {
       let locationId: string | undefined = undefined;
       try {
-        let sess: any = null;
-        if (lobbyId) {
-          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-        } else {
-          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-        }
+        const sess = await getGameSession();
         if (sess) {
           locationId = sess.currentLocationId || undefined;
         }
@@ -4790,13 +4788,7 @@ app.post('/api/chat/reply', async (req, res) => {
       // Если вариантов нет, добавляем их из кнопок текущей локации
       let locationId: string | undefined = undefined;
       try {
-        let sess: any = null;
-        if (lobbyId) {
-          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-        } else {
-          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-        }
+        const sess = await getGameSession();
         if (sess) {
           locationId = sess.currentLocationId || undefined;
         }
@@ -4839,13 +4831,7 @@ app.post('/api/chat/reply', async (req, res) => {
     // Парсинг изменений состояния персонажей из ответа ИИ
     if (gameId && playable.length) {
       try {
-        let sess: any = null;
-        if (lobbyId) {
-          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-        } else {
-          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-        }
+        const sess = await getGameSession();
         
         if (sess) {
           const state = (sess.state as any) || {};
@@ -9495,37 +9481,60 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
   lobbyId?: string;
   userId?: string | null;
   history?: Array<{ from?: string; text?: string }>;
+  cachedGameSession?: any; // ОПТИМИЗАЦИЯ: Передаем кэшированную сессию
 }): Promise<string> {
-  const { gameId, lobbyId, userId } = params;
-  let sess: any = null;
-  try {
-    if (lobbyId) {
-      sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-    } else if (userId) {
-      sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId } });
-    }
-  } catch {}
-  let loc: any = null;
-  if (sess?.currentLocationId) {
-    try { loc = await prisma.location.findUnique({ where: { id: sess.currentLocationId } }); } catch {}
-  } else {
-    try { loc = await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } }); } catch {}
+  const { gameId, lobbyId, userId, cachedGameSession } = params;
+  let sess: any = cachedGameSession;
+  
+  // Если сессия не передана, получаем её
+  if (!sess) {
+    try {
+      if (lobbyId) {
+        sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+      } else if (userId) {
+        sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId } });
+      }
+    } catch {}
   }
+  
+  // ОПТИМИЗАЦИЯ: Параллельно получаем location и npcs (npcs не зависит от location)
+  let loc: any = null;
+  let npcs: any[] = [];
+  
+  const [locationResult, npcsResult] = await Promise.all([
+    (async () => {
+      try {
+        if (sess?.currentLocationId) {
+          return await prisma.location.findUnique({ where: { id: sess.currentLocationId } });
+        } else {
+          return await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
+        }
+      } catch {
+        return null;
+      }
+    })(),
+    prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 50 }).catch(() => [])
+  ]);
+  
+  loc = locationResult;
+  npcs = npcsResult;
+  
+  // ОПТИМИЗАЦИЯ: Параллельно получаем exits и targets (targets зависит от exits, но можем начать после получения targetIds)
   let exits: any[] = [];
-  try {
-    if (loc?.id) exits = await prisma.locationExit.findMany({ where: { locationId: loc.id } });
-  } catch {}
-  const targetIds = Array.from(new Set((exits || []).map((e) => e.targetLocationId).filter(Boolean))) as string[];
   let targets: any[] = [];
-  try {
-    if (targetIds.length) targets = await prisma.location.findMany({ where: { id: { in: targetIds } } });
-  } catch {}
+  
+  if (loc?.id) {
+    try {
+      exits = await prisma.locationExit.findMany({ where: { locationId: loc.id } });
+      const targetIds = Array.from(new Set((exits || []).map((e) => e.targetLocationId).filter(Boolean))) as string[];
+      if (targetIds.length) {
+        targets = await prisma.location.findMany({ where: { id: { in: targetIds } } });
+      }
+    } catch {}
+  }
+  
   const targetTitleById = new Map<string, string>();
   for (const t of targets) targetTitleById.set(t.id, t.title || '');
-  let npcs: any[] = [];
-  try {
-    npcs = await prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 50 });
-  } catch {}
   // Фильтрация NPC по упоминанию в mini‑prompt/description
   const sceneText = String((loc?.rulesPrompt || '') + '\n' + (loc?.description || '')).toLowerCase();
   const sceneNpcs = npcs.filter((n) => sceneText.includes(String(n?.name || '').toLowerCase()));
