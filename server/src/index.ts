@@ -7270,7 +7270,6 @@ app.post('/api/tts', async (req, res) => {
       // Используем только специализированные TTS модели
       // Остальные модели не поддерживают TTS или возвращают текст вместо аудио
       const modelsToTry = [
-        'gemini-2.5-flash-preview-tts',      // Быстрый natural TTS, хорошо для голосовых ассистентов
         'gemini-2.5-pro-preview-tts',        // Лучшее качество, более естественное произношение
         'gemini-2.5-flash-native-audio'      // Ещё более живая речевая модель (через Live/Studio)
       ];
@@ -7711,11 +7710,31 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
           }
           
           // Генерируем текст ТОЧНО так же, как в /api/chat/welcome
-          const { text: generatedText } = await generateChatCompletion({
-            systemPrompt: sys,
-            userPrompt: 'Контекст сцены:\n' + sc,
-            history: []
-          });
+          let generatedText: string = '';
+          try {
+            const result = await generateChatCompletion({
+              systemPrompt: sys,
+              userPrompt: 'Контекст сцены:\n' + sc,
+              history: []
+            });
+            generatedText = result.text || '';
+          } catch (e: any) {
+            const errorMsg = e?.error?.message || e?.message || String(e);
+            const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
+            
+            if (isQuotaError) {
+              console.error(`[PRAGEN-TTS] ⚠️ QUOTA ERROR for location ${location.id}: API quota exceeded`);
+              console.error(`[PRAGEN-TTS] Quota error details: ${errorMsg.slice(0, 200)}`);
+              console.error(`[PRAGEN-TTS] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
+              console.error(`[PRAGEN-TTS] Stopping pre-generation due to quota limit`);
+              failCount++;
+              break; // Прерываем всю прегенерацию при ошибке квоты
+            }
+            // Для других ошибок тоже логируем и пропускаем
+            console.error(`[PRAGEN-TTS] ⚠️ Error generating text for location ${location.id}:`, errorMsg.slice(0, 200));
+            failCount++;
+            continue;
+          }
           
           // Проверяем флаг остановки после генерации текста
           if (generationStopFlags.get(gameId)) {
@@ -8157,11 +8176,30 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                   `Действие игрока: ${choiceText}`
                 ].filter(Boolean).join('\n\n');
                 
-                const { text: choiceResponseText } = await generateChatCompletion({
-                  systemPrompt: choiceResponseSys,
-                  userPrompt: choiceUserMsg,
-                  history: parentHistory
-                });
+                let choiceResponseText: string = '';
+                try {
+                  const result = await generateChatCompletion({
+                    systemPrompt: choiceResponseSys,
+                    userPrompt: choiceUserMsg,
+                    history: parentHistory
+                  });
+                  choiceResponseText = result.text || '';
+                } catch (e: any) {
+                  const errorMsg = e?.error?.message || e?.message || String(e);
+                  const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
+                  
+                  if (isQuotaError) {
+                    console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR at dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." - Gemini API quota exceeded`);
+                    console.error(`[PRAGEN-ALL] Quota error details: ${errorMsg.slice(0, 200)}`);
+                    // Пропускаем эту генерацию, но продолжаем с другими
+                    choiceResponseFailCount++;
+                    return; // Выходим из функции, но не прерываем всю прегенерацию
+                  }
+                  // Для других ошибок тоже логируем и пропускаем
+                  console.error(`[PRAGEN-ALL] ⚠️ Error generating dialogue at depth ${depth}:`, errorMsg.slice(0, 200));
+                  choiceResponseFailCount++;
+                  return;
+                }
                 
                 if (choiceResponseText && choiceResponseText.trim().length >= 10) {
                   let formattedChoiceText = formatChoiceOptions(choiceResponseText.trim());
@@ -8243,13 +8281,13 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       if (generationStopFlags.get(gameId)) {
                         return;
                       }
-                      // Небольшая задержка между запросами
-                      await new Promise(resolve => setTimeout(resolve, 1000));
+                        // Увеличенная задержка между запросами для избежания превышения квоты
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                      }
                     }
-                  }
-                  
-                  // Небольшая задержка между запросами
-                  await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    // Увеличенная задержка между запросами для избежания превышения квоты
+                    await new Promise(resolve => setTimeout(resolve, 2000));
                 } else {
                   choiceResponseFailCount++;
                 }
@@ -8282,8 +8320,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                 if (generationStopFlags.get(gameId)) {
                   break;
                 }
-                // Небольшая задержка между начальными вариантами
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                // Увеличенная задержка между начальными вариантами для избежания превышения квоты
+                await new Promise(resolve => setTimeout(resolve, 2000));
               }
             } else {
               // Если нет exits в БД, парсим из текста как fallback
@@ -8302,8 +8340,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                   if (generationStopFlags.get(gameId)) {
                     break;
                   }
-                  // Небольшая задержка между начальными вариантами
-                  await new Promise(resolve => setTimeout(resolve, 1000));
+                  // Увеличенная задержка между начальными вариантами для избежания превышения квоты
+                  await new Promise(resolve => setTimeout(resolve, 2000));
                 }
               }
             }
@@ -8374,11 +8412,30 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           }
           
           // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
-          const { text: generatedText } = await generateChatCompletion({
-            systemPrompt: sys,
-            userPrompt: user,
-            history: []
-          });
+          let generatedText: string = '';
+          try {
+            const result = await generateChatCompletion({
+              systemPrompt: sys,
+              userPrompt: user,
+              history: []
+            });
+            generatedText = result.text || '';
+          } catch (e: any) {
+            const errorMsg = e?.error?.message || e?.message || String(e);
+            const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
+            
+            if (isQuotaError) {
+              console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR for exit ${exit.id}: API quota exceeded`);
+              console.error(`[PRAGEN-ALL] Quota error details: ${errorMsg.slice(0, 200)}`);
+              console.error(`[PRAGEN-ALL] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
+              exitFailCount++;
+              return false;
+            }
+            // Для других ошибок тоже логируем и пропускаем
+            console.error(`[PRAGEN-ALL] ⚠️ Error generating text for exit ${exit.id}:`, errorMsg.slice(0, 200));
+            exitFailCount++;
+            return false;
+          }
           
           // Проверяем флаг остановки после генерации текста
           if (generationStopFlags.get(gameId)) {
@@ -9287,8 +9344,36 @@ async function generateChatCompletion(params: {
 }): Promise<{ text: string; provider: string }> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
   const openaiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+  
+  // Проверяем, какой провайдер использовать для прегенерации (если указан)
+  const pregenProvider = process.env.PREGEN_AI_PROVIDER?.toLowerCase();
+  const preferOpenAI = pregenProvider === 'openai' || pregenProvider === 'gpt';
 
-  if (geminiKey) {
+  // Если указано использовать OpenAI для прегенерации и есть ключ - используем его
+  if (preferOpenAI && openaiKey) {
+    try {
+      const client = createOpenAIClient(openaiKey);
+      const messages = [
+        { role: 'system', content: params.systemPrompt },
+        ...(params.history || []).slice(-15).map(h => ({
+          role: h.from === 'bot' ? 'assistant' : 'user',
+          content: h.text
+        })),
+        { role: 'user', content: params.userPrompt }
+      ];
+      const r = await client.chat.completions.create({
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        temperature: 0.4,
+        messages: messages as any,
+      });
+      const text = r.choices?.[0]?.message?.content || '';
+      if (text) return { text, provider: 'openai' };
+    } catch (e) {
+      console.error('[COMPLETION] OpenAI failed (preferred for pregen):', e);
+    }
+  }
+
+  if (geminiKey && !preferOpenAI) {
     try {
       // Для Gemini используем расширенную историю без обрезки (или с минимальной)
       const chatHistory = (params.history || []).map(h => ({
@@ -9307,11 +9392,12 @@ async function generateChatCompletion(params: {
     } catch (e: any) {
       const errorMsg = e?.error?.message || e?.message || String(e);
       const isOverloaded = errorMsg.includes('overloaded') || errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE');
+      const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
       console.error('[COMPLETION] Gemini failed:', errorMsg);
       
-      // Если Gemini перегружен - сразу переключаемся на OpenAI без ожидания
-      if (isOverloaded && openaiKey) {
-        console.log('[COMPLETION] Gemini overloaded, switching to OpenAI');
+      // Если Gemini перегружен или квота превышена - сразу переключаемся на OpenAI без ожидания
+      if ((isOverloaded || isQuotaError) && openaiKey) {
+        console.log('[COMPLETION] Gemini overloaded/quota exceeded, switching to OpenAI');
       } else {
         // Для других ошибок тоже пробуем OpenAI как fallback
         if (openaiKey) {
