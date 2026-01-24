@@ -233,16 +233,24 @@ function findPregenAudio(gameId: string, text: string, locationId?: string, char
     path.join(PRAGEN_DIR, gameId, `msg_${createAudioHash(text, locationId, characterId, messageType)}.wav`),
   ].filter(Boolean) as string[];
   
+  // Логируем проверяемые пути для отладки
+  console.log(`[FIND-PREGEN] Checking ${possiblePaths.length} paths for gameId=${gameId}, locationId=${locationId || 'none'}`);
+  
   for (const audioPath of possiblePaths) {
     try {
       if (fs.existsSync(audioPath)) {
+        console.log(`[FIND-PREGEN] ✅ Found: ${audioPath}`);
         return audioPath;
+      } else {
+        console.log(`[FIND-PREGEN] ❌ Not found: ${audioPath}`);
       }
     } catch (e) {
+      console.log(`[FIND-PREGEN] ⚠️ Error checking ${audioPath}:`, e);
       // Продолжаем проверку других путей
     }
   }
   
+  console.log(`[FIND-PREGEN] ❌ No pre-generated audio found for gameId=${gameId}`);
   return null;
 }
 
@@ -4118,8 +4126,22 @@ app.post('/api/chat/welcome', async (req, res) => {
       if (text) {
         try {
           // Сначала проверяем прегенерированное аудио
-          if (gameId && first?.id) {
-            const pregenPath = findPregenAudio(gameId, text, first.id, undefined, 'narrator');
+          // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
+          let scenarioGameIdForPregen: string | undefined = undefined;
+          if (lobbyId && gameId) {
+            const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+            scenarioGameIdForPregen = gsess?.scenarioGameId || gameId; // Fallback на gameId если сессии нет
+          } else if (gameId) {
+            const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+            if (uid) {
+              const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+              scenarioGameIdForPregen = gsess?.scenarioGameId || gameId; // Fallback на gameId если сессии нет
+            }
+          }
+          
+          if (scenarioGameIdForPregen && first?.id) {
+            console.log(`[WELCOME] 🔍 Looking for pre-generated audio: scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}, text length=${text.length}`);
+            const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator');
             
             if (pregenPath) {
               try {
@@ -4129,6 +4151,22 @@ app.post('/api/chat/welcome', async (req, res) => {
                 console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
               } catch (e) {
                 console.warn('[WELCOME] Failed to read pre-generated audio:', e);
+              }
+            } else {
+              console.log(`[WELCOME] ⚠️ Pre-generated audio not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}`);
+              // Проверяем, существует ли директория для этой игры
+              const gameDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen);
+              if (fs.existsSync(gameDir)) {
+                console.log(`[WELCOME] 📁 Game directory exists: ${gameDir}`);
+                const locationDir = path.join(gameDir, first.id);
+                if (fs.existsSync(locationDir)) {
+                  const files = fs.readdirSync(locationDir);
+                  console.log(`[WELCOME] 📁 Location directory exists with ${files.length} files: ${locationDir}`);
+                } else {
+                  console.log(`[WELCOME] 📁 Location directory does not exist: ${locationDir}`);
+                }
+              } else {
+                console.log(`[WELCOME] 📁 Game directory does not exist: ${gameDir}`);
               }
             }
           }
@@ -4279,8 +4317,20 @@ app.post('/api/chat/welcome', async (req, res) => {
     if (text) {
       try {
         // Сначала проверяем прегенерированное аудио
+        // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
         if (gameId && first?.id) {
-          const pregenPath = findPregenAudio(gameId, text, first.id, undefined, 'narrator');
+          let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
+          try {
+            const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+            if (gsess?.scenarioGameId) {
+              scenarioGameIdForPregen = gsess.scenarioGameId;
+            }
+          } catch (e) {
+            console.warn('[WELCOME] Failed to get scenarioGameId (SOLO), using gameId:', e);
+          }
+          
+          console.log(`[WELCOME] 🔍 Looking for pre-generated audio (SOLO): scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}, text length=${text.length}`);
+          const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator');
           
           if (pregenPath) {
             try {
@@ -4291,6 +4341,8 @@ app.post('/api/chat/welcome', async (req, res) => {
             } catch (e) {
               console.warn('[WELCOME] Failed to read pre-generated audio (SOLO):', e);
             }
+          } else {
+            console.log(`[WELCOME] ⚠️ Pre-generated audio not found (SOLO) for scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}`);
           }
         }
         
@@ -4320,16 +4372,19 @@ app.post('/api/chat/welcome', async (req, res) => {
             console.log('[WELCOME] ✅ TTS generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
             
             // Сохраняем сгенерированное аудио для будущего использования
-            if (gameId && first?.id) {
+            // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии
+            if (sess?.scenarioGameId && first?.id) {
               try {
-                const contextString = `${text.trim()}_${first.id}_narrator`;
-                const textHash = crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
-                const gameDir = path.join(PRAGEN_DIR, gameId);
-                const locationDir = path.join(gameDir, first.id);
-                try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
-                const savePath = path.join(locationDir, `narrator_${textHash}.wav`);
-                fs.writeFileSync(savePath, audioBuffer);
-                console.log('[WELCOME] 💾 Saved generated audio for future use (SOLO):', savePath);
+                const audioPath = getPregenAudioPath(sess.scenarioGameId, text, first.id, undefined, 'narrator');
+                const audioDir = path.dirname(audioPath);
+                try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+                fs.writeFileSync(audioPath, audioBuffer);
+                
+                // Сохраняем также текст
+                const textPath = audioPath.replace('.wav', '.txt');
+                fs.writeFileSync(textPath, text, 'utf-8');
+                
+                console.log('[WELCOME] 💾 Saved generated audio for future use (SOLO):', audioPath);
               } catch (e) {
                 console.warn('[WELCOME] Failed to save generated audio (SOLO):', e);
               }
@@ -5094,6 +5149,7 @@ app.post('/api/chat/reply', async (req, res) => {
       // Получаем контекст для TTS (локация, персонаж и т.д.)
       let locationId: string | undefined = undefined;
       let characterId: string | undefined = undefined;
+      let scenarioGameIdForPregen: string | undefined = undefined;
       
       if (gameId) {
         try {
@@ -5106,15 +5162,21 @@ app.post('/api/chat/reply', async (req, res) => {
           }
           if (sess) {
             locationId = sess.currentLocationId || undefined;
+            scenarioGameIdForPregen = sess.scenarioGameId; // Используем scenarioGameId из сессии!
+          } else {
+            scenarioGameIdForPregen = gameId; // Fallback на gameId если сессии нет
           }
         } catch (e) {
           console.warn('[REPLY] Failed to get session context for TTS:', e);
+          scenarioGameIdForPregen = gameId; // Fallback на gameId при ошибке
         }
       }
       
       // Сначала проверяем прегенерированное аудио для ВСЕХ сообщений
-      if (gameId) {
-        const pregenPath = findPregenAudio(gameId, text, locationId, characterId, 'narrator');
+      // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
+      if (scenarioGameIdForPregen) {
+        console.log(`[REPLY] 🔍 Looking for pre-generated audio: scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'}, text length=${text.length}`);
+        const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, 'narrator');
         
         if (pregenPath) {
           try {
@@ -5124,6 +5186,24 @@ app.post('/api/chat/reply', async (req, res) => {
             console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
           } catch (e) {
             console.warn('[REPLY] Failed to read pre-generated audio:', e);
+          }
+        } else {
+          console.log(`[REPLY] ⚠️ Pre-generated audio not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'}`);
+          // Проверяем, существует ли директория для этой игры
+          const gameDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen);
+          if (fs.existsSync(gameDir)) {
+            console.log(`[REPLY] 📁 Game directory exists: ${gameDir}`);
+            if (locationId) {
+              const locationDir = path.join(gameDir, locationId);
+              if (fs.existsSync(locationDir)) {
+                const files = fs.readdirSync(locationDir);
+                console.log(`[REPLY] 📁 Location directory exists with ${files.length} files: ${locationDir}`);
+              } else {
+                console.log(`[REPLY] 📁 Location directory does not exist: ${locationDir}`);
+              }
+            }
+          } else {
+            console.log(`[REPLY] 📁 Game directory does not exist: ${gameDir}`);
           }
         }
       }
@@ -5160,9 +5240,10 @@ app.post('/api/chat/reply', async (req, res) => {
           console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
           
           // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
-          if (game?.usePregenMaterials && gameId) {
+          // ИСПРАВЛЕНИЕ: Используем scenarioGameId для сохранения
+          if (game?.usePregenMaterials && scenarioGameIdForPregen) {
             try {
-              const audioPath = getPregenAudioPath(gameId, text, locationId, characterId, 'narrator');
+              const audioPath = getPregenAudioPath(scenarioGameIdForPregen, text, locationId, characterId, 'narrator');
               const audioDir = path.dirname(audioPath);
               try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
               fs.writeFileSync(audioPath, audioBuffer);
@@ -5175,10 +5256,10 @@ app.post('/api/chat/reply', async (req, res) => {
             } catch (e) {
               console.warn('[REPLY] Failed to save generated audio:', e);
             }
-          } else if (gameId) {
+          } else if (scenarioGameIdForPregen) {
             // Сохраняем и при выключенном флаге для кэширования
             try {
-              const audioPath = getPregenAudioPath(gameId, text, locationId, characterId, 'narrator');
+              const audioPath = getPregenAudioPath(scenarioGameIdForPregen, text, locationId, characterId, 'narrator');
               const audioDir = path.dirname(audioPath);
               try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
               fs.writeFileSync(audioPath, audioBuffer);
@@ -6881,10 +6962,34 @@ app.post('/api/tts', async (req, res) => {
     }
     
     // ПРОВЕРКА ПРЕГЕНЕРИРОВАННОГО АУДИО ДЛЯ ВСЕХ СООБЩЕНИЙ
-    // Проверяем наличие прегенерированного файла для любого сообщения
+    // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
     if (gameId) {
+      let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
+      
+      // Пытаемся найти сессию по gameId и locationId, чтобы получить scenarioGameId
+      try {
+        const prisma = getPrisma();
+        if (locationId) {
+          // Ищем сессию по locationId
+          const location = await prisma.location.findUnique({ where: { id: locationId }, select: { gameId: true } });
+          if (location?.gameId) {
+            // Пытаемся найти любую сессию для этого gameId
+            const sess = await prisma.gameSession.findFirst({ 
+              where: { scenarioGameId: location.gameId },
+              select: { scenarioGameId: true }
+            });
+            if (sess?.scenarioGameId) {
+              scenarioGameIdForPregen = sess.scenarioGameId;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[TTS] Failed to get scenarioGameId from session, using gameId:', e);
+      }
+      
       const messageType = isNarrator !== false ? 'narrator' : 'character';
-      const pregenPath = findPregenAudio(gameId, text, locationId, characterId, messageType);
+      console.log(`[TTS] 🔍 Looking for pre-generated audio: scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'}, characterId=${characterId || 'none'}, text length=${text.length}`);
+      const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType);
       
       if (pregenPath) {
         try {
@@ -6895,6 +7000,15 @@ app.post('/api/tts', async (req, res) => {
           return res.send(audioBuffer);
         } catch (e) {
           console.warn('[TTS] Failed to read pre-generated audio:', e);
+        }
+      } else {
+        console.log(`[TTS] ⚠️ Pre-generated audio not found for scenarioGameId=${scenarioGameIdForPregen}`);
+        // Проверяем, существует ли директория для этой игры
+        const gameDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen);
+        if (fs.existsSync(gameDir)) {
+          console.log(`[TTS] 📁 Game directory exists: ${gameDir}`);
+        } else {
+          console.log(`[TTS] 📁 Game directory does not exist: ${gameDir}`);
         }
       }
       
@@ -7573,6 +7687,12 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
       return res.status(400).json({ error: 'game_id_required' });
     }
     
+    // ИСПРАВЛЕНИЕ: Получаем scenarioGameId (ID сценария) из запроса
+    // Это может быть в query параметре (scenario?id=...) или в body
+    const scenarioGameId = typeof req.query?.scenarioId === 'string' ? req.query.scenarioId 
+      : typeof req.body?.scenarioId === 'string' ? req.body.scenarioId
+      : gameId; // Fallback на gameId если scenarioId не передан
+    
     const prisma = getPrisma();
     const game = await prisma.game.findUnique({ 
       where: { id: gameId },
@@ -7595,18 +7715,21 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
     res.json({ 
       jobId,
       message: 'Прегенерация TTS запущена',
-      locationsCount: game.locations.length
+      locationsCount: game.locations.length,
+      scenarioGameId // Возвращаем используемый scenarioGameId для отладки
     });
     
     // Асинхронная прегенерация
+    // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения прегенерированных файлов
+    
     (async () => {
-      const gameDir = path.join(PRAGEN_DIR, gameId);
+      const gameDir = path.join(PRAGEN_DIR, scenarioGameId);
       try { fs.mkdirSync(gameDir, { recursive: true }); } catch {}
       
       let successCount = 0;
       let failCount = 0;
       
-      console.log(`[PRAGEN-TTS] Starting pre-generation for game ${gameId}, ${game.locations.length} locations`);
+      console.log(`[PRAGEN-TTS] Starting pre-generation for scenario ${scenarioGameId} (gameId=${gameId}), ${game.locations.length} locations`);
       
       for (let i = 0; i < game.locations.length; i++) {
         // Проверяем флаг остановки перед каждой итерацией
@@ -7740,7 +7863,8 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
           }
           
           // Проверяем, есть ли уже прегенерированный файл для этого текста (по смыслу)
-          const existingAudioPath = findSimilarPregenAudio(gameId, text, location.id, undefined, 'narrator');
+          // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
+          const existingAudioPath = findSimilarPregenAudio(scenarioGameId, text, location.id, undefined, 'narrator');
           if (existingAudioPath) {
             console.log(`[PRAGEN-TTS] ⏭️ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - similar content already exists, skipping`);
             successCount++;
@@ -7756,7 +7880,7 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               text,
-              gameId,
+              gameId: scenarioGameId, // Передаем scenarioGameId в TTS
               locationId: location.id,
               format: 'wav',
               isNarrator: true,
@@ -7766,8 +7890,8 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
           
           if (ttsResponse.ok) {
             const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            // Используем единую функцию для создания пути, чтобы файлы находились при поиске
-            const audioPath = getPregenAudioPath(gameId, text, location.id, undefined, 'narrator');
+            // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
+            const audioPath = getPregenAudioPath(scenarioGameId, text, location.id, undefined, 'narrator');
             // Создаем директорию, если её нет
             const audioDir = path.dirname(audioPath);
             try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
@@ -7828,6 +7952,12 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       return res.status(400).json({ error: 'game_id_required' });
     }
     
+    // ИСПРАВЛЕНИЕ: Получаем scenarioGameId (ID сценария) из запроса
+    // Это может быть в query параметре (scenario?id=...) или в body
+    const scenarioGameId = typeof req.query?.scenarioId === 'string' ? req.query.scenarioId 
+      : typeof req.body?.scenarioId === 'string' ? req.body.scenarioId
+      : gameId; // Fallback на gameId если scenarioId не передан
+    
     const prisma = getPrisma();
     const game = await prisma.game.findUnique({ 
       where: { id: gameId },
@@ -7858,12 +7988,15 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       jobId,
       message: 'Массовая прегенерация TTS запущена',
       locationsCount: game.locations.length,
-      exitsCount: game.locations.reduce((sum, loc) => sum + (loc.exits?.length || 0), 0)
+      exitsCount: game.locations.reduce((sum, loc) => sum + (loc.exits?.length || 0), 0),
+      scenarioGameId // Возвращаем используемый scenarioGameId для отладки
     });
     
     // Асинхронная прегенерация
+    // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения прегенерированных файлов
+    
     (async () => {
-      const gameDir = path.join(PRAGEN_DIR, gameId);
+      const gameDir = path.join(PRAGEN_DIR, scenarioGameId);
       try { fs.mkdirSync(gameDir, { recursive: true }); } catch {}
       
       let locationSuccessCount = 0;
@@ -7879,13 +8012,13 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       const ttsUrl = `${apiBase}/api/tts`;
       const sys = getSysPrompt();
       
-      console.log(`[PRAGEN-ALL] Starting full pre-generation for game ${gameId}, ${game.locations.length} locations`);
+      console.log(`[PRAGEN-ALL] Starting pre-generation for scenario ${scenarioGameId} (gameId=${gameId}), ${game.locations.length} locations`);
       
       // Функция для генерации текста и аудио для локации
       const generateLocationTTS = async (location: any, index: number) => {
         // Проверяем флаг остановки в начале функции
         if (generationStopFlags.get(gameId)) {
-          console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} before processing location ${location.id}`);
+          console.log(`[PRAGEN-ALL] Generation stopped for scenario ${scenarioGameId} before processing location ${location.id}`);
           return false;
         }
         
@@ -7941,24 +8074,24 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           
           // Проверяем флаг остановки перед генерацией
           if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} before generating text for location ${location.id}`);
+            console.log(`[PRAGEN-ALL] Generation stopped for scenario ${scenarioGameId} before generating text for location ${location.id}`);
             if (tempSessionCreated) {
               try {
-                await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+                await prisma.gameSession.deleteMany({ where: { scenarioGameId: scenarioGameId, userId: tempUserId } }).catch(() => {}); // ИСПРАВЛЕНИЕ
               } catch {}
             }
             return false;
           }
           
           // Используем buildGptSceneContext, как в /api/chat/welcome
-          const sc = await buildGptSceneContext(prisma, { gameId, userId: tempSessionCreated ? tempUserId : null, history: [] });
+          const sc = await buildGptSceneContext(prisma, { gameId: scenarioGameId, userId: tempSessionCreated ? tempUserId : null, history: [] }); // ИСПРАВЛЕНИЕ
           
           // Проверяем флаг остановки после получения контекста
           if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after getting context for location ${location.id}`);
+            console.log(`[PRAGEN-ALL] Generation stopped for scenario ${scenarioGameId} after getting context for location ${location.id}`);
             if (tempSessionCreated) {
               try {
-                await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+                await prisma.gameSession.deleteMany({ where: { scenarioGameId: scenarioGameId, userId: tempUserId } }).catch(() => {}); // ИСПРАВЛЕНИЕ
               } catch {}
             }
             return false;
@@ -7967,7 +8100,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           // Удаляем временную сессию после использования
           if (tempSessionCreated) {
             try {
-              await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+              await prisma.gameSession.deleteMany({ where: { scenarioGameId: scenarioGameId, userId: tempUserId } }).catch(() => {}); // ИСПРАВЛЕНИЕ
             } catch {}
           }
           
@@ -7995,7 +8128,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           }
           
           // Проверяем, есть ли уже прегенерированный файл для этого текста (по смыслу)
-          const existingAudioPath = findSimilarPregenAudio(gameId, text, location.id, undefined, 'narrator');
+          // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
+          const existingAudioPath = findSimilarPregenAudio(scenarioGameId, text, location.id, undefined, 'narrator');
           if (existingAudioPath) {
             console.log(`[PRAGEN-ALL] ⏭️ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - similar content already exists, skipping`);
             // Продолжаем генерацию диалогов, даже если основной файл уже есть
@@ -8007,7 +8141,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               text,
-              gameId,
+              gameId: scenarioGameId, // ИСПРАВЛЕНИЕ: Используем scenarioGameId
               locationId: location.id,
               format: 'wav',
               isNarrator: true,
@@ -8017,7 +8151,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             
             if (ttsResponse.ok) {
               const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-              const audioPath = getPregenAudioPath(gameId, text, location.id, undefined, 'narrator');
+              // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
+              const audioPath = getPregenAudioPath(scenarioGameId, text, location.id, undefined, 'narrator');
               const audioDir = path.dirname(audioPath);
               try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
               fs.writeFileSync(audioPath, audioBuffer);
@@ -8191,7 +8326,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                   let formattedChoiceText = formatChoiceOptions(choiceResponseText.trim());
                   
                   // Проверяем, есть ли уже прегенерированный файл для этого действия игрока (по смыслу)
-                  const existingChoiceAudioPath = findSimilarPregenAudio(gameId, choiceText, locationId, undefined, 'narrator');
+                  // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
+                  const existingChoiceAudioPath = findSimilarPregenAudio(scenarioGameId, choiceText, locationId, undefined, 'narrator');
                   if (existingChoiceAudioPath) {
                     console.log(`[PRAGEN-ALL] ⏭️ Dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." - similar content already exists, skipping`);
                     choiceResponseSuccessCount++;
@@ -8202,7 +8338,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
                         text: formattedChoiceText,
-                        gameId,
+                        gameId: scenarioGameId, // ИСПРАВЛЕНИЕ: Используем scenarioGameId
                         locationId: locationId,
                         format: 'wav',
                         isNarrator: true,
@@ -8215,7 +8351,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       // ВАЖНО: Сохраняем по действию игрока (choiceText), а не по ответу бота
                       // Это нужно, чтобы поиск в /api/chat/reply работал корректно
                       // В /api/chat/reply ищется по userText (действие игрока), поэтому и сохраняем по нему
-                      const choiceAudioPath = getPregenAudioPath(gameId, choiceText, locationId, undefined, 'narrator');
+                      // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
+                      const choiceAudioPath = getPregenAudioPath(scenarioGameId, choiceText, locationId, undefined, 'narrator');
                       const choiceAudioDir = path.dirname(choiceAudioPath);
                       try { fs.mkdirSync(choiceAudioDir, { recursive: true }); } catch {}
                       fs.writeFileSync(choiceAudioPath, choiceAudioBuffer);
@@ -8228,7 +8365,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       // Это нужно для случая, когда в /api/chat/reply нет userText и поиск идет по userPrompt
                       // Но userPrompt может включать diceContext, которого нет в прегенерации
                       // Поэтому сохраняем по choiceUserMsg (без diceContext)
-                      const choiceUserMsgPath = getPregenAudioPath(gameId, choiceUserMsg, locationId, undefined, 'narrator');
+                      // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
+                      const choiceUserMsgPath = getPregenAudioPath(scenarioGameId, choiceUserMsg, locationId, undefined, 'narrator');
                       if (choiceUserMsgPath !== choiceAudioPath) {
                         // Только если путь отличается (хеш разный)
                         try {
@@ -8439,7 +8577,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           }
           
           // Проверяем, есть ли уже прегенерированный файл для этого текста (по смыслу)
-          const existingExitAudioPath = findSimilarPregenAudio(gameId, text, targetLocation.id, undefined, 'narrator');
+          // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
+          const existingExitAudioPath = findSimilarPregenAudio(scenarioGameId, text, targetLocation.id, undefined, 'narrator');
           if (existingExitAudioPath) {
             console.log(`[PRAGEN-ALL] ⏭️ Exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} -> ${targetLocation.title} - similar content already exists, skipping`);
             return true; // Возвращаем true, так как файл уже существует
@@ -8451,7 +8590,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               text,
-              gameId,
+              gameId: scenarioGameId, // ИСПРАВЛЕНИЕ: Используем scenarioGameId
               locationId: targetLocation.id,
               format: 'wav',
               isNarrator: true,
@@ -8461,7 +8600,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           
           if (ttsResponse.ok) {
             const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            const audioPath = getPregenAudioPath(gameId, text, targetLocation.id, undefined, 'narrator');
+            // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
+            const audioPath = getPregenAudioPath(scenarioGameId, text, targetLocation.id, undefined, 'narrator');
             const audioDir = path.dirname(audioPath);
             try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
             fs.writeFileSync(audioPath, audioBuffer);
