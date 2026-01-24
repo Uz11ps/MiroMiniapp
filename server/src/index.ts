@@ -378,24 +378,15 @@ function findPregenAudio(
     path.join(PRAGEN_DIR, gameId, `msg_${createAudioHash(text, locationId, characterId, messageType)}.wav`),
   ].filter(Boolean) as string[];
   
-  // Логируем проверяемые пути для отладки
-  console.log(`[FIND-PREGEN] Checking ${possiblePaths.length} paths for gameId=${gameId}, locationId=${locationId || 'none'}, depth=${depth || 'none'}, choiceIndex=${choiceIndex || 'none'}`);
-  
   for (const audioPath of possiblePaths) {
     try {
       if (fs.existsSync(audioPath)) {
-        console.log(`[FIND-PREGEN] ✅ Found: ${audioPath}`);
         return audioPath;
-      } else {
-        console.log(`[FIND-PREGEN] ❌ Not found: ${audioPath}`);
       }
     } catch (e) {
-      console.log(`[FIND-PREGEN] ⚠️ Error checking ${audioPath}:`, e);
       // Продолжаем проверку других путей
     }
   }
-  
-  console.log(`[FIND-PREGEN] ❌ No pre-generated audio found for gameId=${gameId}`);
   return null;
 }
 
@@ -4294,7 +4285,7 @@ app.post('/api/chat/welcome', async (req, res) => {
           }
           
           if (scenarioGameIdForPregen && first?.id) {
-            console.log(`[WELCOME] 🔍 Looking for pre-generated materials: scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}, text length=${text.length}`);
+            // Поиск прегенерированных материалов (логи убраны)
             
             // Проверяем наличие прегенерованных материалов для scenarioGameId
             const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
@@ -4322,17 +4313,8 @@ app.post('/api/chat/welcome', async (req, res) => {
               } else {
                 console.log(`[WELCOME] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id} (hash: ${createAudioHash(text, first.id, undefined, 'narrator', 0)})`);
               }
-            } else {
-              // Если материалов нет - запускаем параллельную генерацию
-              console.log(`[WELCOME] 📦 No pre-generated materials found for scenarioGameId=${scenarioGameIdForPregen}, starting background generation`);
-              generatePregenMaterialInBackground({
-                scenarioGameId: scenarioGameIdForPregen,
-                text,
-                locationId: first.id,
-                messageType: 'narrator',
-                depth: 0
-              });
             }
+            // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
           }
           
           // Если прегенерированного аудио нет - генерируем в реальном времени
@@ -4493,7 +4475,7 @@ app.post('/api/chat/welcome', async (req, res) => {
             console.warn('[WELCOME] Failed to get scenarioGameId (SOLO), using gameId:', e);
           }
           
-          console.log(`[WELCOME] 🔍 Looking for pre-generated audio (SOLO): scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}, text length=${text.length}`);
+          // Поиск прегенерированного аудио (логи убраны)
           const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator');
           
           if (pregenPath) {
@@ -5368,7 +5350,7 @@ app.post('/api/chat/reply', async (req, res) => {
           }
         }
         
-        console.log(`[REPLY] 🔍 Looking for pre-generated materials: scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'}, depth=${depth}, choiceIndex=${choiceIndex || 'none'}, text length=${text.length}`);
+        // Поиск прегенерированных материалов (логи убраны)
         
         // Проверяем наличие прегенерованных материалов для scenarioGameId
         const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
@@ -5402,20 +5384,8 @@ app.post('/api/chat/reply', async (req, res) => {
           } else {
             console.log(`[REPLY] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || text, locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
           }
-        } else {
-          // Если материалов нет - запускаем параллельную генерацию
-          console.log(`[REPLY] 📦 No pre-generated materials found for scenarioGameId=${scenarioGameIdForPregen}, starting background generation`);
-          generatePregenMaterialInBackground({
-            scenarioGameId: scenarioGameIdForPregen,
-            text: userText || text,
-            locationId,
-            characterId,
-            messageType: 'narrator',
-            depth,
-            choiceIndex,
-            parentHash
-          });
         }
+        // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
       }
       
       // Если прегенерированного аудио нет - генерируем в реальном времени
@@ -6690,7 +6660,7 @@ async function generateSSMLWithIntonation(params: {
       return null; // Fallback на обычный SSML
     }
     
-    console.log('[TTS-SSML] Using Gemini for dynamic SSML generation with full semantic understanding');
+    // Генерация SSML через Gemini (логи убраны для уменьшения шума)
     
     const characterInfo: string[] = [];
     if (characterName) characterInfo.push(`Имя: ${characterName}`);
@@ -6777,14 +6747,11 @@ ${characterInfo.length > 0 ? `Характеристики персонажа:\n
 
 Верни ТОЛЬКО SSML (без объяснений).`;
 
-    console.log('[TTS-SSML] Generating SSML with Gemini for text length:', text.length);
     const startTime = Date.now();
     
     try {
       // Динамический таймаут в зависимости от длины текста (минимум 20 секунд, максимум 60 секунд)
-      // Для длинных текстов даем больше времени, но не слишком много
       const timeoutMs = Math.min(60000, Math.max(20000, text.length * 50));
-      console.log('[TTS-SSML] Using timeout:', timeoutMs, 'ms for text length:', text.length);
       
       const ssmlPromise = generateChatCompletion({
         systemPrompt,
@@ -6797,34 +6764,24 @@ ${characterInfo.length > 0 ? `Характеристики персонажа:\n
       });
       
       const { text: ssmlResponse } = await Promise.race([ssmlPromise, timeoutPromise]);
-      
-      const duration = Date.now() - startTime;
-      console.log('[TTS-SSML] Gemini SSML generation took:', duration, 'ms');
     
       if (ssmlResponse) {
         // Извлекаем SSML из ответа
         const ssmlMatch = ssmlResponse.match(/<speak>[\s\S]*<\/speak>/i);
         if (ssmlMatch) {
-          console.log('[TTS-SSML] Successfully generated SSML via Gemini');
           return ssmlMatch[0];
         }
         // Если SSML не найден, но есть теги speak, используем весь ответ
         if (ssmlResponse.includes('<speak>')) {
-          console.log('[TTS-SSML] Using full response as SSML');
           return ssmlResponse;
         }
-        console.warn('[TTS-SSML] Gemini response does not contain SSML tags');
       }
     } catch (e) {
-      const duration = Date.now() - startTime;
-      console.error('[TTS-SSML] Gemini SSML generation failed after', duration, 'ms:', e);
       // Продолжаем с fallback
     }
   } catch (e) {
-    console.error('[TTS-SSML] Gemini SSML generation error:', e);
+    // Продолжаем с fallback
   }
-  
-  console.log('[TTS-SSML] Falling back to standard SSML');
   return null; // Fallback на обычный SSML
 }
 
@@ -7154,17 +7111,10 @@ app.post('/api/tts', async (req, res) => {
     const gender = typeof req.body?.gender === 'string' ? req.body.gender : undefined;
     const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : undefined; // undefined = автоопределение
     
-    console.log('[TTS] Request received:', {
-      textLength: text.length,
-      textPreview: text.slice(0, 100),
-      format,
-      gameId,
-      characterId,
-      locationId,
-      gender,
-      isNarrator,
-      segmentMode,
-    });
+    // Логируем только важную информацию
+    if (text.length > 500) {
+      console.log(`[TTS] Request: ${text.length} chars, format=${format}`);
+    }
     
     if (!text.trim()) {
       console.warn('[TTS] Empty text received');
@@ -7198,7 +7148,7 @@ app.post('/api/tts', async (req, res) => {
       }
       
       const messageType = isNarrator !== false ? 'narrator' : 'character';
-      console.log(`[TTS] 🔍 Looking for pre-generated audio: scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'}, characterId=${characterId || 'none'}, text length=${text.length}`);
+      // Поиск прегенерированного аудио (логи убраны для уменьшения шума)
       const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType);
       
       if (pregenPath) {
@@ -7819,7 +7769,7 @@ app.post('/api/tts', async (req, res) => {
         const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${testModelName}:generateContent`;
         const testDispatcher = attempts[0] !== '__direct__' ? new ProxyAgent(attempts[0]) : undefined;
         
-        console.log('[GEMINI-TTS] 🔍 Quick TTS availability check (minimal audio request)...');
+        // Быстрая проверка доступности Gemini TTS (логи убраны)
         const testResponse = await undiciFetch(testUrl, {
           method: 'POST',
           dispatcher: testDispatcher,
