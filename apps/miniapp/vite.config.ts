@@ -5,6 +5,8 @@ export default defineConfig({
   plugins: [react()],
   build: {
     cssCodeSplit: false, // Генерируем один CSS файл для лучшей загрузки
+    // Включаем inline CSS для критических стилей (опционально)
+    cssMinify: true,
     rollupOptions: {
       output: {
         // Добавляем хеш к именам файлов для cache-busting
