@@ -6635,7 +6635,6 @@ app.post('/api/tts', async (req, res) => {
     const pitchReq = typeof req.body?.pitch === 'string' ? parseFloat(req.body.pitch) : undefined;
     const lang = typeof req.body?.lang === 'string' ? req.body.lang : 'ru-RU';
     const segmentMode = typeof req.body?.segmentMode === 'boolean' ? req.body.segmentMode : false; // Режим сегментированного текста
-    const isPregeneration = typeof req.body?.isPregeneration === 'boolean' ? req.body.isPregeneration : false; // Флаг прегенерации - игнорируем usePregenMaterials
     
     // Контекст для выбора голоса
     const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
@@ -6679,18 +6678,6 @@ app.post('/api/tts', async (req, res) => {
         }
       }
       
-      // Если включено использование прегенерированных материалов - НЕ генерируем в реальном времени
-      // НО: если это запрос из процесса прегенерации - игнорируем флаг и генерируем
-      if (!isPregeneration) {
-        const prisma = getPrisma();
-        const game = await prisma.game.findUnique({ where: { id: gameId }, select: { usePregenMaterials: true } });
-        if (game?.usePregenMaterials) {
-          console.warn('[TTS] ⚠️ usePregenMaterials=true but pre-generated audio not found, returning error');
-          return res.status(404).json({ error: 'pregen_audio_not_found', message: 'Прегенерированное аудио не найдено' });
-        }
-      } else {
-        console.log('[TTS] 🔧 Pregeneration mode: ignoring usePregenMaterials flag');
-      }
     }
     
     // Если включен режим сегментов, разбиваем текст и обрабатываем каждый сегмент
@@ -7480,7 +7467,6 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
               locationId: location.id,
               format: 'wav',
               isNarrator: true,
-              isPregeneration: true // Указываем, что это запрос из прегенерации
             }),
             signal: AbortSignal.timeout(120000)
           });
@@ -7657,7 +7643,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               gameId,
               locationId: location.id,
               format: 'wav',
-              isNarrator: true
+              isNarrator: true,
             }),
             signal: AbortSignal.timeout(120000)
           });
@@ -7762,7 +7748,6 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       locationId: locationId,
                       format: 'wav',
                       isNarrator: true,
-                      isPregeneration: true // Указываем, что это запрос из прегенерации
                     }),
                     signal: AbortSignal.timeout(120000)
                   });
@@ -7903,7 +7888,6 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               locationId: targetLocation.id,
               format: 'wav',
               isNarrator: true,
-              isPregeneration: true // Указываем, что это запрос из прегенерации
             }),
             signal: AbortSignal.timeout(120000)
           });
