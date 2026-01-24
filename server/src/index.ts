@@ -3863,11 +3863,15 @@ app.post('/api/lobbies/:id/start', async (req, res) => {
             text = intro || 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.';
           }
           text = (text || '').trim();
-          await prisma.chatSession.upsert({
-            where: { userId_gameId: { userId: 'lobby:' + lob.id, gameId: lob.gameId } },
-            update: { history: ([{ from: 'bot', text }] as any) },
-            create: { userId: 'lobby:' + lob.id, gameId: lob.gameId, history: ([{ from: 'bot', text }] as any) },
-          });
+          // Не сохраняем "технические ошибки" в историю
+          const shouldSave = !text || !text.trim().startsWith('Техническая ошибка');
+          if (shouldSave) {
+            await prisma.chatSession.upsert({
+              where: { userId_gameId: { userId: 'lobby:' + lob.id, gameId: lob.gameId } },
+              update: { history: ([{ from: 'bot', text }] as any) },
+              create: { userId: 'lobby:' + lob.id, gameId: lob.gameId, history: ([{ from: 'bot', text }] as any) },
+            });
+          }
         } catch {}
       }
     }
@@ -3972,6 +3976,28 @@ app.post('/api/chat/welcome', async (req, res) => {
             text = (text || '').trim();
             // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
             text = formatChoiceOptions(text);
+            
+            // Проверяем, есть ли варианты выбора в тексте
+            const choices = parseChoiceOptions(text);
+            if (choices.length === 0 && first?.id) {
+              // Если вариантов нет, добавляем их из кнопок локации
+              const exits = await prisma.locationExit.findMany({ where: { locationId: first.id } });
+              if (exits.length > 0) {
+                const choiceLines = exits
+                  .map((exit, idx) => {
+                    const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+                    return `${idx + 1}. ${choiceText}`;
+                  })
+                  .join('\n');
+                // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+                if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+                  text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+                  text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+                } else {
+                  text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+                }
+              }
+            }
           }
         } catch {
           text = offlineText;
@@ -4061,11 +4087,15 @@ app.post('/api/chat/welcome', async (req, res) => {
         }
       }
       
-      await prisma.chatSession.upsert({
-        where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
-        update: { history: ([{ from: 'bot', text }] as any) },
-        create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text }] as any) },
-      });
+      // Не сохраняем "технические ошибки" в историю
+      const shouldSaveWelcome = !text || !text.trim().startsWith('Техническая ошибка');
+      if (shouldSaveWelcome) {
+        await prisma.chatSession.upsert({
+          where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+          update: { history: ([{ from: 'bot', text }] as any) },
+          create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text }] as any) },
+        });
+      }
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
       const response: any = { message: text || '', fallback: !Boolean(apiKey) };
@@ -4204,11 +4234,15 @@ app.post('/api/chat/welcome', async (req, res) => {
       }
     }
     
-    await prisma.chatSession.upsert({
-      where: { userId_gameId: { userId: uid, gameId } },
-      update: { history: ([{ from: 'bot', text }] as any) },
-      create: { userId: uid, gameId, history: ([{ from: 'bot', text }] as any) },
-    });
+    // Не сохраняем "технические ошибки" в историю
+    const shouldSaveWelcomeSolo = !text || !text.trim().startsWith('Техническая ошибка');
+    if (shouldSaveWelcomeSolo) {
+      await prisma.chatSession.upsert({
+        where: { userId_gameId: { userId: uid, gameId } },
+        update: { history: ([{ from: 'bot', text }] as any) },
+        create: { userId: uid, gameId, history: ([{ from: 'bot', text }] as any) },
+      });
+    }
     
     const response: any = { message: text, fallback: !Boolean(client) };
     if (audioData) {
@@ -4640,6 +4674,46 @@ app.post('/api/chat/reply', async (req, res) => {
 
     // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
     text = formatChoiceOptions(text);
+    
+    // Проверяем, есть ли варианты выбора в тексте
+    const choices = parseChoiceOptions(text);
+    if (choices.length === 0 && gameId) {
+      // Если вариантов нет, добавляем их из кнопок текущей локации
+      let locationId: string | undefined = undefined;
+      try {
+        let sess: any = null;
+        if (lobbyId) {
+          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+        } else {
+          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        }
+        if (sess) {
+          locationId = sess.currentLocationId || undefined;
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to get location for adding choices:', e);
+      }
+      
+      if (locationId) {
+        const exits = await prisma.locationExit.findMany({ where: { locationId } });
+        if (exits.length > 0) {
+          const choiceLines = exits
+            .map((exit, idx) => {
+              const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+              return `${idx + 1}. ${choiceText}`;
+            })
+            .join('\n');
+          // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+          if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+            text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+            text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+          } else {
+            text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+          }
+        }
+      }
+    }
 
     // Парсинг тега броска от ИИ
     let aiRequestDice: any = null;
@@ -5043,9 +5117,11 @@ app.post('/api/chat/reply', async (req, res) => {
         create: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown', history: [] as any },
       });
       const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+      // Не сохраняем "технические ошибки" в историю
+      const shouldSaveBotMessage = !text || !text.trim().startsWith('Техническая ошибка');
       const newHist = prev.concat([
         (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)),
-        { from: 'bot', text } as any,
+        ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
       ]);
       await prisma.chatSession.update({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       advanceTurn(lobbyId);
@@ -5075,9 +5151,11 @@ app.post('/api/chat/reply', async (req, res) => {
           create: { userId: uid, gameId: gameId || 'unknown', history: [] as any },
         });
         const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+        // Не сохраняем "технические ошибки" в историю
+        const shouldSaveBotMessage = !text || !text.trim().startsWith('Техническая ошибка');
         const newHist = prev.concat([
           { from: 'me', text: userText } as any,
-          { from: 'bot', text } as any,
+          ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
         ]);
         await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       }
@@ -5343,6 +5421,28 @@ app.post('/api/engine/session/:id/describe', async (req, res) => {
         text = text.trim();
         // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
         text = formatChoiceOptions(text);
+        
+        // Проверяем, есть ли варианты выбора в тексте
+        const choices = parseChoiceOptions(text);
+        if (choices.length === 0 && sess.currentLocationId) {
+          // Если вариантов нет, добавляем их из кнопок локации
+          const exits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+          if (exits.length > 0) {
+            const choiceLines = exits
+              .map((exit, idx) => {
+                const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+                return `${idx + 1}. ${choiceText}`;
+              })
+              .join('\n');
+            // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+            if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+              text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+              text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+            } else {
+              text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+            }
+          }
+        }
       }
       usedAi = Boolean(text);
     } catch (err) {
@@ -7437,34 +7537,48 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
             'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
           
-          // Получаем контекст локации
-          const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
-          const visual = location.backgroundUrl ? `Фон (изображение): ${location.backgroundUrl}` : '';
-          const rules = [
-            game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
-            game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
-          ].filter(Boolean).join('\n');
-          const npcs = chars && chars.length ? (
-            'Персонажи (D&D 5e):\n' + chars.map((c) => {
-              const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
-              const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
-              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
-              return `- ${c.name} (${traits})${stats}. ${extras}`;
-            }).join('\n')
-          ) : '';
+          // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/chat/welcome (SOLO)
+          // Создаем временную сессию для buildGptSceneContext
+          const tempUserId = `__pregeneration__${location.id}__${Date.now()}`;
+          let tempSessionCreated = false;
+          try {
+            await prisma.gameSession.create({
+              data: {
+                scenarioGameId: gameId,
+                currentLocationId: location.id,
+                state: {} as any,
+                userId: tempUserId,
+                lobbyId: null,
+              },
+            });
+            tempSessionCreated = true;
+          } catch (e) {
+            // Если сессия уже существует, обновляем её
+            try {
+              await prisma.gameSession.updateMany({
+                where: { scenarioGameId: gameId, userId: tempUserId },
+                data: { currentLocationId: location.id },
+              });
+              tempSessionCreated = true;
+            } catch (e2) {
+              console.warn(`[PRAGEN-TTS] Failed to create/update temp session for location ${location.id}:`, e2);
+            }
+          }
           
-          const userMsg = [
-            `Сцена: ${location.title}`,
-            visual,
-            location.description ? `Описание сцены: ${location.description}` : '',
-            rules,
-            npcs,
-          ].filter(Boolean).join('\n\n');
+          // Используем buildGptSceneContext, как в /api/chat/welcome
+          const sc = await buildGptSceneContext(prisma, { gameId, userId: tempSessionCreated ? tempUserId : null, history: [] });
           
-          // Генерируем текст
+          // Удаляем временную сессию после использования
+          if (tempSessionCreated) {
+            try {
+              await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+            } catch {}
+          }
+          
+          // Генерируем текст ТОЧНО так же, как в /api/chat/welcome
           const { text: generatedText } = await generateChatCompletion({
             systemPrompt: sys,
-            userPrompt: userMsg,
+            userPrompt: 'Контекст сцены:\n' + sc,
             history: []
           });
           
@@ -7619,33 +7733,48 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
             'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
           
-          const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
-          const visual = location.backgroundUrl ? `Фон (изображение): ${location.backgroundUrl}` : '';
-          const rules = [
-            game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
-            game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
-          ].filter(Boolean).join('\n');
-          const npcs = chars && chars.length ? (
-            'Персонажи (D&D 5e):\n' + chars.map((c) => {
-              const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
-              const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
-              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
-              return `- ${c.name} (${traits})${stats}. ${extras}`;
-            }).join('\n')
-          ) : '';
+          // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/chat/welcome (SOLO)
+          // Создаем временную сессию для buildGptSceneContext
+          const tempUserId = `__pregeneration__${location.id}__${Date.now()}`;
+          let tempSessionCreated = false;
+          try {
+            await prisma.gameSession.create({
+              data: {
+                scenarioGameId: gameId,
+                currentLocationId: location.id,
+                state: {} as any,
+                userId: tempUserId,
+                lobbyId: null,
+              },
+            });
+            tempSessionCreated = true;
+          } catch (e) {
+            // Если сессия уже существует, обновляем её
+            try {
+              await prisma.gameSession.updateMany({
+                where: { scenarioGameId: gameId, userId: tempUserId },
+                data: { currentLocationId: location.id },
+              });
+              tempSessionCreated = true;
+            } catch (e2) {
+              console.warn(`[PRAGEN-ALL] Failed to create/update temp session for location ${location.id}:`, e2);
+            }
+          }
           
-          const userMsg = [
-            `Сцена: ${location.title}`,
-            visual,
-            location.description ? `Описание сцены: ${location.description}` : '',
-            rules,
-            npcs,
-          ].filter(Boolean).join('\n\n');
+          // Используем buildGptSceneContext, как в /api/chat/welcome
+          const sc = await buildGptSceneContext(prisma, { gameId, userId: tempSessionCreated ? tempUserId : null, history: [] });
           
-          // Генерируем текст
+          // Удаляем временную сессию после использования
+          if (tempSessionCreated) {
+            try {
+              await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+            } catch {}
+          }
+          
+          // Генерируем текст ТОЧНО так же, как в /api/chat/welcome
           const { text: generatedText } = await generateChatCompletion({
             systemPrompt: sysPrompt,
-            userPrompt: userMsg,
+            userPrompt: 'Контекст сцены:\n' + sc,
             history: []
           });
           
@@ -7706,6 +7835,33 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               processedDialogues.add(dialogueKey);
               
               try {
+                // Создаем временную сессию для buildGptSceneContext, чтобы она использовала правильную локацию
+                // Используем фиктивный userId для временной сессии
+                const tempUserId = `__pregeneration__${locationId}__${Date.now()}`;
+                let tempSessionCreated = false;
+                try {
+                  await prisma.gameSession.create({
+                    data: {
+                      scenarioGameId: gameId,
+                      currentLocationId: locationId,
+                      state: {} as any,
+                      userId: tempUserId,
+                      lobbyId: null,
+                    },
+                  });
+                  tempSessionCreated = true;
+                } catch (e) {
+                  // Если сессия уже существует, обновляем её
+                  try {
+                    await prisma.gameSession.updateMany({
+                      where: { scenarioGameId: gameId, userId: tempUserId },
+                      data: { currentLocationId: locationId },
+                    });
+                    tempSessionCreated = true;
+                  } catch (e2) {
+                    console.warn(`[PRAGEN-ALL] Failed to create/update temp session for location ${locationId}:`, e2);
+                  }
+                }
                 const choiceResponseSys = sys +
                   'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
                   'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
@@ -7721,36 +7877,64 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                   'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
                   'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
                 
-                // Используем тот же контекст, что и в /api/chat/reply
+                // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/chat/reply
                 const context: string[] = [];
-                context.push(`Игра: ${game.title}`);
-                if (game.description) context.push(`Описание: ${game.description}`);
-                if (game.worldRules) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
-                if (game.gameplayRules) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
-                if (game.author) context.push(`Автор: ${game.author}`);
-                if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
-                if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
-                if ((game as any).winCondition) context.push(`Условие победы: ${(game as any).winCondition}`);
-                if ((game as any).loseCondition) context.push(`Условие поражения: ${(game as any).loseCondition}`);
-                if ((game as any).deathCondition) context.push(`Условие смерти: ${(game as any).deathCondition}`);
-                if ((game as any).introduction) context.push(`Введение: ${(game as any).introduction}`);
-                if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
-                if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
+                if (game) {
+                  context.push(`Игра: ${game.title}`);
+                  if (game.description) context.push(`Описание: ${game.description}`);
+                  if (game.worldRules) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
+                  if (game.gameplayRules) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
+                  if (game.author) context.push(`Автор: ${game.author}`);
+                  if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
+                  if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
+                  if ((game as any).winCondition) context.push(`Условие победы: ${(game as any).winCondition}`);
+                  if ((game as any).loseCondition) context.push(`Условие поражения: ${(game as any).loseCondition}`);
+                  if ((game as any).deathCondition) context.push(`Условие смерти: ${(game as any).deathCondition}`);
+                  if ((game as any).introduction) context.push(`Введение: ${(game as any).introduction}`);
+                  if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
+                  if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
+                  
+                  // Добавляем игровых персонажей (как в /api/chat/reply)
+                  const playable = (game.characters || []).filter((c: any) => c.isPlayable);
+                  if (playable.length) {
+                    context.push('Игровые персонажи D&D 5e (ТЕКУЩЕЕ СОСТОЯНИЕ):\n' + playable.map((p: any) => {
+                      const traits = [p.role, p.class, p.race, p.gender].filter(Boolean).join(', ');
+                      const stats = `HP: ${p.hp}/${p.maxHp}, AC: ${p.ac}, STR:${p.str}, DEX:${p.dex}, CON:${p.con}, INT:${p.int}, WIS:${p.wis}, CHA:${p.cha}`;
+                      const extras = [p.persona, p.origin].filter(Boolean).join('. ');
+                      const abilities = p.abilities ? `; способности: ${String(p.abilities).slice(0, 200)}` : '';
+                      return `- ${p.name} (${traits}) — ${stats}. ${extras}${abilities}`;
+                    }).join('\n'));
+                  }
+                  
+                  // Добавляем NPC
+                  if (Array.isArray(chars) && chars.length) {
+                    context.push('NPC, доступные в мире (используй их в сценах):\n' + chars.map((n) => {
+                      const traits = [n.role, n.race, n.gender].filter(Boolean).join(', ');
+                      const extras = [n.persona, n.origin].filter(Boolean).join('. ');
+                      return `- ${n.name}${traits ? ` (${traits})` : ''}${extras ? ` — ${extras}` : ''}`;
+                    }).join('\n'));
+                  }
+                }
                 
-                // Добавляем NPC
-                const npcsForChoice = chars && chars.length ? (
-                  'Персонажи (D&D 5e):\n' + chars.map((c) => {
-                    const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
-                    const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
-                    const extras = [c.persona, c.origin].filter(Boolean).join('. ');
-                    return `- ${c.name} (${traits})${stats}. ${extras}`;
-                  }).join('\n')
-                ) : '';
-                if (npcsForChoice) context.push(npcsForChoice);
+                // Используем buildGptSceneContext для получения контекста сцены (как в /api/chat/reply)
+                // Используем временную сессию, чтобы buildGptSceneContext использовала правильную локацию
+                const sc = await buildGptSceneContext(prisma, {
+                  gameId,
+                  history: parentHistory,
+                  userId: tempSessionCreated ? tempUserId : null,
+                });
                 
+                // Удаляем временную сессию после использования
+                if (tempSessionCreated) {
+                  try {
+                    await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+                  } catch {}
+                }
+                
+                // Формируем userPrompt ТОЧНО так же, как в /api/chat/reply
                 const choiceUserMsg = [
                   'Контекст игры:\n' + context.filter(Boolean).join('\n\n'),
-                  `Контекст сцены:\n${userMsg}`,
+                  sc ? 'Контекст сцены:\n' + sc : '',
                   `Действие игрока: ${choiceText}`
                 ].filter(Boolean).join('\n\n');
                 
@@ -7779,14 +7963,33 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                   
                   if (choiceTtsResponse.ok) {
                     const choiceAudioBuffer = Buffer.from(await choiceTtsResponse.arrayBuffer());
-                    const choiceAudioPath = getPregenAudioPath(gameId, formattedChoiceText, locationId, undefined, 'narrator');
+                    // ВАЖНО: Сохраняем по действию игрока (choiceText), а не по ответу бота
+                    // Это нужно, чтобы поиск в /api/chat/reply работал корректно
+                    // В /api/chat/reply ищется по userText (действие игрока), поэтому и сохраняем по нему
+                    const choiceAudioPath = getPregenAudioPath(gameId, choiceText, locationId, undefined, 'narrator');
                     const choiceAudioDir = path.dirname(choiceAudioPath);
                     try { fs.mkdirSync(choiceAudioDir, { recursive: true }); } catch {}
                     fs.writeFileSync(choiceAudioPath, choiceAudioBuffer);
                     
-                    // Сохраняем также текст
+                    // Сохраняем также текст (ответ бота)
                     const choiceTextPath = choiceAudioPath.replace('.wav', '.txt');
                     fs.writeFileSync(choiceTextPath, formattedChoiceText, 'utf-8');
+                    
+                    // ДОПОЛНИТЕЛЬНО: Сохраняем также по choiceUserMsg (без diceContext/lastDiceOutcome)
+                    // Это нужно для случая, когда в /api/chat/reply нет userText и поиск идет по userPrompt
+                    // Но userPrompt может включать diceContext, которого нет в прегенерации
+                    // Поэтому сохраняем по choiceUserMsg (без diceContext)
+                    const choiceUserMsgPath = getPregenAudioPath(gameId, choiceUserMsg, locationId, undefined, 'narrator');
+                    if (choiceUserMsgPath !== choiceAudioPath) {
+                      // Только если путь отличается (хеш разный)
+                      try {
+                        const choiceUserMsgDir = path.dirname(choiceUserMsgPath);
+                        fs.mkdirSync(choiceUserMsgDir, { recursive: true });
+                        fs.writeFileSync(choiceUserMsgPath, choiceAudioBuffer);
+                        const choiceUserMsgTextPath = choiceUserMsgPath.replace('.wav', '.txt');
+                        fs.writeFileSync(choiceUserMsgTextPath, formattedChoiceText, 'utf-8');
+                      } catch {}
+                    }
                     
                     console.log(`[PRAGEN-ALL] ✅ Dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..."`);
                     choiceResponseSuccessCount++;
@@ -7816,16 +8019,31 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               }
             };
             
-            // Парсим варианты выбора из текста и запускаем рекурсивную генерацию всех диалогов
-            const choices = parseChoiceOptions(text);
-            if (choices.length > 0) {
-              console.log(`[PRAGEN-ALL] Found ${choices.length} choice options in location ${location.title}, generating ALL dialogue chains...`);
+            // Используем РЕАЛЬНЫЕ кнопки (exits) из базы данных, а не парсим из текста
+            const exits = location.exits || [];
+            if (exits.length > 0) {
+              console.log(`[PRAGEN-ALL] Found ${exits.length} exits (buttons) for location ${location.title}, generating ALL dialogue chains...`);
               const initialHistory = [{ from: 'bot', text }];
-              for (let choiceIdx = 0; choiceIdx < choices.length; choiceIdx++) {
-                const choiceText = choices[choiceIdx];
+              for (let exitIdx = 0; exitIdx < exits.length; exitIdx++) {
+                const exit = exits[exitIdx];
+                // Используем buttonText или triggerText из базы данных
+                const choiceText = exit.buttonText || exit.triggerText || `Вариант ${exitIdx + 1}`;
                 await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
                 // Небольшая задержка между начальными вариантами
                 await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            } else {
+              // Если нет exits в БД, парсим из текста как fallback
+              const choices = parseChoiceOptions(text);
+              if (choices.length > 0) {
+                console.log(`[PRAGEN-ALL] No exits in DB, parsing ${choices.length} choice options from text for location ${location.title}, generating ALL dialogue chains...`);
+                const initialHistory = [{ from: 'bot', text }];
+                for (let choiceIdx = 0; choiceIdx < choices.length; choiceIdx++) {
+                  const choiceText = choices[choiceIdx];
+                  await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
+                  // Небольшая задержка между начальными вариантами
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                }
               }
             }
             
@@ -7841,6 +8059,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       };
       
       // Функция для генерации текста и аудио для варианта
+      // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/engine/session/:id/describe
       const generateExitTTS = async (exit: any, fromLocation: any, targetLocation: any, exitIndex: number, totalExits: number) => {
         try {
           if (!exit.targetLocationId) {
@@ -7849,6 +8068,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           
           console.log(`[PRAGEN-ALL] Processing exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} (${fromLocation.title} -> ${targetLocation.title})`);
           
+          // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
           const visual = [
             targetLocation.backgroundUrl ? `Фон (изображение): ${targetLocation.backgroundUrl}` : '',
             targetLocation.musicUrl ? `Музыка (URL): ${targetLocation.musicUrl}` : '',
@@ -7878,7 +8098,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           ) : '';
           
           const base = targetLocation.description || '';
-          const userMsg = [
+          const user = [
             `Сцена: ${targetLocation.title}`,
             visual,
             base ? `Описание сцены: ${base}` : '',
@@ -7886,10 +8106,10 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             npcs,
           ].filter(Boolean).join('\n\n');
           
-          // Генерируем текст
+          // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
           const { text: generatedText } = await generateChatCompletion({
             systemPrompt: sys,
-            userPrompt: userMsg,
+            userPrompt: user,
             history: []
           });
           
@@ -8036,7 +8256,7 @@ app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
       return res.status(404).json({ error: 'target_location_not_found' });
     }
     
-    // Генерируем текст точно так же, как в /api/engine/session/:id/describe
+    // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
     // Используем тот же systemPrompt, чтобы хеш совпадал
     const sys = getSysPrompt();
     
@@ -8069,10 +8289,10 @@ app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
       }).join('\n')
     ) : '';
     
-    // Генерируем текст точно так же, как при реальном переходе через /api/engine/session/:id/describe
+    // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
     // НЕ добавляем информацию о выборе, чтобы хеш совпадал с реальной генерацией
     const base = targetLoc.description || '';
-    const userMsg = [
+    const user = [
       `Сцена: ${targetLoc.title}`,
       visual,
       base ? `Описание сцены: ${base}` : '',
@@ -8083,7 +8303,7 @@ app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
     // Генерируем текст
     const { text: generatedText } = await generateChatCompletion({
       systemPrompt: sys,
-      userPrompt: userMsg,
+      userPrompt: user,
       history: []
     });
     
@@ -8109,7 +8329,6 @@ app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
         locationId: targetLocationId,
         format: 'wav',
         isNarrator: true,
-        isPregeneration: true // Указываем, что это запрос из прегенерации
       }),
       signal: AbortSignal.timeout(120000)
     });
