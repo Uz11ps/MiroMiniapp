@@ -316,8 +316,9 @@ const GameChat: React.FC = () => {
     } catch (err) {
       console.error('[TTS-CLIENT] speakWithAudio error:', err);
       speakingInFlightRef.current = false;
-      // Fallback на обычный синтез
-      speak(text);
+      // НЕ делаем fallback на speak() - если прегенерированное аудио не работает, просто не озвучиваем
+      // Это предотвращает повторный запрос к TTS
+      console.warn('[TTS-CLIENT] Pre-generated audio failed, skipping TTS to avoid duplicate request');
     }
   };
 
@@ -334,6 +335,9 @@ const GameChat: React.FC = () => {
         return;
       }
       
+      // Проверяем, не было ли это сообщение уже озвучено через прегенерированное аудио
+      // Если текст только что пришел с сервера, возможно аудио уже прегенерировано
+      // В этом случае не делаем повторный запрос
       console.log('[TTS-CLIENT] Starting TTS for text:', t.slice(0, 100), 'context:', context);
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
@@ -935,12 +939,18 @@ const GameChat: React.FC = () => {
             setMessages(h as any);
             const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
             if (lastBot?.text) {
-              // Используем прегенерированное аудио, если есть
+              // Используем прегенерированное аудио, если есть - НЕ делаем повторный запрос к TTS
               if (preGeneratedAudio?.data) {
+                console.log('[CLIENT] Using pre-generated audio from server response (lobby mode)');
                 const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
                 const audioUrl = URL.createObjectURL(audioBlob);
-                speakWithAudio(audioUrl, lastBot.text);
+                speakWithAudio(audioUrl, lastBot.text).catch((err) => {
+                  console.error('[CLIENT] speakWithAudio failed (lobby):', err);
+                  // НЕ делаем fallback на speak() - если прегенерированное аудио не работает, просто не озвучиваем
+                  // Это предотвращает повторный запрос к TTS
+                });
               } else {
+                console.log('[CLIENT] No pre-generated audio (lobby mode), using TTS synthesis');
                 speak(lastBot.text);
               }
             }
@@ -957,8 +967,9 @@ const GameChat: React.FC = () => {
               const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
               const audioUrl = URL.createObjectURL(audioBlob);
               speakWithAudio(audioUrl, txt).catch((err) => {
-                console.error('[CLIENT] speakWithAudio failed, falling back to speak:', err);
-                speak(txt);
+                console.error('[CLIENT] speakWithAudio failed:', err);
+                // НЕ делаем fallback на speak() - если прегенерированное аудио не работает, просто не озвучиваем
+                // Это предотвращает повторный запрос к TTS
               });
             } else {
               // Если прегенерированного аудио нет, используем обычный синтез

@@ -4716,10 +4716,14 @@ app.post('/api/chat/reply', async (req, res) => {
       // Сохраняем аудио в переменную для возврата клиенту
       // КРИТИЧЕСКИ ВАЖНО: ответ отправляется ТОЛЬКО после завершения TTS
       (req as any).preGeneratedAudio = audioData;
+      console.log('[REPLY] ✅ TTS pre-generation finished, proceeding to send response to client');
     } catch (ttsErr: any) {
       console.warn('[REPLY] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
       // НЕ блокируем отправку текста, если TTS не сгенерировался - клиент может запросить позже
+      (req as any).preGeneratedAudio = null;
     }
+
+    console.log('[REPLY] About to send response to client, hasAudio:', !!(req as any).preGeneratedAudio);
 
     if (lobbyId) {
       const sess = await prisma.chatSession.upsert({
@@ -5375,6 +5379,7 @@ async function parseTextIntoSegments(params: {
 - Распознавай эмоциональную окраску каждого фрагмента
 - Понимай логические связи между частями текста
 - Определяй, где заканчивается одна мысль и начинается другая
+- Распознавай персонажей по ИМЕНАМ, описаниям, характеристикам и манере речи
 
 Текст может содержать:
 1. Текст рассказчика (мастера) - описания действий, окружения, событий
@@ -5393,9 +5398,13 @@ async function parseTextIntoSegments(params: {
 1. Разбить текст на сегменты (части) с пониманием СЕМАНТИЧЕСКОЙ структуры
 2. Для каждого сегмента определить:
    - Является ли он текстом рассказчика или репликой персонажа
-   - Если это реплика - какой персонаж говорит (используй характеристики для точного определения)
+   - Если это реплика - какой персонаж говорит:
+     * КРИТИЧЕСКИ ВАЖНО: Используй ИМЕНА ПЕРСОНАЖЕЙ из текста (например, "БАЛДУР", "Балдур", "балдур" - все варианты)
+     * Если в тексте упоминается имя персонажа (в любом регистре), это ОБЯЗАТЕЛЬНО его реплика
+     * Используй характеристики для точного определения (класс, раса, персона)
+     * Учитывай описание персонажа и его способности
    - Эмоцию в сегменте (учитывай класс и характер персонажа, а также СЕМАНТИЧЕСКИЙ СМЫСЛ текста)
-   - Пол говорящего персонажа (если это реплика)
+   - Пол говорящего персонажа (если это реплика) - используй информацию о персонаже из списка
    - Учитывай класс, расу, persona и способности персонажа при определении
    - Понимай СЕМАНТИЧЕСКИЙ КОНТЕКСТ - разбивай по смысловым блокам, а не механически
 
@@ -5421,7 +5430,7 @@ ${charactersList}
 - Если весь текст - это рассказчик (нет реплик), верни ОДИН сегмент с isNarrator: true
 - НЕ разбивай текст рассказчика на мелкие части - объединяй весь текст рассказчика в один сегмент
 - Разбивай только когда есть явные реплики персонажей (в кавычках или после имени)
-- ВАЖНО: Распознавай персонажей по имени точно - если в тексте упоминается имя персонажа (например, БАЛДУР, Балдур, балдур), используй это имя для characterName
+- КРИТИЧЕСКИ ВАЖНО: Распознавай персонажей по имени точно - если в тексте упоминается имя персонажа (например, "БАЛДУР говорит:", "Балдур:", "балдур сказал"), это ОБЯЗАТЕЛЬНО реплика этого персонажа
 - Имена персонажей могут быть в любом регистре - учитывай это при сопоставлении
 - Сохраняй порядок сегментов как в оригинальном тексте
 - Не теряй текст - каждый символ должен быть в каком-то сегменте
@@ -5678,12 +5687,17 @@ async function analyzeSpeechContext(params: {
 - Определяй главную мысль и эмоциональную окраску
 - Распознавай иронию, сарказм, метафоры
 - Понимай логические связи и структуру текста
+- Распознавай персонажей по ИМЕНАМ, описаниям, характеристикам и манере речи
 
 Твоя задача:
 1. Определить, является ли текст репликой персонажа или текстом рассказчика (мастера) - на основе СЕМАНТИКИ, а не только формальных признаков
-2. Если это реплика персонажа - определить, какой персонаж говорит (используй СЕМАНТИЧЕСКИЙ анализ - кто по смыслу может так говорить)
+2. Если это реплика персонажа - определить, какой персонаж говорит:
+   - ИСПОЛЬЗУЙ ИМЕНА ПЕРСОНАЖЕЙ из текста (например, "БАЛДУР", "Балдур", "балдур" - все варианты)
+   - Используй СЕМАНТИЧЕСКИЙ анализ - кто по смыслу может так говорить
+   - Учитывай описание персонажа, его класс, расу, персону при определении
+   - Если в тексте упоминается имя персонажа (в любом регистре), это ОБЯЗАТЕЛЬНО его реплика
 3. Определить эмоцию в тексте с учетом СЕМАНТИЧЕСКОГО СМЫСЛА (не только поверхностных признаков)
-4. Определить пол говорящего персонажа (если это реплика)
+4. Определить пол говорящего персонажа (если это реплика) - используй информацию о персонаже из списка
 
 Доступные персонажи:
 ${charactersList}
@@ -5700,9 +5714,12 @@ ${charactersList}
 Правила определения:
 - Реплики персонажей обычно в кавычках или начинаются с имени персонажа, НО анализируй СЕМАНТИКУ
 - Текст рассказчика описывает действия, окружение, события - понимай это по СМЫСЛУ
+- КРИТИЧЕСКИ ВАЖНО: Если в тексте упоминается имя персонажа (например, "БАЛДУР говорит:", "Балдур:", "балдур сказал"), это ОБЯЗАТЕЛЬНО реплика этого персонажа
+- Имена персонажей могут быть в любом регистре - учитывай это при сопоставлении
 - Если персонаж не найден в списке, но текст явно реплика по СЕМАНТИКЕ - используй characterName из текста
 - Эмоция должна отражать ГЛУБОКИЙ ТОН и НАСТРОЕНИЕ текста, учитывая СЕМАНТИЧЕСКИЙ СМЫСЛ
-- Анализируй не только слова, но и ПОДТЕКСТ и КОНТЕКСТ`;
+- Анализируй не только слова, но и ПОДТЕКСТ и КОНТЕКСТ
+- Учитывай характеристики персонажа (класс, раса, персона) при определении, кто говорит`;
 
     const userPrompt = `Проанализируй следующий текст:
 
@@ -6722,13 +6739,17 @@ app.post('/api/tts', async (req, res) => {
       let directorsNotes = '';
       
       if (finalIsNarrator) {
+        // ВСЕГДА женский мягкий голос для рассказчика
         directorsNotes = `### DIRECTORS NOTES
-Style: Soft, warm, female narrator voice. Gentle and inviting tone. Natural, non-robotic speech with full emotional understanding.
+Style: Soft, warm, female narrator voice. Gentle and inviting tone. Natural, non-robotic speech with full emotional understanding and semantic meaning.
 Pacing: Calm and measured, with natural rhythm variations based on content meaning.
 Accent: Natural Russian, clear pronunciation.
 Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
+Voice: Female, soft, warm, gentle
+Tone: Always warm and inviting, never harsh or robotic
 `;
       } else {
+        // Для персонажей - детальные директорские заметки на основе всех характеристик
         const emotionDesc = emotion.emotion === 'joy' ? 'joyful and enthusiastic' :
                           emotion.emotion === 'sadness' ? 'sad and melancholic' :
                           emotion.emotion === 'anger' ? 'angry and intense' :
@@ -6736,17 +6757,70 @@ Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
                           emotion.emotion === 'surprise' ? 'surprised and excited' :
                           'neutral';
         
-        const classDesc = characterInfo?.class ? `Character class: ${characterInfo.class}. ` : '';
+        // Определяем пол для голоса
+        const isFemale = finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f');
+        const isMale = finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m');
+        const voiceGender = isFemale ? 'female' : isMale ? 'male' : 'neutral';
+        
+        // Описание класса и его влияния на голос
+        let classVoiceDesc = '';
+        if (characterInfo?.class) {
+          const classLower = characterInfo.class.toLowerCase();
+          if (classLower.includes('маг') || classLower.includes('wizard') || classLower.includes('чародей') || classLower.includes('sorcerer')) {
+            classVoiceDesc = 'Intelligent, articulate, measured speech. Sophisticated vocabulary.';
+          } else if (classLower.includes('воин') || classLower.includes('fighter') || classLower.includes('варвар') || classLower.includes('barbarian')) {
+            classVoiceDesc = 'Direct, confident, strong speech. Clear and decisive.';
+          } else if (classLower.includes('друид') || classLower.includes('druid') || classLower.includes('жрец') || classLower.includes('cleric')) {
+            classVoiceDesc = 'Wise, calm, measured speech. Thoughtful and contemplative.';
+          } else if (classLower.includes('плут') || classLower.includes('rogue') || classLower.includes('бард') || classLower.includes('bard')) {
+            classVoiceDesc = 'Quick, clever, witty speech. Fast-paced and cunning.';
+          } else if (classLower.includes('паладин') || classLower.includes('paladin')) {
+            classVoiceDesc = 'Noble, confident, righteous speech. Strong and honorable.';
+          }
+        }
+        
+        // Описание расы и её влияния на голос
+        let raceVoiceDesc = '';
+        if (characterInfo?.race) {
+          const raceLower = characterInfo.race.toLowerCase();
+          if (raceLower.includes('эльф') || raceLower.includes('elf')) {
+            raceVoiceDesc = 'Elegant, melodic, refined accent.';
+          } else if (raceLower.includes('дварф') || raceLower.includes('dwarf')) {
+            raceVoiceDesc = 'Rough, deep, gruff accent.';
+          } else if (raceLower.includes('гном') || raceLower.includes('gnome')) {
+            raceVoiceDesc = 'Quick, high-pitched, energetic accent.';
+          } else if (raceLower.includes('орк') || raceLower.includes('orc') || raceLower.includes('полуорк')) {
+            raceVoiceDesc = 'Harsh, deep, guttural accent.';
+          }
+        }
+        
+        // Влияние характеристик на голос
+        let statsVoiceDesc = '';
+        if (characterInfo) {
+          const cha = characterInfo.cha || finalCharacterCha || 10;
+          const int = characterInfo.int || finalCharacterInt || 10;
+          const wis = characterInfo.wis || finalCharacterWis || 10;
+          
+          if (cha >= 16) statsVoiceDesc += 'Highly charismatic, persuasive, eloquent. ';
+          if (int >= 16) statsVoiceDesc += 'Intelligent, articulate, sophisticated vocabulary. ';
+          if (wis >= 16) statsVoiceDesc += 'Wise, thoughtful, measured pace. ';
+          if (cha < 8) statsVoiceDesc += 'Less confident, hesitant speech. ';
+          if (int < 8) statsVoiceDesc += 'Simpler vocabulary, straightforward. ';
+        }
+        
+        const classDesc = characterInfo?.class ? `Class: ${characterInfo.class}. ` : '';
         const raceDesc = characterInfo?.race ? `Race: ${characterInfo.race}. ` : '';
         const personaDesc = characterInfo?.persona ? `Personality: ${characterInfo.persona}. ` : '';
-        const statsDesc = characterInfo ? `Stats: CHA=${characterInfo.cha || finalCharacterCha}, INT=${characterInfo.int || finalCharacterInt}, WIS=${characterInfo.wis || finalCharacterWis}. ` : '';
+        const nameDesc = finalCharacterName ? `Character name: ${finalCharacterName}. ` : '';
         
         directorsNotes = `### DIRECTORS NOTES
-Style: ${emotionDesc}, natural and expressive. ${classDesc}${raceDesc}${personaDesc}${statsDesc}
+Character: ${nameDesc}${classDesc}${raceDesc}${personaDesc}
+Style: ${emotionDesc}, natural and expressive. ${classVoiceDesc}${raceVoiceDesc}${statsVoiceDesc}
 Pacing: ${finalSpeed > 1.0 ? 'faster, energetic' : finalSpeed < 1.0 ? 'slower, thoughtful' : 'normal, natural rhythm'}.
-Accent: Natural Russian, character-appropriate.
+Accent: Natural Russian, ${raceVoiceDesc || 'character-appropriate'}.
 Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
-Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?.toLowerCase().includes('муж') ? 'male' : 'neutral'}
+Voice: ${voiceGender}, pitch: ${finalPitch > 0 ? 'higher' : finalPitch < 0 ? 'lower' : 'neutral'}, rate: ${finalSpeed}
+Tone: Character-appropriate based on class, race, personality, and stats. Real voice variation based on all character traits.
 `;
       }
       
@@ -6771,7 +6845,12 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
-                    voiceName: finalIsNarrator ? 'Aoede' : (finalGender?.toLowerCase().includes('жен') ? 'Kore' : 'Charon')
+                    // ВСЕГДА женский мягкий голос для рассказчика (Aoede)
+                    // Для персонажей - в зависимости от пола (Kore для женских, Charon для мужских)
+                    voiceName: finalIsNarrator ? 'Aoede' : 
+                              (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f')) ? 'Kore' : 
+                              (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m')) ? 'Charon' : 
+                              'Charon' // По умолчанию мужской голос
                   }
                 }
               }
@@ -6788,7 +6867,12 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
-                    voiceName: finalIsNarrator ? 'Aoede' : (finalGender?.toLowerCase().includes('жен') ? 'Kore' : 'Charon')
+                    // ВСЕГДА женский мягкий голос для рассказчика (Aoede)
+                    // Для персонажей - в зависимости от пола (Kore для женских, Charon для мужских)
+                    voiceName: finalIsNarrator ? 'Aoede' : 
+                              (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f')) ? 'Kore' : 
+                              (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m')) ? 'Charon' : 
+                              'Charon' // По умолчанию мужской голос
                   }
                 }
               }
