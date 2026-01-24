@@ -202,7 +202,7 @@ function generatePregenMaterialInBackground(params: {
           format: 'wav',
           isNarrator: messageType === 'narrator',
         }),
-        signal: AbortSignal.timeout(120000)
+        signal: AbortSignal.timeout(30000)
       });
       
       if (ttsResponse.ok) {
@@ -2762,7 +2762,7 @@ ${loc.description}
           await undiciFetch(pregenUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            signal: AbortSignal.timeout(5000) // Таймаут для инициализации, сама прегенерация работает асинхронно
+            signal: AbortSignal.timeout(2000) // Таймаут для инициализации, сама прегенерация работает асинхронно
           }).catch(() => {
             // Игнорируем ошибки таймаута, так как прегенерация работает асинхронно
           });
@@ -3088,7 +3088,7 @@ app.post('/api/admin/scenario/import', async (req, res) => {
         await undiciFetch(pregenUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(5000) // Таймаут для инициализации, сама прегенерация работает асинхронно
+          signal: AbortSignal.timeout(2000) // Таймаут для инициализации, сама прегенерация работает асинхронно
         }).catch(() => {
           // Игнорируем ошибки таймаута, так как прегенерация работает асинхронно
         });
@@ -4352,7 +4352,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                 format: 'wav',
                 isNarrator: true
               }),
-              signal: AbortSignal.timeout(120000)
+              signal: AbortSignal.timeout(20000)
             });
             
             if (ttsResponse.ok) {
@@ -4526,7 +4526,7 @@ app.post('/api/chat/welcome', async (req, res) => {
               format: 'wav',
               isNarrator: true
             }),
-            signal: AbortSignal.timeout(120000)
+            signal: AbortSignal.timeout(20000)
           });
           
           if (ttsResponse.ok) {
@@ -5439,7 +5439,7 @@ app.post('/api/chat/reply', async (req, res) => {
             format: 'wav',
             isNarrator: true
           }),
-          signal: AbortSignal.timeout(120000) // 2 минуты таймаут
+          signal: AbortSignal.timeout(30000) // 30 секунд таймаут
         });
         
         if (ttsResponse.ok) {
@@ -7743,7 +7743,7 @@ app.post('/api/tts', async (req, res) => {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(30000)
+            signal: AbortSignal.timeout(20000)
           });
           
           if (googleResponse.ok) {
@@ -7811,15 +7811,15 @@ app.post('/api/tts', async (req, res) => {
       const proxies = parseGeminiProxies();
       const attempts = proxies.length ? proxies : ['__direct__'];
       
-      // ПРОВЕРКА КВОТЫ: Делаем БЫСТРЫЙ простой текстовый запрос (БЕЗ генерации аудио!)
-      // Это намного быстрее, чем попытка генерации аудио
+      // ПРОВЕРКА КВОТЫ: Делаем БЫСТРЫЙ минимальный TTS запрос с очень коротким текстом
+      // Это быстрее, чем полная генерация, но проверяет именно TTS модель
       let geminiQuotaAvailable = true;
       try {
-        // Используем простую текстовую модель для быстрой проверки
-        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent`;
+        const testModelName = modelsToTry[0];
+        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${testModelName}:generateContent`;
         const testDispatcher = attempts[0] !== '__direct__' ? new ProxyAgent(attempts[0]) : undefined;
         
-        console.log('[GEMINI-TTS] 🔍 Quick availability check (text-only, no audio generation)...');
+        console.log('[GEMINI-TTS] 🔍 Quick TTS availability check (minimal audio request)...');
         const testResponse = await undiciFetch(testUrl, {
           method: 'POST',
           dispatcher: testDispatcher,
@@ -7830,11 +7830,20 @@ app.post('/api/tts', async (req, res) => {
           body: JSON.stringify({
             contents: [{
               role: 'user',
-              parts: [{ text: 'test' }] // Минимальный текстовый запрос
-            }]
-            // БЕЗ responseModalities: ['AUDIO'] - это просто текстовый запрос для проверки доступности
+              parts: [{ text: 'а' }] // Минимальный текст - одна буква для быстрой проверки
+            }],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: 'Aoede'
+                  }
+                }
+              }
+            }
           }),
-          signal: AbortSignal.timeout(3000) // Очень быстрая проверка - 3 секунды
+          signal: AbortSignal.timeout(1000) // Быстрая проверка - 1 секунда
         });
         
         if (testResponse.status === 429) {
@@ -7845,11 +7854,11 @@ app.post('/api/tts', async (req, res) => {
             geminiQuotaAvailable = false;
           }
         } else if (testResponse.ok) {
-          console.log('[GEMINI-TTS] ✅ Quota available, proceeding with Gemini TTS');
+          console.log('[GEMINI-TTS] ✅ TTS quota available, proceeding with Gemini TTS');
         }
       } catch (testErr) {
         // Игнорируем ошибки тестового запроса, продолжаем с обычной логикой
-        console.log('[GEMINI-TTS] Quick check failed, proceeding with normal flow:', testErr);
+        console.log('[GEMINI-TTS] Quick TTS check failed, proceeding with normal flow:', testErr);
       }
       
       // Если квота недоступна - сразу используем Google TTS
@@ -8028,7 +8037,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                 'X-Goog-Api-Key': geminiApiKey
               },
             body: JSON.stringify(requestBody),
-              signal: AbortSignal.timeout(120000) // 2 минуты для длинных текстов
+              signal: AbortSignal.timeout(30000) // 30 секунд для длинных текстов
             });
             
             if (response.ok) {
@@ -8394,7 +8403,7 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
               format: 'wav',
               isNarrator: true,
             }),
-            signal: AbortSignal.timeout(120000)
+            signal: AbortSignal.timeout(20000)
           });
           
           // Проверяем ошибку квоты в ответе TTS
@@ -8670,7 +8679,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               format: 'wav',
               isNarrator: true,
             }),
-            signal: AbortSignal.timeout(120000)
+            signal: AbortSignal.timeout(20000)
             });
             
             // Проверяем ошибку квоты в ответе TTS
@@ -8890,7 +8899,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                         format: 'wav',
                         isNarrator: true,
                       }),
-                      signal: AbortSignal.timeout(120000)
+                      signal: AbortSignal.timeout(20000)
                     });
                     
                     // Проверяем ошибку квоты в ответе TTS
@@ -9142,7 +9151,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               format: 'wav',
               isNarrator: true,
             }),
-            signal: AbortSignal.timeout(120000)
+            signal: AbortSignal.timeout(20000)
           });
           
           if (ttsResponse.ok) {
@@ -9379,7 +9388,7 @@ app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
         format: 'wav',
         isNarrator: true,
       }),
-      signal: AbortSignal.timeout(120000)
+      signal: AbortSignal.timeout(30000)
     });
     
     if (!ttsResponse.ok) {
