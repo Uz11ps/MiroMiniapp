@@ -4539,7 +4539,7 @@ app.post('/api/chat/welcome', async (req, res) => {
               choiceIndex: undefined,
               parentHash: undefined
             }),
-            signal: AbortSignal.timeout(20000)
+            signal: AbortSignal.timeout(60000) // 60 секунд таймаут (нужно время для SSML генерации)
           });
           
           if (ttsResponse.ok) {
@@ -4977,8 +4977,75 @@ app.post('/api/chat/reply', async (req, res) => {
 
     let text: string | null = null;
     
-    // Если включено использование прегенерированных материалов - ищем прегенерированный текст
-    if (game?.usePregenMaterials && gameId) {
+    // ВАЖНО: Сначала проверяем прегенерированные материалы ПЕРЕД генерацией текста
+    // Получаем контекст для поиска прегенерированных материалов
+    let locationIdForPregen: string | undefined = undefined;
+    let scenarioGameIdForPregen: string | undefined = undefined;
+    let depthForPregen = 0;
+    let choiceIndexForPregen: number | undefined = undefined;
+    let parentHashForPregen: string | undefined = undefined;
+    
+    if (gameId) {
+      try {
+        let sess: any = null;
+        if (lobbyId) {
+          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+        } else {
+          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        }
+        if (sess) {
+          locationIdForPregen = sess.currentLocationId || undefined;
+          scenarioGameIdForPregen = sess.scenarioGameId;
+          
+          // Определяем depth и choiceIndex из истории
+          if (baseHistory && baseHistory.length > 0) {
+            const botMessages = baseHistory.filter(m => m.from === 'bot');
+            depthForPregen = botMessages.length;
+            
+            const lastUserMessage = [...baseHistory].reverse().find(m => m.from === 'me');
+            if (lastUserMessage && lastUserMessage.text) {
+              const choiceMatch = lastUserMessage.text.trim().match(/^(\d+)$/);
+              if (choiceMatch) {
+                choiceIndexForPregen = parseInt(choiceMatch[1], 10) - 1;
+              }
+              
+              if (botMessages.length > 0) {
+                const lastBotMessage = botMessages[botMessages.length - 1];
+                if (lastBotMessage && lastBotMessage.text) {
+                  parentHashForPregen = createAudioHash(lastBotMessage.text, locationIdForPregen, undefined, 'narrator', depthForPregen - 1);
+                }
+              }
+            }
+          }
+        } else {
+          scenarioGameIdForPregen = gameId;
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to get session context for pregen check:', e);
+        scenarioGameIdForPregen = gameId;
+      }
+    }
+    
+    // Проверяем прегенерированные материалы ПЕРЕД генерацией текста
+    if (scenarioGameIdForPregen) {
+      const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
+      if (hasMaterials) {
+        let pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
+        
+        if (!pregenText) {
+          pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator');
+        }
+        
+        if (pregenText) {
+          text = pregenText;
+          console.log('[REPLY] ✅ Using pre-generated text (found before generation)');
+        }
+      }
+    }
+    
+    // Если включено использование прегенерированных материалов - ищем прегенерированный текст (старая логика для обратной совместимости)
+    if (!text && game?.usePregenMaterials && gameId) {
       let locationId: string | undefined = undefined;
       try {
         const sess = await getGameSession();
@@ -5394,14 +5461,16 @@ app.post('/api/chat/reply', async (req, res) => {
         
         if (hasMaterials) {
           // Если материалы есть - ищем по точному хэшу (каждое сообщение имеет свой хэш)
+          // ВАЖНО: Ищем по userText (действие игрока), а не по text (ответ бота), так как текст может быть уже сгенерирован
           // Пробуем найти с учетом depth и choiceIndex
-          let pregenText = findPregenText(scenarioGameIdForPregen, userText || text, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
-          let pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || text, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
           
           // Если не нашли с параметрами, пробуем без них (для обратной совместимости)
+          // ВАЖНО: Ищем по userText, а не по text
           if (!pregenText || !pregenPath) {
-            pregenText = findPregenText(scenarioGameIdForPregen, userText || text, locationId, characterId, 'narrator');
-            pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || text, locationId, characterId, 'narrator');
+            pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+            pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
           }
           
           // Если нашли аудио, но не нашли текст - загружаем текст из файла рядом с аудио
@@ -5435,7 +5504,7 @@ app.post('/api/chat/reply', async (req, res) => {
             // Если нашли только аудио без текста - не используем его, чтобы избежать несоответствия
             console.warn('[REPLY] ⚠️ Found pre-generated audio but no text, skipping to avoid mismatch');
           } else {
-            console.log(`[REPLY] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || text, locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
+            console.log(`[REPLY] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
           }
         }
         // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
