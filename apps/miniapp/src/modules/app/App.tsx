@@ -21,9 +21,22 @@ function resolveAssetUrlGlobal(u?: string | null): string {
 }
 
 // Мемоизируем BottomNav, чтобы он не пересоздавался при каждом рендере
+// КРИТИЧЕСКИ ВАЖНО: Inline стили для гарантированного позиционирования внизу экрана
 const BottomNav: React.FC = React.memo(() => {
   return (
-    <nav className="bottom-nav">
+    <nav 
+      className="bottom-nav"
+      style={{
+        position: 'fixed',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 10,
+        margin: 0,
+        transform: 'none',
+        pointerEvents: 'auto'
+      }}
+    >
       <NavLink to="/catalog" className={({ isActive }) => `bottom-item${isActive ? ' active' : ''}`}>Каталог</NavLink>
       <NavLink to="/my" className={({ isActive }) => `bottom-item${isActive ? ' active' : ''}`}>Мои игры</NavLink>
       <NavLink to="/friends" className={({ isActive }) => `bottom-item${isActive ? ' active' : ''}`}>Друзья</NavLink>
