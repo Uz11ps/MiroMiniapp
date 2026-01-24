@@ -4289,35 +4289,87 @@ app.post('/api/chat/welcome', async (req, res) => {
                 }
               }
               
-              // Если нашли аудио, но не нашли текст - загружаем текст из файла рядом с аудио
+              // КРИТИЧЕСКИ ВАЖНО: Проверяем наличие ОБОИХ файлов
+              // Если нашли аудио, проверяем наличие текста рядом с ним
               if (pregenPath && !pregenText) {
                 try {
                   const textPath = pregenPath.replace(/\.wav$/, '.txt');
                   if (fs.existsSync(textPath)) {
                     pregenText = fs.readFileSync(textPath, 'utf-8');
                     console.log('[WELCOME] ✅ Loaded pre-generated text from file:', textPath);
+                  } else {
+                    // Если текста нет - удаляем аудио и генерируем заново
+                    console.warn('[WELCOME] ⚠️ Found audio but no text file, deleting incomplete files and regenerating');
+                    try {
+                      fs.unlinkSync(pregenPath);
+                      console.log('[WELCOME] 🗑️ Deleted incomplete audio file:', pregenPath);
+                    } catch (e) {
+                      console.warn('[WELCOME] Failed to delete incomplete audio:', e);
+                    }
+                    pregenPath = null;
                   }
                 } catch (e) {
-                  console.warn('[WELCOME] Failed to load text from audio file path:', e);
+                  console.warn('[WELCOME] Failed to check text file:', e);
+                  pregenPath = null;
+                }
+              }
+              
+              // Если нашли текст, проверяем наличие аудио рядом с ним
+              if (pregenText && !pregenPath) {
+                try {
+                  const textPath = getPregenTextPath(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
+                  if (fs.existsSync(textPath)) {
+                    const audioPath = textPath.replace(/\.txt$/, '.wav');
+                    if (fs.existsSync(audioPath)) {
+                      pregenPath = audioPath;
+                    } else {
+                      // Если аудио нет - удаляем текст и генерируем заново
+                      console.warn('[WELCOME] ⚠️ Found text but no audio file, deleting incomplete files and regenerating');
+                      try {
+                        fs.unlinkSync(textPath);
+                        console.log('[WELCOME] 🗑️ Deleted incomplete text file:', textPath);
+                      } catch (e) {
+                        console.warn('[WELCOME] Failed to delete incomplete text:', e);
+                      }
+                      pregenText = null;
+                    }
+                  }
+                } catch (e) {
+                  console.warn('[WELCOME] Failed to check audio file:', e);
+                  pregenText = null;
                 }
               }
               
               if (pregenText && pregenPath) {
                 try {
-                  // Используем предгенерированный текст
-                  text = pregenText;
-                  console.log('[WELCOME] ✅ Using pre-generated text');
-                  
-                  // Используем предгенерированное аудио
-                  console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
-                  const audioBuffer = fs.readFileSync(pregenPath);
-                  audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-                  console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+                  // Проверяем, что оба файла действительно существуют
+                  if (!fs.existsSync(pregenPath) || !fs.existsSync(pregenPath.replace(/\.wav$/, '.txt'))) {
+                    console.warn('[WELCOME] ⚠️ Files do not exist, deleting and regenerating');
+                    try {
+                      if (fs.existsSync(pregenPath)) fs.unlinkSync(pregenPath);
+                      const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                      if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                    } catch {}
+                    pregenText = null;
+                    pregenPath = null;
+                  } else {
+                    // Используем предгенерированный текст
+                    text = pregenText;
+                    console.log('[WELCOME] ✅ Using pre-generated text');
+                    
+                    // Используем предгенерированное аудио
+                    console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
+                    const audioBuffer = fs.readFileSync(pregenPath);
+                    audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                    console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+                  }
                 } catch (e) {
                   console.warn('[WELCOME] Failed to read pre-generated materials:', e);
+                  pregenText = null;
+                  pregenPath = null;
                 }
               } else {
-                console.log(`[WELCOME] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id} (hash: ${createAudioHash(text, first.id, undefined, 'narrator', 0)})`);
+                console.log(`[WELCOME] ⚠️ Pre-generated materials not found or incomplete for scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id} (hash: ${createAudioHash(text, first.id, undefined, 'narrator', 0)})`);
               }
             }
             // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
@@ -4349,30 +4401,38 @@ app.post('/api/chat/welcome', async (req, res) => {
               audioData = { buffer: audioBuffer, contentType };
               console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
               
-              // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
-              if (game?.usePregenMaterials && gameId && first?.id) {
+              // КРИТИЧЕСКИ ВАЖНО: Сохраняем ОБА файла (текст и аудио) всегда
+              if (gameId && first?.id) {
                 try {
-                  const audioPath = getPregenAudioPath(gameId, text, first.id, undefined, 'narrator');
+                  const audioPath = getPregenAudioPath(gameId, text, first.id, undefined, 'narrator', 0);
                   const audioDir = path.dirname(audioPath);
                   try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
                   fs.writeFileSync(audioPath, audioBuffer);
                   
                   // Сохраняем также текст
-                  const textPath = audioPath.replace('.wav', '.txt');
+                  const textPath = getPregenTextPath(gameId, text, first.id, undefined, 'narrator', 0);
+                  try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
                   fs.writeFileSync(textPath, text, 'utf-8');
                   
-                  console.log('[WELCOME] 💾 Saved generated audio and text for future use (usePregenMaterials=true):', audioPath);
+                  console.log('[WELCOME] 💾 Saved generated audio and text for future use:', audioPath);
                 } catch (e) {
                   console.warn('[WELCOME] Failed to save generated audio:', e);
                 }
               } else if (gameId && first?.id) {
                 // Сохраняем и при выключенном флаге для кэширования
+                // КРИТИЧЕСКИ ВАЖНО: Сохраняем ОБА файла (текст и аудио)
                 try {
-                  const audioPath = getPregenAudioPath(gameId, text, first.id, undefined, 'narrator');
+                  const audioPath = getPregenAudioPath(gameId, text, first.id, undefined, 'narrator', 0);
                   const audioDir = path.dirname(audioPath);
                   try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
                   fs.writeFileSync(audioPath, audioBuffer);
-                  console.log('[WELCOME] 💾 Saved generated audio for caching:', audioPath);
+                  
+                  // Сохраняем также текст
+                  const textPath = getPregenTextPath(gameId, text, first.id, undefined, 'narrator', 0);
+                  try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+                  fs.writeFileSync(textPath, text, 'utf-8');
+                  
+                  console.log('[WELCOME] 💾 Saved generated audio and text for caching:', audioPath);
                 } catch (e) {
                   console.warn('[WELCOME] Failed to save generated audio:', e);
                 }
@@ -5027,53 +5087,42 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
     
-    // Проверяем прегенерированные материалы ПЕРЕД генерацией текста
-    if (scenarioGameIdForPregen) {
-      const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
-      if (hasMaterials) {
-        let pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
-        
-        if (!pregenText) {
-          pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator');
+    // КРИТИЧЕСКИ ВАЖНО: Используем найденный прегенерированный текст, если он был найден
+    if (pregenTextFound) {
+      text = pregenTextFound;
+      console.log('[REPLY] ✅ Using pre-generated text from file');
+    } else {
+      // Если включено использование прегенерированных материалов - ищем прегенерированный текст (старая логика для обратной совместимости)
+      if (game?.usePregenMaterials && gameId) {
+        let locationId: string | undefined = undefined;
+        try {
+          const sess = await getGameSession();
+          if (sess) {
+            locationId = sess.currentLocationId || undefined;
+          }
+        } catch (e) {
+          console.warn('[REPLY] Failed to get location for pregen text:', e);
         }
         
+        // Ищем прегенерированный текст по действию игрока и контексту
+        const pregenText = findPregenText(gameId, userText || userPrompt, locationId, undefined, 'narrator');
         if (pregenText) {
           text = pregenText;
-          console.log('[REPLY] ✅ Using pre-generated text (found before generation)');
+          console.log('[REPLY] ✅ Using pre-generated text (usePregenMaterials=true)');
+        } else {
+          console.warn('[REPLY] ⚠️ Pre-generated text not found, using fallback (usePregenMaterials=true)');
         }
-      }
-    }
-    
-    // Если включено использование прегенерированных материалов - ищем прегенерированный текст (старая логика для обратной совместимости)
-    if (!text && game?.usePregenMaterials && gameId) {
-      let locationId: string | undefined = undefined;
-      try {
-        const sess = await getGameSession();
-        if (sess) {
-          locationId = sess.currentLocationId || undefined;
-        }
-      } catch (e) {
-        console.warn('[REPLY] Failed to get location for pregen text:', e);
       }
       
-      // Ищем прегенерированный текст по действию игрока и контексту
-      const pregenText = findPregenText(gameId, userText || userPrompt, locationId, undefined, 'narrator');
-      if (pregenText) {
-        text = pregenText;
-        console.log('[REPLY] ✅ Using pre-generated text (usePregenMaterials=true)');
-      } else {
-        console.warn('[REPLY] ⚠️ Pre-generated text not found, using fallback (usePregenMaterials=true)');
+      // Если не включено использование прегенерированных материалов или текст не найден - генерируем в реальном времени
+      if (!text && (!game?.usePregenMaterials || !gameId)) {
+        const { text: generatedText } = await generateChatCompletion({
+          systemPrompt: sys,
+          userPrompt: userPrompt,
+          history: baseHistory
+        });
+        text = generatedText;
       }
-    }
-    
-    // Если не включено использование прегенерированных материалов или текст не найден - генерируем в реальном времени
-    if (!text && (!game?.usePregenMaterials || !gameId)) {
-      const { text: generatedText } = await generateChatCompletion({
-        systemPrompt: sys,
-        userPrompt: userPrompt,
-        history: baseHistory
-      });
-      text = generatedText;
     }
     if (!text) {
       text = await fallbackBranch();
@@ -5418,8 +5467,11 @@ app.post('/api/chat/reply', async (req, res) => {
         }
       }
       
-      // Сначала проверяем прегенерированные материалы (текст и аудио) для ВСЕХ сообщений
+      // КРИТИЧЕСКИ ВАЖНО: Проверяем прегенерированные материалы (текст и аудио) ДО генерации текста
       // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
+      let pregenTextFound: string | null = null;
+      let pregenAudioData: { buffer: Buffer; contentType: string } | null = null;
+      
       if (scenarioGameIdForPregen) {
         // Определяем depth и choiceIndex из истории
         let depth = 0;
@@ -5473,41 +5525,96 @@ app.post('/api/chat/reply', async (req, res) => {
             pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
           }
           
-          // Если нашли аудио, но не нашли текст - загружаем текст из файла рядом с аудио
+          // КРИТИЧЕСКИ ВАЖНО: Проверяем наличие ОБОИХ файлов
+          // Если нашли аудио, проверяем наличие текста рядом с ним
           if (pregenPath && !pregenText) {
             try {
               const textPath = pregenPath.replace(/\.wav$/, '.txt');
               if (fs.existsSync(textPath)) {
                 pregenText = fs.readFileSync(textPath, 'utf-8');
                 console.log('[REPLY] ✅ Loaded pre-generated text from file:', textPath);
+              } else {
+                // Если текста нет - удаляем аудио и генерируем заново
+                console.warn('[REPLY] ⚠️ Found audio but no text file, deleting incomplete files and regenerating');
+                try {
+                  fs.unlinkSync(pregenPath);
+                  console.log('[REPLY] 🗑️ Deleted incomplete audio file:', pregenPath);
+                } catch (e) {
+                  console.warn('[REPLY] Failed to delete incomplete audio:', e);
+                }
+                pregenPath = null;
               }
             } catch (e) {
-              console.warn('[REPLY] Failed to load text from audio file path:', e);
+              console.warn('[REPLY] Failed to check text file:', e);
+              pregenPath = null;
+            }
+          }
+          
+          // Если нашли текст, проверяем наличие аудио рядом с ним
+          if (pregenText && !pregenPath) {
+            try {
+              const textPath = getPregenTextPath(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+              if (fs.existsSync(textPath)) {
+                const audioPath = textPath.replace(/\.txt$/, '.wav');
+                if (fs.existsSync(audioPath)) {
+                  pregenPath = audioPath;
+                } else {
+                  // Если аудио нет - удаляем текст и генерируем заново
+                  console.warn('[REPLY] ⚠️ Found text but no audio file, deleting incomplete files and regenerating');
+                  try {
+                    fs.unlinkSync(textPath);
+                    console.log('[REPLY] 🗑️ Deleted incomplete text file:', textPath);
+                  } catch (e) {
+                    console.warn('[REPLY] Failed to delete incomplete text:', e);
+                  }
+                  pregenText = null;
+                }
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to check audio file:', e);
+              pregenText = null;
             }
           }
           
           if (pregenText && pregenPath) {
             try {
+              // Проверяем, что оба файла действительно существуют
+              if (!fs.existsSync(pregenPath) || !fs.existsSync(pregenPath.replace(/\.wav$/, '.txt'))) {
+                console.warn('[REPLY] ⚠️ Files do not exist, deleting and regenerating');
+                try {
+                  if (fs.existsSync(pregenPath)) fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch {}
+                pregenText = null;
+                pregenPath = null;
+              } else {
               // Используем предгенерированный текст
-              text = pregenText;
-              console.log('[REPLY] ✅ Using pre-generated text');
+              pregenTextFound = pregenText;
+              console.log('[REPLY] ✅ Found pre-generated text');
               
               // Используем предгенерированное аудио
-              console.log('[REPLY] ✅ Using pre-generated audio from:', pregenPath);
+              console.log('[REPLY] ✅ Found pre-generated audio from:', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
-              audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+              pregenAudioData = { buffer: audioBuffer, contentType: 'audio/wav' };
               console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+              }
             } catch (e) {
               console.warn('[REPLY] Failed to read pre-generated materials:', e);
+              pregenText = null;
+              pregenPath = null;
             }
-          } else if (pregenPath && !pregenText) {
-            // Если нашли только аудио без текста - не используем его, чтобы избежать несоответствия
-            console.warn('[REPLY] ⚠️ Found pre-generated audio but no text, skipping to avoid mismatch');
           } else {
-            console.log(`[REPLY] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
+            console.log(`[REPLY] ⚠️ Pre-generated materials not found or incomplete for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
           }
         }
         // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
+      }
+      
+      // КРИТИЧЕСКИ ВАЖНО: Используем найденное прегенерированное аудио, если оно было найдено
+      if (pregenAudioData) {
+        audioData = pregenAudioData;
+        console.log('[REPLY] ✅ Using pre-generated audio from file');
       }
       
       // Если прегенерированного аудио нет - генерируем в реальном времени
