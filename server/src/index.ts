@@ -4289,6 +4289,19 @@ app.post('/api/chat/welcome', async (req, res) => {
                 }
               }
               
+              // Если нашли аудио, но не нашли текст - загружаем текст из файла рядом с аудио
+              if (pregenPath && !pregenText) {
+                try {
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) {
+                    pregenText = fs.readFileSync(textPath, 'utf-8');
+                    console.log('[WELCOME] ✅ Loaded pre-generated text from file:', textPath);
+                  }
+                } catch (e) {
+                  console.warn('[WELCOME] Failed to load text from audio file path:', e);
+                }
+              }
+              
               if (pregenText && pregenPath) {
                 try {
                   // Используем предгенерированный текст
@@ -5391,6 +5404,19 @@ app.post('/api/chat/reply', async (req, res) => {
             pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || text, locationId, characterId, 'narrator');
           }
           
+          // Если нашли аудио, но не нашли текст - загружаем текст из файла рядом с аудио
+          if (pregenPath && !pregenText) {
+            try {
+              const textPath = pregenPath.replace(/\.wav$/, '.txt');
+              if (fs.existsSync(textPath)) {
+                pregenText = fs.readFileSync(textPath, 'utf-8');
+                console.log('[REPLY] ✅ Loaded pre-generated text from file:', textPath);
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to load text from audio file path:', e);
+            }
+          }
+          
           if (pregenText && pregenPath) {
             try {
               // Используем предгенерированный текст
@@ -5405,6 +5431,9 @@ app.post('/api/chat/reply', async (req, res) => {
             } catch (e) {
               console.warn('[REPLY] Failed to read pre-generated materials:', e);
             }
+          } else if (pregenPath && !pregenText) {
+            // Если нашли только аудио без текста - не используем его, чтобы избежать несоответствия
+            console.warn('[REPLY] ⚠️ Found pre-generated audio but no text, skipping to avoid mismatch');
           } else {
             console.log(`[REPLY] ⚠️ Pre-generated materials not found for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || text, locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
           }
