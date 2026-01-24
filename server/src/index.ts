@@ -7623,45 +7623,177 @@ app.post('/api/tts', async (req, res) => {
         // Используем Google Cloud TTS REST API
         const googleTtsUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
         
-        const requestBody = {
-          input: {
-            ssml: ssmlText || `<speak><prosody rate="${finalSpeed}" pitch="${finalPitch >= 0 ? '+' : ''}${finalPitch}st">${text}</prosody></speak>`
-          },
-          voice: {
-            languageCode: 'ru-RU',
-            name: voiceName,
-            ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
-          },
-          audioConfig: {
-            audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
-            sampleRateHertz: 24000,
-            speakingRate: finalSpeed,
-            pitch: finalPitch,
-            volumeGainDb: 0.0,
-            effectsProfileId: ['headphone-class-device'] // Для лучшего качества
+        // Функция для разбиения SSML на части по 4500 байт (с запасом от лимита 5000)
+        const splitSSMLIntoChunks = (ssml: string, maxBytes: number = 4500): string[] => {
+          const ssmlBytes = Buffer.from(ssml, 'utf-8');
+          if (ssmlBytes.length <= maxBytes) {
+            return [ssml];
           }
+          
+          // Извлекаем содержимое из <speak>...</speak> если есть
+          const speakMatch = ssml.match(/<speak[^>]*>(.*?)<\/speak>/s);
+          const content = speakMatch ? speakMatch[1] : ssml;
+          const speakOpen = speakMatch ? ssml.match(/<speak[^>]*>/)?.[0] || '<speak>' : '<speak>';
+          const speakClose = '</speak>';
+          
+          // Разбиваем содержимое по предложениям (точка, восклицательный, вопросительный знак)
+          // Учитываем, что могут быть теги внутри
+          const sentences: string[] = [];
+          let currentSentence = '';
+          let inTag = false;
+          
+          for (let i = 0; i < content.length; i++) {
+            const char = content[i];
+            currentSentence += char;
+            
+            if (char === '<') inTag = true;
+            if (char === '>') inTag = false;
+            
+            // Разбиваем по знакам препинания только вне тегов
+            if (!inTag && (char === '.' || char === '!' || char === '?')) {
+              // Проверяем, что это конец предложения (следующий символ пробел, перенос или конец)
+              if (i === content.length - 1 || /[\s\n\r]/.test(content[i + 1])) {
+                sentences.push(currentSentence.trim());
+                currentSentence = '';
+              }
+            }
+          }
+          
+          if (currentSentence.trim()) {
+            sentences.push(currentSentence.trim());
+          }
+          
+          if (sentences.length === 0) {
+            sentences.push(content);
+          }
+          
+          // Группируем предложения в чанки
+          const chunks: string[] = [];
+          let currentChunk = '';
+          
+          for (const sentence of sentences) {
+            const testChunk = currentChunk + (currentChunk ? ' ' : '') + sentence;
+            const wrappedChunk = speakOpen + testChunk + speakClose;
+            const testBytes = Buffer.from(wrappedChunk, 'utf-8').length;
+            
+            if (testBytes <= maxBytes) {
+              currentChunk = testChunk;
+            } else {
+              if (currentChunk) {
+                chunks.push(speakOpen + currentChunk + speakClose);
+              }
+              // Если одно предложение больше лимита - разбиваем по словам
+              const wrappedSentence = speakOpen + sentence + speakClose;
+              const sentenceBytes = Buffer.from(wrappedSentence, 'utf-8').length;
+              if (sentenceBytes > maxBytes) {
+                // Разбиваем по словам, но сохраняем теги
+                const parts = sentence.split(/(\s+)/);
+                let wordChunk = '';
+                for (const part of parts) {
+                  const testWordChunk = wordChunk + part;
+                  const wrappedWordChunk = speakOpen + testWordChunk + speakClose;
+                  const testWordBytes = Buffer.from(wrappedWordChunk, 'utf-8').length;
+                  if (testWordBytes <= maxBytes) {
+                    wordChunk = testWordChunk;
+                  } else {
+                    if (wordChunk) {
+                      chunks.push(speakOpen + wordChunk + speakClose);
+                    }
+                    wordChunk = part;
+                  }
+                }
+                currentChunk = wordChunk;
+              } else {
+                currentChunk = sentence;
+              }
+            }
+          }
+          
+          if (currentChunk) {
+            chunks.push(speakOpen + currentChunk + speakClose);
+          }
+          
+          return chunks.length > 0 ? chunks : [ssml];
         };
         
-        console.log('[GOOGLE-TTS] Requesting synthesis with voice:', voiceName);
-        const googleResponse = await undiciFetch(googleTtsUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody),
-          signal: AbortSignal.timeout(30000)
-        });
+        // Функция для генерации одной части аудио
+        const generateChunk = async (chunkText: string): Promise<Buffer | null> => {
+          const requestBody = {
+            input: {
+              ssml: chunkText
+            },
+            voice: {
+              languageCode: 'ru-RU',
+              name: voiceName,
+              ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
+            },
+            audioConfig: {
+              audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
+              sampleRateHertz: 24000,
+              speakingRate: finalSpeed,
+              pitch: finalPitch,
+              volumeGainDb: 0.0,
+              effectsProfileId: ['headphone-class-device']
+            }
+          };
+          
+          const googleResponse = await undiciFetch(googleTtsUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(30000)
+          });
+          
+          if (googleResponse.ok) {
+            const googleData = await googleResponse.json() as any;
+            if (googleData.audioContent) {
+              return Buffer.from(googleData.audioContent, 'base64');
+            }
+          } else {
+            const errorText = await googleResponse.text().catch(() => '');
+            console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 200));
+          }
+          return null;
+        };
         
-        if (googleResponse.ok) {
-          const googleData = await googleResponse.json() as any;
-          if (googleData.audioContent) {
-            const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
+        // Подготавливаем финальный SSML или простой текст
+        const finalInput = ssmlText || `<speak><prosody rate="${finalSpeed}" pitch="${finalPitch >= 0 ? '+' : ''}${finalPitch}st">${text}</prosody></speak>`;
+        
+        // Проверяем размер в байтах
+        const inputBytes = Buffer.from(finalInput, 'utf-8').length;
+        console.log('[GOOGLE-TTS] Input size:', inputBytes, 'bytes, voice:', voiceName);
+        
+        if (inputBytes <= 4500) {
+          // Текст помещается в один запрос
+          const audioBuffer = await generateChunk(finalInput);
+          if (audioBuffer) {
             console.log('[GOOGLE-TTS] ✅ Successfully generated audio, size:', audioBuffer.length, 'bytes');
             return audioBuffer;
           }
         } else {
-          const errorText = await googleResponse.text().catch(() => '');
-          console.error('[GOOGLE-TTS] Failed:', googleResponse.status, errorText.slice(0, 200));
+          // Нужно разбить на части
+          console.log('[GOOGLE-TTS] Text too long, splitting into chunks...');
+          const chunks = splitSSMLIntoChunks(finalInput, 4500);
+          console.log('[GOOGLE-TTS] Split into', chunks.length, 'chunks');
+          
+          const audioBuffers: Buffer[] = [];
+          for (let i = 0; i < chunks.length; i++) {
+            console.log(`[GOOGLE-TTS] Generating chunk ${i + 1}/${chunks.length}...`);
+            const chunkAudio = await generateChunk(chunks[i]);
+            if (chunkAudio) {
+              audioBuffers.push(chunkAudio);
+            } else {
+              console.error(`[GOOGLE-TTS] Failed to generate chunk ${i + 1}`);
+              return null; // Если одна часть не сгенерировалась - возвращаем ошибку
+            }
+          }
+          
+          // Объединяем все части
+          const combinedBuffer = Buffer.concat(audioBuffers);
+          console.log('[GOOGLE-TTS] ✅ Successfully generated and combined audio, total size:', combinedBuffer.length, 'bytes');
+          return combinedBuffer;
         }
       } catch (googleErr) {
         console.error('[GOOGLE-TTS] Error:', googleErr);
@@ -7679,32 +7811,15 @@ app.post('/api/tts', async (req, res) => {
       const proxies = parseGeminiProxies();
       const attempts = proxies.length ? proxies : ['__direct__'];
       
-      // ПРОВЕРКА КВОТЫ: Делаем быстрый тестовый запрос для проверки доступности Gemini
-      // Если сразу получаем 429 - пропускаем Gemini и сразу используем Google TTS
+      // ПРОВЕРКА КВОТЫ: Делаем БЫСТРЫЙ простой текстовый запрос (БЕЗ генерации аудио!)
+      // Это намного быстрее, чем попытка генерации аудио
       let geminiQuotaAvailable = true;
       try {
-        const testModelName = modelsToTry[0];
-        const testRequestBody = {
-          contents: [{
-            role: 'user',
-            parts: [{ text: 'test' }] // Минимальный текст для проверки
-          }],
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: 'Aoede'
-                }
-              }
-            }
-          }
-        };
-        
-        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${testModelName}:generateContent`;
+        // Используем простую текстовую модель для быстрой проверки
+        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent`;
         const testDispatcher = attempts[0] !== '__direct__' ? new ProxyAgent(attempts[0]) : undefined;
         
-        console.log('[GEMINI-TTS] 🔍 Checking quota availability...');
+        console.log('[GEMINI-TTS] 🔍 Quick availability check (text-only, no audio generation)...');
         const testResponse = await undiciFetch(testUrl, {
           method: 'POST',
           dispatcher: testDispatcher,
@@ -7712,8 +7827,14 @@ app.post('/api/tts', async (req, res) => {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': geminiApiKey
           },
-          body: JSON.stringify(testRequestBody),
-          signal: AbortSignal.timeout(5000) // Быстрая проверка - 5 секунд
+          body: JSON.stringify({
+            contents: [{
+              role: 'user',
+              parts: [{ text: 'test' }] // Минимальный текстовый запрос
+            }]
+            // БЕЗ responseModalities: ['AUDIO'] - это просто текстовый запрос для проверки доступности
+          }),
+          signal: AbortSignal.timeout(3000) // Очень быстрая проверка - 3 секунды
         });
         
         if (testResponse.status === 429) {
@@ -7728,7 +7849,7 @@ app.post('/api/tts', async (req, res) => {
         }
       } catch (testErr) {
         // Игнорируем ошибки тестового запроса, продолжаем с обычной логикой
-        console.log('[GEMINI-TTS] Test request failed, proceeding with normal flow:', testErr);
+        console.log('[GEMINI-TTS] Quick check failed, proceeding with normal flow:', testErr);
       }
       
       // Если квота недоступна - сразу используем Google TTS
