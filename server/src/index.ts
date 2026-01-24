@@ -2744,24 +2744,6 @@ ${loc.description}
           }
         }
         
-        // Автоматически запускаем прегенерацию всех диалогов после импорта
-        set({ progress: 'Starting TTS pre-generation...' });
-        try {
-          console.log(`[AUTO-PRAGEN] Starting automatic pre-generation for game ${game.id} after PDF import`);
-          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-          const pregenUrl = `${apiBase}/api/admin/games/${game.id}/pregenerate-all-tts`;
-          await undiciFetch(pregenUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: AbortSignal.timeout(2000) // Таймаут для инициализации, сама прегенерация работает асинхронно
-          }).catch(() => {
-            // Игнорируем ошибки таймаута, так как прегенерация работает асинхронно
-          });
-          console.log(`[AUTO-PRAGEN] Pre-generation job started for game ${game.id}`);
-        } catch (e) {
-          console.error('[AUTO-PRAGEN] Failed to start automatic pre-generation:', e);
-        }
-        
         set({ status: 'done', gameId: game.id, progress: 'Completed' });
       } catch (e: any) {
         console.error('ingest_import_job_error', e);
@@ -3070,24 +3052,6 @@ app.post('/api/admin/scenario/import', async (req, res) => {
       });
     }
     
-    // Автоматически запускаем прегенерацию всех диалогов после импорта
-    setImmediate(async () => {
-      try {
-        console.log(`[AUTO-PRAGEN] Starting automatic pre-generation for game ${game.id} after import`);
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const pregenUrl = `${apiBase}/api/admin/games/${game.id}/pregenerate-all-tts`;
-        await undiciFetch(pregenUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(2000) // Таймаут для инициализации, сама прегенерация работает асинхронно
-        }).catch(() => {
-          // Игнорируем ошибки таймаута, так как прегенерация работает асинхронно
-        });
-        console.log(`[AUTO-PRAGEN] Pre-generation job started for game ${game.id}`);
-      } catch (e) {
-        console.error('[AUTO-PRAGEN] Failed to start automatic pre-generation:', e);
-      }
-    });
     
     return res.status(201).json({ ok: true, gameId: game.id, locations: locs.length, exits: createdExits, characters: createdChars, editions: createdEds });
   } catch (e) {
@@ -4521,13 +4485,15 @@ app.post('/api/chat/welcome', async (req, res) => {
             // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии
             if (sess?.scenarioGameId && first?.id) {
               try {
-                const audioPath = getPregenAudioPath(sess.scenarioGameId, text, first.id, undefined, 'narrator');
+                // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
+                const audioPath = getPregenAudioPath(sess.scenarioGameId, text, first.id, undefined, 'narrator', 0);
                 const audioDir = path.dirname(audioPath);
                 try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
                 fs.writeFileSync(audioPath, audioBuffer);
                 
                 // Сохраняем также текст
-                const textPath = audioPath.replace('.wav', '.txt');
+                const textPath = getPregenTextPath(sess.scenarioGameId, text, first.id, undefined, 'narrator', 0);
+                try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
                 fs.writeFileSync(textPath, text, 'utf-8');
                 
                 console.log('[WELCOME] 💾 Saved generated audio for future use (SOLO):', audioPath);
@@ -5341,9 +5307,13 @@ app.post('/api/chat/reply', async (req, res) => {
             }
             
             // Вычисляем parentHash из предыдущего сообщения бота
+            // Важно: parentHash должен учитывать depth предыдущего сообщения
             if (botMessages.length > 0) {
               const lastBotMessage = botMessages[botMessages.length - 1];
               if (lastBotMessage && lastBotMessage.text) {
+                // Для parentHash используем depth предыдущего сообщения (depth - 1)
+                // Но нужно также учесть choiceIndex и parentHash предыдущего сообщения, если они есть
+                // Пока используем упрощенный вариант - только текст и depth-1
                 parentHash = createAudioHash(lastBotMessage.text, locationId, characterId, 'narrator', depth - 1);
               }
             }
@@ -5407,7 +5377,10 @@ app.post('/api/chat/reply', async (req, res) => {
             locationId,
             characterId,
             format: 'wav',
-            isNarrator: true
+            isNarrator: true,
+            depth: depth !== undefined ? depth : undefined,
+            choiceIndex: choiceIndex !== undefined ? choiceIndex : undefined,
+            parentHash: parentHash || undefined
           }),
           signal: AbortSignal.timeout(60000) // 60 секунд таймаут (нужно время для SSML генерации)
         });
@@ -5419,31 +5392,24 @@ app.post('/api/chat/reply', async (req, res) => {
           const ttsDuration = Date.now() - ttsStartTime;
           console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
           
-          // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
-          // ИСПРАВЛЕНИЕ: Используем scenarioGameId для сохранения
-          if (game?.usePregenMaterials && scenarioGameIdForPregen) {
+          // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов
+          // ВАЖНО: Сохраняем по userText (действие игрока), а не по text (ответ бота)
+          // Это нужно, чтобы потом можно было найти ответ бота по действию игрока
+          // ИСПРАВЛЕНИЕ: Используем scenarioGameId и параметры цепочки для сохранения
+          if (scenarioGameIdForPregen && userText) {
             try {
-              const audioPath = getPregenAudioPath(scenarioGameIdForPregen, text, locationId, characterId, 'narrator');
+              // Сохраняем аудио по userText (действие игрока)
+              const audioPath = getPregenAudioPath(scenarioGameIdForPregen, userText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
               const audioDir = path.dirname(audioPath);
               try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
               fs.writeFileSync(audioPath, audioBuffer);
               
-              // Сохраняем также текст
-              const textPath = audioPath.replace('.wav', '.txt');
-              fs.writeFileSync(textPath, text, 'utf-8');
+              // Сохраняем текст ответа бота (не userText!)
+              const textPath = getPregenTextPath(scenarioGameIdForPregen, userText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+              try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+              fs.writeFileSync(textPath, text, 'utf-8'); // Сохраняем ответ бота в файл
               
-              console.log('[REPLY] 💾 Saved generated audio and text for future use (usePregenMaterials=true):', audioPath);
-            } catch (e) {
-              console.warn('[REPLY] Failed to save generated audio:', e);
-            }
-          } else if (scenarioGameIdForPregen) {
-            // Сохраняем и при выключенном флаге для кэширования
-            try {
-              const audioPath = getPregenAudioPath(scenarioGameIdForPregen, text, locationId, characterId, 'narrator');
-              const audioDir = path.dirname(audioPath);
-              try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-              fs.writeFileSync(audioPath, audioBuffer);
-              console.log('[REPLY] 💾 Saved generated audio for caching:', audioPath);
+              console.log(`[REPLY] 💾 Saved generated audio and text for userText="${userText.slice(0, 50)}...", depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
             } catch (e) {
               console.warn('[REPLY] Failed to save generated audio:', e);
             }
@@ -7148,8 +7114,8 @@ app.post('/api/tts', async (req, res) => {
     
     // ПРОВЕРКА ПРЕГЕНЕРИРОВАННОГО АУДИО ДЛЯ ВСЕХ СООБЩЕНИЙ
     // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
+    let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
     if (gameId) {
-      let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
       
       // Пытаемся найти сессию по gameId и locationId, чтобы получить scenarioGameId
       try {
@@ -7173,8 +7139,8 @@ app.post('/api/tts', async (req, res) => {
       }
       
       const messageType = isNarrator !== false ? 'narrator' : 'character';
-      // Поиск прегенерированного аудио (логи убраны для уменьшения шума)
-      const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType);
+      // Поиск прегенерированного аудио с учетом depth, choiceIndex, parentHash для цепочек диалогов
+      const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType, depth, choiceIndex, parentHash);
       
       if (pregenPath) {
         try {
@@ -7464,6 +7430,29 @@ app.post('/api/tts', async (req, res) => {
     const finalCharacterId = speechContext.characterId || characterId;
     const finalCharacterName = speechContext.characterName || characterName;
     const finalGender = speechContext.gender || gender || characterGender;
+    
+    // Функция для сохранения сгенерированного аудио и текста
+    const saveGeneratedAudio = (audioBuffer: Buffer, scenarioGameId: string | undefined) => {
+      if (!scenarioGameId) return;
+      
+      try {
+        const messageType = finalIsNarrator !== false ? 'narrator' : 'character';
+        // Используем depth, choiceIndex, parentHash для правильного сохранения цепочек диалогов
+        const audioPath = getPregenAudioPath(scenarioGameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash);
+        const audioDir = path.dirname(audioPath);
+        try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+        fs.writeFileSync(audioPath, audioBuffer);
+        
+        // Сохраняем также текст
+        const textPath = getPregenTextPath(scenarioGameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash);
+        try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+        fs.writeFileSync(textPath, text, 'utf-8');
+        
+        console.log(`[TTS] 💾 Saved generated audio and text for scenarioGameId=${scenarioGameId}, locationId=${locationId || 'none'}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+      } catch (e) {
+        console.warn('[TTS] Failed to save generated audio:', e);
+      }
+    };
     
     // Находим полную информацию о персонаже для выбора голоса
     let finalCharacterClass = characterClass;
@@ -7871,6 +7860,8 @@ app.post('/api/tts', async (req, res) => {
         const googleAudio = await generateGoogleTTS();
         if (googleAudio) {
           console.log('[TTS] ✅ Returning Google TTS audio to client, size:', googleAudio.length, 'bytes');
+          // Сохраняем сгенерированное аудио
+          saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
           res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
           res.setHeader('Content-Length', googleAudio.length.toString());
           return res.send(googleAudio);
@@ -8056,9 +8047,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               if (contentType.includes('audio')) {
                 const audioBuffer = Buffer.from(await response.arrayBuffer());
                 console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
-              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-              res.setHeader('Content-Length', String(audioBuffer.length));
-              return res.send(audioBuffer);
+                // Сохраняем сгенерированное аудио
+                saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
+                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                res.setHeader('Content-Length', String(audioBuffer.length));
+                return res.send(audioBuffer);
               }
               
               // Проверяем JSON ответ с аудио в inlineData
@@ -8131,6 +8124,8 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     }
                     
                     console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes, Content-Type: ${contentType}`);
+                    // Сохраняем сгенерированное аудио
+                    saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
                     res.setHeader('Content-Type', contentType);
                     res.setHeader('Content-Length', String(audioBuffer.length));
                     return res.send(audioBuffer);
@@ -8156,6 +8151,8 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                   console.warn(`[GEMINI-TTS] ⚠️ Quota exceeded (429) for ${modelName} - switching to Google TTS immediately`);
                   const googleAudio = await generateGoogleTTS();
                   if (googleAudio) {
+                    // Сохраняем сгенерированное аудио
+                    saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
                     res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
                     res.setHeader('Content-Length', googleAudio.length.toString());
                     return res.send(googleAudio);
@@ -8193,6 +8190,8 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
     const googleAudio = await generateGoogleTTS();
     if (googleAudio) {
       console.log('[TTS] ✅ Returning Google TTS fallback audio to client, size:', googleAudio.length, 'bytes');
+      // Сохраняем сгенерированное аудио
+      saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
       res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
       res.setHeader('Content-Length', googleAudio.length.toString());
       return res.send(googleAudio);
@@ -8207,1232 +8206,6 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
   } catch (e) {
     console.error('[TTS] TTS endpoint error:', e);
     return res.status(500).json({ error: 'tts_error', details: String(e) });
-  }
-});
-
-// Endpoint для прегенерации TTS для всех локаций игры
-app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
-  try {
-    const gameId = req.params.id;
-    if (!gameId) {
-      return res.status(400).json({ error: 'game_id_required' });
-    }
-    
-    const prisma = getPrisma();
-    const game = await prisma.game.findUnique({ 
-      where: { id: gameId },
-      include: { locations: { orderBy: { order: 'asc' } } }
-    });
-    
-    // ИСПРАВЛЕНИЕ: scenarioGameId = gameId (игра используется как сценарий)
-    // В GameSession поле scenarioGameId содержит gameId, поэтому используем gameId напрямую
-    const scenarioGameId = gameId;
-    
-    if (!game) {
-      return res.status(404).json({ error: 'game_not_found' });
-    }
-    
-    if (!game.locations || game.locations.length === 0) {
-      return res.status(400).json({ error: 'no_locations' });
-    }
-    
-    // Сбрасываем флаг остановки при запуске новой генерации
-    generationStopFlags.delete(gameId);
-    
-    // Запускаем прегенерацию асинхронно
-    const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
-    res.json({ 
-      jobId,
-      message: 'Прегенерация TTS запущена',
-      locationsCount: game.locations.length,
-      scenarioGameId // Возвращаем используемый scenarioGameId для отладки
-    });
-    
-    // Асинхронная прегенерация
-    // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения прегенерированных файлов
-    
-    (async () => {
-      const gameDir = path.join(PRAGEN_DIR, scenarioGameId);
-      try { fs.mkdirSync(gameDir, { recursive: true }); } catch {}
-      
-      let successCount = 0;
-      let failCount = 0;
-      
-      console.log(`[PRAGEN-TTS] Starting pre-generation for scenario ${scenarioGameId} (gameId=${gameId}), ${game.locations.length} locations`);
-      
-      for (let i = 0; i < game.locations.length; i++) {
-        // Проверяем флаг остановки перед каждой итерацией
-        if (generationStopFlags.get(gameId)) {
-          console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} at location ${i + 1}/${game.locations.length}`);
-          break;
-        }
-        
-        const location = game.locations[i];
-        if (!location) continue;
-        
-        try {
-          const locationDir = path.join(gameDir, location.id);
-          try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
-          
-          console.log(`[PRAGEN-TTS] Processing location ${i + 1}/${game.locations.length}: ${location.title || location.id}`);
-          
-          // Генерируем welcome текст для локации
-          const sys = getSysPrompt() +
-            'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
-            'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
-            'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
-            'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
-            'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
-            'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
-            'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
-            'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
-            'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
-            'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
-            'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
-            'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
-            'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
-          
-          // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/chat/welcome (SOLO)
-          // Создаем временную сессию для buildGptSceneContext
-          const tempUserId = `__pregeneration__${location.id}__${Date.now()}`;
-          let tempSessionCreated = false;
-          try {
-            await prisma.gameSession.create({
-              data: {
-                scenarioGameId: gameId,
-                currentLocationId: location.id,
-                state: {} as any,
-                userId: tempUserId,
-                lobbyId: null,
-              },
-            });
-            tempSessionCreated = true;
-          } catch (e) {
-            // Если сессия уже существует, обновляем её
-            try {
-              await prisma.gameSession.updateMany({
-                where: { scenarioGameId: gameId, userId: tempUserId },
-                data: { currentLocationId: location.id },
-              });
-              tempSessionCreated = true;
-            } catch (e2) {
-              console.warn(`[PRAGEN-TTS] Failed to create/update temp session for location ${location.id}:`, e2);
-            }
-          }
-          
-          // Проверяем флаг остановки перед генерацией
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} before generating text for location ${location.id}`);
-            break;
-          }
-          
-          // Используем buildGptSceneContext, как в /api/chat/welcome
-          const sc = await buildGptSceneContext(prisma, { gameId, userId: tempSessionCreated ? tempUserId : null, history: [] });
-          
-          // Проверяем флаг остановки после получения контекста
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} after getting context for location ${location.id}`);
-            if (tempSessionCreated) {
-              try {
-                await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
-              } catch {}
-            }
-            break;
-          }
-          
-          // Удаляем временную сессию после использования
-          if (tempSessionCreated) {
-            try {
-              await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
-            } catch {}
-          }
-          
-          // Генерируем текст ТОЧНО так же, как в /api/chat/welcome
-          let generatedText: string = '';
-          try {
-            const result = await generateChatCompletion({
-              systemPrompt: sys,
-              userPrompt: 'Контекст сцены:\n' + sc,
-              history: []
-            });
-            generatedText = result.text || '';
-          } catch (e: any) {
-            const errorMsg = e?.error?.message || e?.message || String(e);
-            const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
-            
-            if (isQuotaError) {
-              console.error(`[PRAGEN-TTS] ⚠️ QUOTA ERROR for location ${location.id}: API quota exceeded`);
-              console.error(`[PRAGEN-TTS] Quota error details: ${errorMsg.slice(0, 200)}`);
-              console.error(`[PRAGEN-TTS] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
-              console.error(`[PRAGEN-TTS] Stopping pre-generation due to quota limit`);
-              failCount++;
-              break; // Прерываем всю прегенерацию при ошибке квоты
-            }
-            // Для других ошибок тоже логируем и пропускаем
-            console.error(`[PRAGEN-TTS] ⚠️ Error generating text for location ${location.id}:`, errorMsg.slice(0, 200));
-            failCount++;
-            continue;
-          }
-          
-          // Проверяем флаг остановки после генерации текста
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} after generating text for location ${location.id}`);
-            break;
-          }
-          
-          let text = generatedText || (location.description || `Сцена: ${location.title}`);
-          if (text) {
-            text = formatChoiceOptions(text.trim());
-          }
-          
-          if (!text || text.length < 10) {
-            console.warn(`[PRAGEN-TTS] Location ${location.id}: Generated text too short, skipping`);
-            failCount++;
-            continue;
-          }
-          
-          // Проверяем, есть ли уже прегенерированный файл для этого текста (по смыслу)
-          // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
-          const existingAudioPath = findSimilarPregenAudio(scenarioGameId, text, location.id, undefined, 'narrator');
-          if (existingAudioPath) {
-            console.log(`[PRAGEN-TTS] ⏭️ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - similar content already exists, skipping`);
-            successCount++;
-            continue;
-          }
-          
-          // Генерируем TTS только если файла нет
-          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-          const ttsUrl = `${apiBase}/api/tts`;
-          
-          const ttsResponse = await undiciFetch(ttsUrl, {
-        method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text,
-              gameId: scenarioGameId, // Передаем scenarioGameId в TTS
-              locationId: location.id,
-              format: 'wav',
-              isNarrator: true,
-            }),
-            signal: AbortSignal.timeout(20000)
-          });
-          
-          // Проверяем ошибку квоты в ответе TTS
-          if (ttsResponse.status === 429) {
-            const errorText = await ttsResponse.text().catch(() => '');
-            const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
-            
-            if (isQuotaError) {
-              console.error(`[PRAGEN-TTS] ⚠️ QUOTA ERROR for location ${location.id}: TTS API quota exceeded`);
-              console.error(`[PRAGEN-TTS] Quota error details: ${errorText.slice(0, 200)}`);
-              console.error(`[PRAGEN-TTS] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
-              console.error(`[PRAGEN-TTS] Stopping pre-generation due to TTS quota limit`);
-              failCount++;
-              break; // Прерываем всю прегенерацию при ошибке квоты TTS
-            }
-          }
-          
-          if (ttsResponse.ok) {
-            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
-            // WELCOME сообщение имеет depth=0
-            const audioPath = getPregenAudioPath(scenarioGameId, text, location.id, undefined, 'narrator', 0);
-            // Создаем директорию, если её нет
-            const audioDir = path.dirname(audioPath);
-            try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-            fs.writeFileSync(audioPath, audioBuffer);
-            
-            // Сохраняем также текст с правильными параметрами хэша
-            const textPath = getPregenTextPath(scenarioGameId, text, location.id, undefined, 'narrator', 0);
-            try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
-            fs.writeFileSync(textPath, text, 'utf-8');
-            
-            console.log(`[PRAGEN-TTS] ✅ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - ${audioBuffer.length} bytes`);
-            console.log(`[PRAGEN-TTS] Saved to: ${audioPath}`);
-            successCount++;
-          } else {
-            console.warn(`[PRAGEN-TTS] ❌ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - TTS failed: ${ttsResponse.status}`);
-            failCount++;
-          }
-          
-          // Проверяем флаг остановки перед задержкой
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} after processing location ${location.id}`);
-            break;
-          }
-          
-          // УВЕЛИЧЕННАЯ задержка между TTS запросами, чтобы не превышать квоту API (минимум 5 секунд для Gemini)
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          
-        } catch (e) {
-          // Проверяем флаг остановки при ошибке
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} due to error`);
-            break;
-          }
-          console.error(`[PRAGEN-TTS] ❌ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - Error:`, e);
-          failCount++;
-        }
-      }
-      
-      if (generationStopFlags.get(gameId)) {
-        console.log(`[PRAGEN-TTS] ⚠️ Pre-generation stopped for game ${gameId}: ${successCount} success, ${failCount} failed`);
-      } else {
-        console.log(`[PRAGEN-TTS] ✅ Pre-generation completed: ${successCount} success, ${failCount} failed`);
-      }
-    })().catch(e => {
-      console.error('[PRAGEN-TTS] Fatal error:', e);
-    });
-    
-  } catch (e) {
-    console.error('[PRAGEN-TTS] Error:', e);
-    return res.status(500).json({ error: 'pregeneration_failed', details: String(e) });
-  }
-});
-
-// Массовая прегенерация TTS для всех локаций и всех вариантов игры
-app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
-  try {
-    const gameId = req.params.id;
-    if (!gameId) {
-      return res.status(400).json({ error: 'game_id_required' });
-    }
-    
-    const prisma = getPrisma();
-    const game = await prisma.game.findUnique({ 
-      where: { id: gameId },
-      include: { 
-        locations: { 
-          orderBy: { order: 'asc' },
-          include: {
-            exits: true
-          }
-        } 
-      }
-    });
-    
-    if (!game) {
-      return res.status(404).json({ error: 'game_not_found' });
-    }
-    
-    if (!game.locations || game.locations.length === 0) {
-      return res.status(400).json({ error: 'no_locations' });
-    }
-    
-    // ИСПРАВЛЕНИЕ: scenarioGameId = gameId (игра используется как сценарий)
-    // В GameSession поле scenarioGameId содержит gameId, поэтому используем gameId напрямую
-    const scenarioGameId = gameId;
-    
-    // Сбрасываем флаг остановки при запуске новой генерации
-    generationStopFlags.delete(gameId);
-    
-    // Запускаем прегенерацию асинхронно
-    const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
-    res.json({ 
-      jobId,
-      message: 'Массовая прегенерация TTS запущена',
-      locationsCount: game.locations.length,
-      exitsCount: game.locations.reduce((sum, loc) => sum + (loc.exits?.length || 0), 0),
-      scenarioGameId // Возвращаем используемый scenarioGameId для отладки
-    });
-    
-    // Асинхронная прегенерация
-    // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения прегенерированных файлов
-    
-    (async () => {
-      const gameDir = path.join(PRAGEN_DIR, scenarioGameId);
-      try { fs.mkdirSync(gameDir, { recursive: true }); } catch {}
-      
-      let locationSuccessCount = 0;
-      let locationFailCount = 0;
-      let exitSuccessCount = 0;
-      let exitFailCount = 0;
-      let choiceResponseSuccessCount = 0;
-      let choiceResponseFailCount = 0;
-      const MAX_DIALOGUE_DEPTH = 20; // Максимальная глубина рекурсивной прегенерации диалогов
-      const processedDialogues = new Set<string>(); // Для избежания дубликатов
-      
-      const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-      const ttsUrl = `${apiBase}/api/tts`;
-      const sys = getSysPrompt();
-      
-      console.log(`[PRAGEN-ALL] Starting pre-generation for scenario ${scenarioGameId} (gameId=${gameId}), ${game.locations.length} locations`);
-      
-      // Функция для генерации текста и аудио для локации
-      const generateLocationTTS = async (location: any, index: number) => {
-        // Проверяем флаг остановки в начале функции
-        if (generationStopFlags.get(gameId)) {
-          console.log(`[PRAGEN-ALL] Generation stopped for scenario ${scenarioGameId} before processing location ${location.id}`);
-          return false;
-        }
-        
-        try {
-          const locationDir = path.join(gameDir, location.id);
-          try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
-          
-          console.log(`[PRAGEN-ALL] Processing location ${index + 1}/${game.locations.length}: ${location.title || location.id}`);
-          
-          // Генерируем welcome текст для локации
-          const sysPrompt = sys +
-            'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
-            'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
-            'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
-            'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
-            'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
-            'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
-            'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
-            'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
-            'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
-            'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
-            'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
-            'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
-            'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
-          
-          // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/chat/welcome (SOLO)
-          // Создаем временную сессию для buildGptSceneContext
-          const tempUserId = `__pregeneration__${location.id}__${Date.now()}`;
-          let tempSessionCreated = false;
-          try {
-            await prisma.gameSession.create({
-              data: {
-                scenarioGameId: gameId,
-                currentLocationId: location.id,
-                state: {} as any,
-                userId: tempUserId,
-                lobbyId: null,
-              },
-            });
-            tempSessionCreated = true;
-          } catch (e) {
-            // Если сессия уже существует, обновляем её
-            try {
-              await prisma.gameSession.updateMany({
-                where: { scenarioGameId: gameId, userId: tempUserId },
-                data: { currentLocationId: location.id },
-              });
-              tempSessionCreated = true;
-            } catch (e2) {
-              console.warn(`[PRAGEN-ALL] Failed to create/update temp session for location ${location.id}:`, e2);
-            }
-          }
-          
-          // Проверяем флаг остановки перед генерацией
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for scenario ${scenarioGameId} before generating text for location ${location.id}`);
-            if (tempSessionCreated) {
-              try {
-                await prisma.gameSession.deleteMany({ where: { scenarioGameId: scenarioGameId, userId: tempUserId } }).catch(() => {}); // ИСПРАВЛЕНИЕ
-              } catch {}
-            }
-            return false;
-          }
-          
-          // Используем buildGptSceneContext, как в /api/chat/welcome
-          const sc = await buildGptSceneContext(prisma, { gameId: scenarioGameId, userId: tempSessionCreated ? tempUserId : null, history: [] }); // ИСПРАВЛЕНИЕ
-          
-          // Проверяем флаг остановки после получения контекста
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for scenario ${scenarioGameId} after getting context for location ${location.id}`);
-            if (tempSessionCreated) {
-              try {
-                await prisma.gameSession.deleteMany({ where: { scenarioGameId: scenarioGameId, userId: tempUserId } }).catch(() => {}); // ИСПРАВЛЕНИЕ
-              } catch {}
-            }
-            return false;
-          }
-          
-          // Удаляем временную сессию после использования
-          if (tempSessionCreated) {
-            try {
-              await prisma.gameSession.deleteMany({ where: { scenarioGameId: scenarioGameId, userId: tempUserId } }).catch(() => {}); // ИСПРАВЛЕНИЕ
-            } catch {}
-          }
-          
-          // Генерируем текст ТОЧНО так же, как в /api/chat/welcome
-          const { text: generatedText } = await generateChatCompletion({
-            systemPrompt: sysPrompt,
-            userPrompt: 'Контекст сцены:\n' + sc,
-            history: []
-          });
-          
-          // Проверяем флаг остановки после генерации текста
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after generating text for location ${location.id}`);
-            return false;
-          }
-          
-          let text = generatedText || (location.description || `Сцена: ${location.title}`);
-          if (text) {
-            text = formatChoiceOptions(text.trim());
-          }
-          
-          if (!text || text.length < 10) {
-            console.warn(`[PRAGEN-ALL] Location ${location.id}: Generated text too short, skipping`);
-            return false;
-          }
-          
-          // Проверяем, есть ли уже прегенерированный файл для этого текста (по смыслу)
-          // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
-          const existingAudioPath = findSimilarPregenAudio(scenarioGameId, text, location.id, undefined, 'narrator');
-          if (existingAudioPath) {
-            console.log(`[PRAGEN-ALL] ⏭️ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - similar content already exists, skipping`);
-            // Продолжаем генерацию диалогов, даже если основной файл уже есть
-            // (диалоги могут быть не сгенерированы)
-          } else {
-            // Генерируем TTS только если файла нет
-            const ttsResponse = await undiciFetch(ttsUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text,
-              gameId: scenarioGameId, // ИСПРАВЛЕНИЕ: Используем scenarioGameId
-              locationId: location.id,
-              format: 'wav',
-              isNarrator: true,
-            }),
-            signal: AbortSignal.timeout(20000)
-            });
-            
-            // Проверяем ошибку квоты в ответе TTS
-            if (ttsResponse.status === 429) {
-              const errorText = await ttsResponse.text().catch(() => '');
-              const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
-              
-              if (isQuotaError) {
-                console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR for location ${location.id}: TTS API quota exceeded`);
-                console.error(`[PRAGEN-ALL] Quota error details: ${errorText.slice(0, 200)}`);
-                console.error(`[PRAGEN-ALL] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
-                console.error(`[PRAGEN-ALL] Stopping pre-generation due to TTS quota limit`);
-                return false; // Прерываем генерацию локации при ошибке квоты TTS
-              }
-            }
-            
-            if (ttsResponse.ok) {
-              const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-              // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
-              // WELCOME сообщение имеет depth=0
-              const audioPath = getPregenAudioPath(scenarioGameId, text, location.id, undefined, 'narrator', 0);
-              const audioDir = path.dirname(audioPath);
-              try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-              fs.writeFileSync(audioPath, audioBuffer);
-              
-              // Сохраняем также текст с правильными параметрами хэша
-              const textPath = getPregenTextPath(scenarioGameId, text, location.id, undefined, 'narrator', 0);
-              try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
-              fs.writeFileSync(textPath, text, 'utf-8');
-              
-              console.log(`[PRAGEN-ALL] ✅ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - ${audioBuffer.length} bytes`);
-            } else {
-              console.warn(`[PRAGEN-ALL] ❌ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - TTS failed: ${ttsResponse.status}`);
-              return false;
-            }
-          }
-          
-          // Рекурсивная функция для генерации всех диалоговых цепочек
-          const generateDialogueChain = async (
-              parentText: string,
-              parentHistory: Array<{ from: 'bot' | 'me'; text: string }>,
-              choiceText: string,
-              depth: number,
-              locationId: string
-            ): Promise<void> => {
-              // Проверяем флаг остановки в начале рекурсивной функции
-              if (generationStopFlags.get(gameId)) {
-                return;
-              }
-              
-              if (depth >= MAX_DIALOGUE_DEPTH) {
-                return; // Достигли максимальной глубины
-              }
-              
-              // Создаем уникальный ключ для этого диалога, чтобы избежать дубликатов
-              const dialogueKey = `${locationId}_${depth}_${choiceText.slice(0, 100)}`;
-              if (processedDialogues.has(dialogueKey)) {
-                return; // Уже обработали этот диалог
-              }
-              processedDialogues.add(dialogueKey);
-              
-              try {
-                // Создаем временную сессию для buildGptSceneContext, чтобы она использовала правильную локацию
-                // Используем фиктивный userId для временной сессии
-                const tempUserId = `__pregeneration__${locationId}__${Date.now()}`;
-                let tempSessionCreated = false;
-                try {
-                  await prisma.gameSession.create({
-                    data: {
-                      scenarioGameId: gameId,
-                      currentLocationId: locationId,
-                      state: {} as any,
-                      userId: tempUserId,
-                      lobbyId: null,
-                    },
-                  });
-                  tempSessionCreated = true;
-                } catch (e) {
-                  // Если сессия уже существует, обновляем её
-                  try {
-                    await prisma.gameSession.updateMany({
-                      where: { scenarioGameId: gameId, userId: tempUserId },
-                      data: { currentLocationId: locationId },
-                    });
-                    tempSessionCreated = true;
-                  } catch (e2) {
-                    console.warn(`[PRAGEN-ALL] Failed to create/update temp session for location ${locationId}:`, e2);
-                  }
-                }
-                const choiceResponseSys = sys +
-                  'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
-                  'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
-                  'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
-                  'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
-                  'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
-                  'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
-                  'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
-                  'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
-                  'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
-                  'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
-                  'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
-                  'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
-                  'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
-                
-                // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/chat/reply
-                const context: string[] = [];
-                if (game) {
-                  context.push(`Игра: ${game.title}`);
-                  if (game.description) context.push(`Описание: ${game.description}`);
-                  if (game.worldRules) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
-                  if (game.gameplayRules) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
-                  if (game.author) context.push(`Автор: ${game.author}`);
-                  if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
-                  if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
-                  if ((game as any).winCondition) context.push(`Условие победы: ${(game as any).winCondition}`);
-                  if ((game as any).loseCondition) context.push(`Условие поражения: ${(game as any).loseCondition}`);
-                  if ((game as any).deathCondition) context.push(`Условие смерти: ${(game as any).deathCondition}`);
-                  if ((game as any).introduction) context.push(`Введение: ${(game as any).introduction}`);
-                  if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
-                  if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
-                  
-                  // Добавляем игровых персонажей (как в /api/chat/reply)
-                  const playable = (game.characters || []).filter((c: any) => c.isPlayable);
-                  if (playable.length) {
-                    context.push('Игровые персонажи D&D 5e (ТЕКУЩЕЕ СОСТОЯНИЕ):\n' + playable.map((p: any) => {
-                      const traits = [p.role, p.class, p.race, p.gender].filter(Boolean).join(', ');
-                      const stats = `HP: ${p.hp}/${p.maxHp}, AC: ${p.ac}, STR:${p.str}, DEX:${p.dex}, CON:${p.con}, INT:${p.int}, WIS:${p.wis}, CHA:${p.cha}`;
-                      const extras = [p.persona, p.origin].filter(Boolean).join('. ');
-                      const abilities = p.abilities ? `; способности: ${String(p.abilities).slice(0, 200)}` : '';
-                      return `- ${p.name} (${traits}) — ${stats}. ${extras}${abilities}`;
-                    }).join('\n'));
-                  }
-                  
-                  // Добавляем NPC (получаем из базы данных)
-                  const chars = await prisma.character.findMany({ where: { gameId, isPlayable: false }, take: 10 });
-                  if (Array.isArray(chars) && chars.length) {
-                    context.push('NPC, доступные в мире (используй их в сценах):\n' + chars.map((n) => {
-                      const traits = [n.role, n.race, n.gender].filter(Boolean).join(', ');
-                      const extras = [n.persona, n.origin].filter(Boolean).join('. ');
-                      return `- ${n.name}${traits ? ` (${traits})` : ''}${extras ? ` — ${extras}` : ''}`;
-                    }).join('\n'));
-                  }
-                }
-                
-                // Используем buildGptSceneContext для получения контекста сцены (как в /api/chat/reply)
-                // Используем временную сессию, чтобы buildGptSceneContext использовала правильную локацию
-                const sc = await buildGptSceneContext(prisma, {
-                  gameId,
-                  history: parentHistory,
-                  userId: tempSessionCreated ? tempUserId : null,
-                });
-                
-                // Удаляем временную сессию после использования
-                if (tempSessionCreated) {
-                  try {
-                    await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
-                  } catch {}
-                }
-                
-                // Формируем userPrompt ТОЧНО так же, как в /api/chat/reply
-                const choiceUserMsg = [
-                  'Контекст игры:\n' + context.filter(Boolean).join('\n\n'),
-                  sc ? 'Контекст сцены:\n' + sc : '',
-                  `Действие игрока: ${choiceText}`
-                ].filter(Boolean).join('\n\n');
-                
-                let choiceResponseText: string = '';
-                try {
-                  const result = await generateChatCompletion({
-                    systemPrompt: choiceResponseSys,
-                    userPrompt: choiceUserMsg,
-                    history: parentHistory
-                  });
-                  choiceResponseText = result.text || '';
-                } catch (e: any) {
-                  const errorMsg = e?.error?.message || e?.message || String(e);
-                  const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
-                  
-                  if (isQuotaError) {
-                    console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR at dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." - Gemini API quota exceeded`);
-                    console.error(`[PRAGEN-ALL] Quota error details: ${errorMsg.slice(0, 200)}`);
-                    // Пропускаем эту генерацию, но продолжаем с другими
-                    choiceResponseFailCount++;
-                    return; // Выходим из функции, но не прерываем всю прегенерацию
-                  }
-                  // Для других ошибок тоже логируем и пропускаем
-                  console.error(`[PRAGEN-ALL] ⚠️ Error generating dialogue at depth ${depth}:`, errorMsg.slice(0, 200));
-                  choiceResponseFailCount++;
-                  return;
-                }
-                
-                if (choiceResponseText && choiceResponseText.trim().length >= 10) {
-                  let formattedChoiceText = formatChoiceOptions(choiceResponseText.trim());
-                  
-                  // Вычисляем parentHash из родительского сообщения
-                  const parentHash = parentText ? createAudioHash(parentText, locationId, undefined, 'narrator', depth - 1) : undefined;
-                  
-                  // Определяем choiceIndex из истории (индекс выбора в родительском сообщении)
-                  const parentChoices = parseChoiceOptions(parentText);
-                  const choiceIndex = parentChoices.findIndex(c => c === choiceText || choiceText.includes(c) || c.includes(choiceText));
-                  
-                  // Проверяем, есть ли уже прегенерированный файл для этого действия игрока
-                  // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) и правильные параметры хэша
-                  const existingChoiceAudioPath = findPregenAudio(scenarioGameId, choiceText, locationId, undefined, 'narrator', depth, choiceIndex >= 0 ? choiceIndex : undefined, parentHash);
-                  if (existingChoiceAudioPath) {
-                    console.log(`[PRAGEN-ALL] ⏭️ Dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." - already exists, skipping`);
-                    choiceResponseSuccessCount++;
-                  } else {
-                    // Генерируем TTS для ответа на выбор только если файла нет
-                    const choiceTtsResponse = await undiciFetch(ttsUrl, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        text: formattedChoiceText,
-                        gameId: scenarioGameId, // ИСПРАВЛЕНИЕ: Используем scenarioGameId
-                        locationId: locationId,
-                        format: 'wav',
-                        isNarrator: true,
-                      }),
-                      signal: AbortSignal.timeout(60000) // 60 секунд для SSML генерации
-                    });
-                    
-                    // Проверяем ошибку квоты в ответе TTS
-                    if (choiceTtsResponse.status === 429) {
-                      const errorText = await choiceTtsResponse.text().catch(() => '');
-                      const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
-                      
-                      if (isQuotaError) {
-                        console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR at dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." - TTS API quota exceeded`);
-                        console.error(`[PRAGEN-ALL] Quota error details: ${errorText.slice(0, 200)}`);
-                        console.error(`[PRAGEN-ALL] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
-                        console.error(`[PRAGEN-ALL] Stopping dialogue generation due to TTS quota limit`);
-                        choiceResponseFailCount++;
-                        return; // Выходим из функции, но не прерываем всю прегенерацию
-                      }
-                    }
-                    
-                    if (choiceTtsResponse.ok) {
-                      const choiceAudioBuffer = Buffer.from(await choiceTtsResponse.arrayBuffer());
-                      
-                      // ВАЖНО: Сохраняем по действию игрока (choiceText) с правильными параметрами хэша
-                      // Это нужно, чтобы поиск в /api/chat/reply работал корректно
-                      // В /api/chat/reply ищется по userText (действие игрока), поэтому и сохраняем по нему
-                      // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) и правильные параметры хэша
-                      const choiceAudioPath = getPregenAudioPath(scenarioGameId, choiceText, locationId, undefined, 'narrator', depth, choiceIndex >= 0 ? choiceIndex : undefined, parentHash);
-                      const choiceAudioDir = path.dirname(choiceAudioPath);
-                      try { fs.mkdirSync(choiceAudioDir, { recursive: true }); } catch {}
-                      fs.writeFileSync(choiceAudioPath, choiceAudioBuffer);
-                      
-                      // Сохраняем также текст (ответ бота) с правильными параметрами хэша
-                      const choiceTextPath = getPregenTextPath(scenarioGameId, choiceText, locationId, undefined, 'narrator', depth, choiceIndex >= 0 ? choiceIndex : undefined, parentHash);
-                      try { fs.mkdirSync(path.dirname(choiceTextPath), { recursive: true }); } catch {}
-                      fs.writeFileSync(choiceTextPath, formattedChoiceText, 'utf-8');
-                      
-                      console.log(`[PRAGEN-ALL] ✅ Dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." (hash: ${createAudioHash(choiceText, locationId, undefined, 'narrator', depth, choiceIndex >= 0 ? choiceIndex : undefined, parentHash)})`);
-                      choiceResponseSuccessCount++;
-                    } else {
-                      choiceResponseFailCount++;
-                    }
-                  }
-                  
-                  // Парсим варианты из ответа и рекурсивно генерируем ответы на них
-                  // (делаем это даже если файл уже существует, чтобы проверить следующие диалоги)
-                  const nextChoices = parseChoiceOptions(formattedChoiceText);
-                  if (nextChoices.length > 0 && depth < MAX_DIALOGUE_DEPTH - 1) {
-                    // Проверяем флаг остановки перед рекурсивной генерацией
-                    if (generationStopFlags.get(gameId)) {
-                      return;
-                    }
-                    
-                    const newHistory = [...parentHistory, { from: 'me', text: choiceText }, { from: 'bot', text: formattedChoiceText }];
-                    for (const nextChoice of nextChoices) {
-                      // Проверяем флаг остановки перед каждой рекурсивной итерацией
-                      if (generationStopFlags.get(gameId)) {
-                        return;
-                      }
-                      await generateDialogueChain(formattedChoiceText, newHistory, nextChoice, depth + 1, locationId);
-                      // Проверяем флаг остановки перед задержкой
-                      if (generationStopFlags.get(gameId)) {
-                        return;
-                      }
-                      // УВЕЛИЧЕННАЯ задержка между TTS запросами для избежания превышения квоты (минимум 5 секунд для Gemini)
-                      await new Promise(resolve => setTimeout(resolve, 5000));
-                      }
-                    }
-                    
-                      // УВЕЛИЧЕННАЯ задержка между TTS запросами для избежания превышения квоты (минимум 5 секунд для Gemini)
-                      await new Promise(resolve => setTimeout(resolve, 5000));
-                } else {
-                  choiceResponseFailCount++;
-                }
-              } catch (e) {
-                console.warn(`[PRAGEN-ALL] ⚠️ Failed to generate dialogue at depth ${depth} for choice "${choiceText}":`, e);
-                choiceResponseFailCount++;
-              }
-            };
-            
-            // Проверяем флаг остановки перед генерацией диалогов
-            if (generationStopFlags.get(gameId)) {
-              return true; // Возвращаем true, так как основная генерация локации успешна
-            }
-            
-            // Используем РЕАЛЬНЫЕ кнопки (exits) из базы данных, а не парсим из текста
-            const exits = location.exits || [];
-            if (exits.length > 0) {
-              console.log(`[PRAGEN-ALL] Found ${exits.length} exits (buttons) for location ${location.title}, generating ALL dialogue chains...`);
-              const initialHistory = [{ from: 'bot', text }];
-              for (let exitIdx = 0; exitIdx < exits.length; exitIdx++) {
-                // Проверяем флаг остановки перед каждой итерацией
-                if (generationStopFlags.get(gameId)) {
-                  break;
-                }
-                const exit = exits[exitIdx];
-                // Используем buttonText или triggerText из базы данных
-                const choiceText = exit.buttonText || exit.triggerText || `Вариант ${exitIdx + 1}`;
-                await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
-                // Проверяем флаг остановки перед задержкой
-                if (generationStopFlags.get(gameId)) {
-                  break;
-                }
-                // Увеличенная задержка между начальными вариантами для избежания превышения квоты
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-            } else {
-              // Если нет exits в БД, парсим из текста как fallback
-              const choices = parseChoiceOptions(text);
-              if (choices.length > 0) {
-                console.log(`[PRAGEN-ALL] No exits in DB, parsing ${choices.length} choice options from text for location ${location.title}, generating ALL dialogue chains...`);
-                const initialHistory = [{ from: 'bot', text }];
-                for (let choiceIdx = 0; choiceIdx < choices.length; choiceIdx++) {
-                  // Проверяем флаг остановки перед каждой итерацией
-                  if (generationStopFlags.get(gameId)) {
-                    break;
-                  }
-                  const choiceText = choices[choiceIdx];
-                  await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
-                  // Проверяем флаг остановки перед задержкой
-                  if (generationStopFlags.get(gameId)) {
-                    break;
-                  }
-                  // Увеличенная задержка между начальными вариантами для избежания превышения квоты
-                  await new Promise(resolve => setTimeout(resolve, 2000));
-                }
-              }
-            }
-            
-            return true;
-        } catch (e) {
-          console.error(`[PRAGEN-ALL] ❌ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - Error:`, e);
-          return false;
-        }
-      };
-      
-      // Функция для генерации текста и аудио для варианта
-      // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/engine/session/:id/describe
-      const generateExitTTS = async (exit: any, fromLocation: any, targetLocation: any, exitIndex: number, totalExits: number) => {
-        // Проверяем флаг остановки в начале функции
-        if (generationStopFlags.get(gameId)) {
-          return false;
-        }
-        
-        try {
-          if (!exit.targetLocationId) {
-            return false; // Пропускаем варианты без целевой локации
-          }
-          
-          console.log(`[PRAGEN-ALL] Processing exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} (${fromLocation.title} -> ${targetLocation.title})`);
-          
-          // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
-          const visual = [
-            targetLocation.backgroundUrl ? `Фон (изображение): ${targetLocation.backgroundUrl}` : '',
-            targetLocation.musicUrl ? `Музыка (URL): ${targetLocation.musicUrl}` : '',
-          ].filter(Boolean).join('\n');
-          const rules = [
-            game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
-            game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
-            (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
-            (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
-            (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
-            (game as any)?.author ? `Автор: ${(game as any).author}` : '',
-            game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
-            (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
-            (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
-            (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
-            (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
-            (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
-          ].filter(Boolean).join('\n');
-          const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
-          const npcs = chars && chars.length ? (
-            'Персонажи (D&D 5e):\n' + chars.map((c) => {
-              const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
-              const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
-              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
-              return `- ${c.name} (${traits})${stats}. ${extras}`;
-            }).join('\n')
-          ) : '';
-          
-          const base = targetLocation.description || '';
-          const user = [
-            `Сцена: ${targetLocation.title}`,
-            visual,
-            base ? `Описание сцены: ${base}` : '',
-            rules,
-            npcs,
-          ].filter(Boolean).join('\n\n');
-          
-          // Проверяем флаг остановки перед генерацией текста
-          if (generationStopFlags.get(gameId)) {
-            return false;
-          }
-          
-          // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
-          let generatedText: string = '';
-          try {
-            const result = await generateChatCompletion({
-              systemPrompt: sys,
-              userPrompt: user,
-              history: []
-            });
-            generatedText = result.text || '';
-          } catch (e: any) {
-            const errorMsg = e?.error?.message || e?.message || String(e);
-            const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
-            
-            if (isQuotaError) {
-              console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR for exit ${exit.id}: API quota exceeded`);
-              console.error(`[PRAGEN-ALL] Quota error details: ${errorMsg.slice(0, 200)}`);
-              console.error(`[PRAGEN-ALL] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
-              exitFailCount++;
-              return false;
-            }
-            // Для других ошибок тоже логируем и пропускаем
-            console.error(`[PRAGEN-ALL] ⚠️ Error generating text for exit ${exit.id}:`, errorMsg.slice(0, 200));
-            exitFailCount++;
-            return false;
-          }
-          
-          // Проверяем флаг остановки после генерации текста
-          if (generationStopFlags.get(gameId)) {
-            return false;
-          }
-          
-          let text = generatedText || (targetLocation.description || `Сцена: ${targetLocation.title}`);
-          if (text) {
-            text = formatChoiceOptions(text.trim());
-          }
-          
-          if (!text || text.length < 10) {
-            console.warn(`[PRAGEN-ALL] Exit ${exit.id}: Generated text too short, skipping`);
-            return false;
-          }
-          
-          // Проверяем, есть ли уже прегенерированный файл для этого текста (по смыслу)
-          // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария)
-          const existingExitAudioPath = findSimilarPregenAudio(scenarioGameId, text, targetLocation.id, undefined, 'narrator');
-          if (existingExitAudioPath) {
-            console.log(`[PRAGEN-ALL] ⏭️ Exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} -> ${targetLocation.title} - similar content already exists, skipping`);
-            return true; // Возвращаем true, так как файл уже существует
-          }
-          
-          // Генерируем TTS только если файла нет
-          const ttsResponse = await undiciFetch(ttsUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text,
-              gameId: scenarioGameId, // ИСПРАВЛЕНИЕ: Используем scenarioGameId
-              locationId: targetLocation.id,
-              format: 'wav',
-              isNarrator: true,
-            }),
-            signal: AbortSignal.timeout(20000)
-          });
-          
-          if (ttsResponse.ok) {
-            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
-            const audioPath = getPregenAudioPath(scenarioGameId, text, targetLocation.id, undefined, 'narrator');
-            const audioDir = path.dirname(audioPath);
-            try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-            fs.writeFileSync(audioPath, audioBuffer);
-            
-            // Сохраняем также текст
-            const textPath = audioPath.replace('.wav', '.txt');
-            fs.writeFileSync(textPath, text, 'utf-8');
-            
-            console.log(`[PRAGEN-ALL] ✅ Exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} -> ${targetLocation.title}`);
-            return true;
-          } else {
-            console.warn(`[PRAGEN-ALL] ❌ Exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} - TTS failed: ${ttsResponse.status}`);
-            return false;
-          }
-        } catch (e) {
-          console.error(`[PRAGEN-ALL] ❌ Exit ${exit.id}: Error:`, e);
-          return false;
-        }
-      };
-      
-      // Прегенерация для всех локаций
-      for (let i = 0; i < game.locations.length; i++) {
-        // Проверяем флаг остановки перед каждой итерацией
-        if (generationStopFlags.get(gameId)) {
-          console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} at location ${i + 1}/${game.locations.length}`);
-          break;
-        }
-        
-        const location = game.locations[i];
-        if (!location) continue;
-        
-        const success = await generateLocationTTS(location, i);
-        if (success) {
-          locationSuccessCount++;
-        } else {
-          locationFailCount++;
-        }
-        
-        // Проверяем флаг остановки перед задержкой
-        if (generationStopFlags.get(gameId)) {
-          console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after processing location ${location.id}`);
-          break;
-        }
-        
-        // Небольшая задержка между запросами
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-      
-      // Прегенерация для всех вариантов
-      // Проверяем флаг остановки перед началом прегенерации вариантов
-      if (generationStopFlags.get(gameId)) {
-        console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} before processing exits`);
-      } else {
-        const allExits: Array<{ exit: any; fromLocation: any; targetLocation: any }> = [];
-        for (const location of game.locations) {
-          // Проверяем флаг остановки при сборе exits
-          if (generationStopFlags.get(gameId)) {
-            break;
-          }
-          if (!location.exits || location.exits.length === 0) continue;
-          
-          for (const exit of location.exits) {
-            if (!exit.targetLocationId) continue; // Пропускаем варианты без целевой локации
-            
-            const targetLocation = game.locations.find(l => l.id === exit.targetLocationId);
-            if (!targetLocation) continue;
-            
-            allExits.push({ exit, fromLocation: location, targetLocation });
-          }
-        }
-        
-        for (let i = 0; i < allExits.length; i++) {
-          // Проверяем флаг остановки перед каждой итерацией
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} at exit ${i + 1}/${allExits.length}`);
-            break;
-          }
-          
-          const { exit, fromLocation, targetLocation } = allExits[i];
-          const success = await generateExitTTS(exit, fromLocation, targetLocation, i, allExits.length);
-          if (success) {
-            exitSuccessCount++;
-          } else {
-            exitFailCount++;
-          }
-          
-          // Проверяем флаг остановки перед задержкой
-          if (generationStopFlags.get(gameId)) {
-            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after processing exit ${exit.id}`);
-            break;
-          }
-          
-          // Небольшая задержка между запросами
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-      
-      if (generationStopFlags.get(gameId)) {
-        console.log(`[PRAGEN-ALL] ⚠️ Pre-generation stopped for game ${gameId}:`);
-        console.log(`[PRAGEN-ALL]   Locations: ${locationSuccessCount} success, ${locationFailCount} failed`);
-        console.log(`[PRAGEN-ALL]   Exits: ${exitSuccessCount} success, ${exitFailCount} failed`);
-        console.log(`[PRAGEN-ALL]   Choice responses: ${choiceResponseSuccessCount} success, ${choiceResponseFailCount} failed`);
-      } else {
-        console.log(`[PRAGEN-ALL] ✅ Full pre-generation completed:`);
-        console.log(`[PRAGEN-ALL]   Locations: ${locationSuccessCount} success, ${locationFailCount} failed`);
-        console.log(`[PRAGEN-ALL]   Exits: ${exitSuccessCount} success, ${exitFailCount} failed`);
-        console.log(`[PRAGEN-ALL]   Choice responses: ${choiceResponseSuccessCount} success, ${choiceResponseFailCount} failed`);
-      }
-    })().catch(e => {
-      console.error('[PRAGEN-ALL] Fatal error:', e);
-    });
-    
-  } catch (e) {
-    console.error('[PRAGEN-ALL] Error:', e);
-    return res.status(500).json({ error: 'pregeneration_failed', details: String(e) });
-  }
-});
-
-// Прегенерация TTS для варианта (LocationExit)
-app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
-  try {
-    const exitId = req.params.id;
-    if (!exitId) {
-      return res.status(400).json({ error: 'exit_id_required' });
-    }
-    
-    const prisma = getPrisma();
-    const exit = await prisma.locationExit.findUnique({ 
-      where: { id: exitId },
-      include: { 
-        location: { 
-          include: { 
-            game: true 
-          } 
-        } 
-      }
-    });
-    
-    if (!exit) {
-      return res.status(404).json({ error: 'exit_not_found' });
-    }
-    
-    if (!exit.targetLocationId) {
-      return res.status(400).json({ error: 'no_target_location', message: 'У варианта нет целевой локации' });
-    }
-    
-    const game = exit.location.game;
-    const gameId = game.id;
-    const fromLocationId = exit.locationId;
-    const targetLocationId = exit.targetLocationId;
-    
-    const targetLoc = await prisma.location.findUnique({ where: { id: targetLocationId } });
-    if (!targetLoc) {
-      return res.status(404).json({ error: 'target_location_not_found' });
-    }
-    
-    // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
-    // Используем тот же systemPrompt, чтобы хеш совпадал
-    const sys = getSysPrompt();
-    
-    const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
-    const visual = [
-      targetLoc.backgroundUrl ? `Фон (изображение): ${targetLoc.backgroundUrl}` : '',
-      targetLoc.musicUrl ? `Музыка (URL): ${targetLoc.musicUrl}` : '',
-    ].filter(Boolean).join('\n');
-    const rules = [
-      game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
-      game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
-      (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
-      (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
-      (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
-      (game as any)?.author ? `Автор: ${(game as any).author}` : '',
-      game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
-      // Используем полные правила для ИИ
-      (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
-      (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
-      (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
-      (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
-      (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
-    ].filter(Boolean).join('\n');
-    const npcs = chars && chars.length ? (
-      'Персонажи (D&D 5e):\n' + chars.map((c) => {
-        const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
-        const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
-        const extras = [c.persona, c.origin].filter(Boolean).join('. ');
-        return `- ${c.name} (${traits})${stats}. ${extras}`;
-      }).join('\n')
-    ) : '';
-    
-    // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
-    // НЕ добавляем информацию о выборе, чтобы хеш совпадал с реальной генерацией
-    const base = targetLoc.description || '';
-    const user = [
-      `Сцена: ${targetLoc.title}`,
-      visual,
-      base ? `Описание сцены: ${base}` : '',
-      rules,
-      npcs,
-    ].filter(Boolean).join('\n\n');
-    
-    // Генерируем текст
-    const { text: generatedText } = await generateChatCompletion({
-      systemPrompt: sys,
-      userPrompt: user,
-      history: []
-    });
-    
-    let text = generatedText || (targetLoc.description || `Сцена: ${targetLoc.title}`);
-    if (text) {
-      text = formatChoiceOptions(text.trim());
-    }
-    
-    if (!text || text.length < 10) {
-      return res.status(400).json({ error: 'text_too_short', message: 'Сгенерированный текст слишком короткий' });
-    }
-    
-    // Генерируем TTS
-    const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-    const ttsUrl = `${apiBase}/api/tts`;
-    
-    const ttsResponse = await undiciFetch(ttsUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        gameId,
-        locationId: targetLocationId,
-        format: 'wav',
-        isNarrator: true,
-      }),
-      signal: AbortSignal.timeout(30000)
-    });
-    
-    if (!ttsResponse.ok) {
-      return res.status(500).json({ error: 'tts_generation_failed', message: `TTS вернул статус ${ttsResponse.status}` });
-    }
-    
-    const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-    // Используем единую функцию для создания пути, чтобы файлы находились при поиске
-    const audioPath = getPregenAudioPath(gameId, text, targetLocationId, undefined, 'narrator');
-    // Создаем директорию, если её нет
-    const audioDir = path.dirname(audioPath);
-    try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-    fs.writeFileSync(audioPath, audioBuffer);
-    
-    // Сохраняем также текст для справки
-    const textPath = audioPath.replace('.wav', '.txt');
-    fs.writeFileSync(textPath, text, 'utf-8');
-    
-    console.log(`[PRAGEN-EXIT] ✅ Exit ${exitId}: ${exit.buttonText || exit.triggerText || 'unnamed'} -> ${targetLoc.title}`);
-    console.log(`[PRAGEN-EXIT] Saved to: ${audioPath}`);
-    
-    return res.json({ 
-      ok: true, 
-      exitId,
-      text,
-      audioPath,
-      audioSize: audioBuffer.length,
-      message: 'Прегенерация завершена успешно'
-    });
-    
-  } catch (e) {
-    console.error('[PRAGEN-EXIT] Error:', e);
-    return res.status(500).json({ error: 'pregeneration_failed', details: String(e) });
   }
 });
 
