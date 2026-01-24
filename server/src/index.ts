@@ -8099,7 +8099,8 @@ app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
         gameId,
         locationId: targetLocationId,
         format: 'wav',
-        isNarrator: true
+        isNarrator: true,
+        isPregeneration: true // Указываем, что это запрос из прегенерации
       }),
       signal: AbortSignal.timeout(120000)
     });
