@@ -4566,6 +4566,63 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
 
+    // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ - генерируем аудио перед отправкой текста
+    console.log('[REPLY] 🎤 Pre-generating TTS for text length:', text.length);
+    try {
+      // Получаем контекст для TTS (локация, персонаж и т.д.)
+      let locationId: string | undefined = undefined;
+      let characterId: string | undefined = undefined;
+      
+      if (gameId) {
+        try {
+          let sess: any = null;
+          if (lobbyId) {
+            sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+          } else {
+            const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+            if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+          }
+          if (sess) {
+            locationId = sess.currentLocationId || undefined;
+          }
+        } catch (e) {
+          console.warn('[REPLY] Failed to get session context for TTS:', e);
+        }
+      }
+      
+      // Вызываем TTS endpoint напрямую через внутренний HTTP запрос
+      // Ждем завершения генерации перед отправкой текста клиенту
+      const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+      const ttsUrl = `${apiBase}/api/tts`;
+      
+      console.log('[REPLY] Calling TTS endpoint for pre-generation...');
+      const ttsResponse = await undiciFetch(ttsUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          gameId: gameId || undefined,
+          locationId,
+          characterId,
+          format: 'oggopus'
+        }),
+        signal: AbortSignal.timeout(120000) // 2 минуты таймаут
+      });
+      
+      if (ttsResponse.ok) {
+        const audioBuffer = await ttsResponse.arrayBuffer();
+        console.log('[REPLY] ✅ TTS pre-generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+      } else {
+        const errorText = await ttsResponse.text().catch(() => '');
+        console.warn('[REPLY] TTS pre-generation failed:', ttsResponse.status, errorText.slice(0, 200));
+      }
+    } catch (ttsErr: any) {
+      console.warn('[REPLY] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      // НЕ блокируем отправку текста, если TTS не сгенерировался - клиент может запросить позже
+    }
+
     if (lobbyId) {
       const sess = await prisma.chatSession.upsert({
         where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } },
