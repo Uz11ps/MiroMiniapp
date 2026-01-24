@@ -2464,6 +2464,25 @@ ${loc.description}
             } catch {}
           }
         }
+        
+        // Автоматически запускаем прегенерацию всех диалогов после импорта
+        set({ progress: 'Starting TTS pre-generation...' });
+        try {
+          console.log(`[AUTO-PRAGEN] Starting automatic pre-generation for game ${game.id} after PDF import`);
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const pregenUrl = `${apiBase}/api/admin/games/${game.id}/pregenerate-all-tts`;
+          await undiciFetch(pregenUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(5000) // Таймаут для инициализации, сама прегенерация работает асинхронно
+          }).catch(() => {
+            // Игнорируем ошибки таймаута, так как прегенерация работает асинхронно
+          });
+          console.log(`[AUTO-PRAGEN] Pre-generation job started for game ${game.id}`);
+        } catch (e) {
+          console.error('[AUTO-PRAGEN] Failed to start automatic pre-generation:', e);
+        }
+        
         set({ status: 'done', gameId: game.id, progress: 'Completed' });
       } catch (e: any) {
         console.error('ingest_import_job_error', e);
@@ -2771,6 +2790,26 @@ app.post('/api/admin/scenario/import', async (req, res) => {
         }
       });
     }
+    
+    // Автоматически запускаем прегенерацию всех диалогов после импорта
+    setImmediate(async () => {
+      try {
+        console.log(`[AUTO-PRAGEN] Starting automatic pre-generation for game ${game.id} after import`);
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const pregenUrl = `${apiBase}/api/admin/games/${game.id}/pregenerate-all-tts`;
+        await undiciFetch(pregenUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(5000) // Таймаут для инициализации, сама прегенерация работает асинхронно
+        }).catch(() => {
+          // Игнорируем ошибки таймаута, так как прегенерация работает асинхронно
+        });
+        console.log(`[AUTO-PRAGEN] Pre-generation job started for game ${game.id}`);
+      } catch (e) {
+        console.error('[AUTO-PRAGEN] Failed to start automatic pre-generation:', e);
+      }
+    });
+    
     return res.status(201).json({ ok: true, gameId: game.id, locations: locs.length, exits: createdExits, characters: createdChars, editions: createdEds });
   } catch (e) {
     return res.status(500).json({ error: 'scenario_import_failed', details: String(e) });
