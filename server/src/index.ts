@@ -4257,8 +4257,37 @@ app.post('/api/chat/welcome', async (req, res) => {
             if (hasMaterials) {
               // Если материалы есть - ищем по точному хэшу (каждое сообщение имеет свой хэш)
               // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
-              const pregenText = findPregenText(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
-              const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
+              let pregenText = findPregenText(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
+              let pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
+              
+              // Если не нашли по тексту, ищем по локации (для welcome сообщений текст может быть разным)
+              if (!pregenPath && first.id) {
+                try {
+                  const locationDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen, first.id);
+                  if (fs.existsSync(locationDir)) {
+                    const files = fs.readdirSync(locationDir);
+                    // Ищем любой файл narrator_* с depth=0 (для welcome)
+                    for (const file of files) {
+                      if (file.endsWith('.wav') || file.endsWith('.wav')) {
+                        const txtFile = file.replace(/\.wav$/, '.txt');
+                        const txtPath = path.join(locationDir, txtFile);
+                        if (fs.existsSync(txtPath)) {
+                          // Проверяем, что это narrator файл
+                          if (file.startsWith('narrator_')) {
+                            // Используем первый найденный файл для этой локации (welcome сообщение)
+                            pregenPath = path.join(locationDir, file);
+                            pregenText = fs.readFileSync(txtPath, 'utf-8');
+                            console.log(`[WELCOME] Found pre-generated audio by location: ${file}`);
+                            break;
+                          }
+                        }
+                      }
+                    }
+                  }
+                } catch (e) {
+                  // Игнорируем ошибки при поиске по локации
+                }
+              }
               
               if (pregenText && pregenPath) {
                 try {
@@ -4440,7 +4469,29 @@ app.post('/api/chat/welcome', async (req, res) => {
           }
           
           // Поиск прегенерированного аудио (логи убраны)
-          const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator');
+          // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
+          let pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
+          
+          // Если не нашли по тексту, ищем по локации (для welcome сообщений текст может быть разным)
+          if (!pregenPath && first.id) {
+            try {
+              const locationDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen, first.id);
+              if (fs.existsSync(locationDir)) {
+                const files = fs.readdirSync(locationDir);
+                // Ищем любой файл narrator_* с depth=0 (для welcome)
+                for (const file of files) {
+                  if (file.endsWith('.wav') && file.startsWith('narrator_')) {
+                    // Используем первый найденный файл для этой локации (welcome сообщение)
+                    pregenPath = path.join(locationDir, file);
+                    console.log(`[WELCOME] Found pre-generated audio by location (SOLO): ${file}`);
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              // Игнорируем ошибки при поиске по локации
+            }
+          }
           
           if (pregenPath) {
             try {
@@ -4470,7 +4521,10 @@ app.post('/api/chat/welcome', async (req, res) => {
               gameId,
               locationId: first?.id,
               format: 'wav',
-              isNarrator: true
+              isNarrator: true,
+              depth: 0, // WELCOME сообщение имеет depth=0
+              choiceIndex: undefined,
+              parentHash: undefined
             }),
             signal: AbortSignal.timeout(20000)
           });
@@ -7144,8 +7198,10 @@ app.post('/api/tts', async (req, res) => {
       }
       
       const messageType = isNarrator !== false ? 'narrator' : 'character';
+      // Для welcome сообщений (когда depth не передан, но есть locationId и это narrator) используем depth=0
       // Поиск прегенерированного аудио с учетом depth, choiceIndex, parentHash для цепочек диалогов
-      const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType, depth, choiceIndex, parentHash);
+      const searchDepth = depth !== undefined ? depth : (locationId && isNarrator !== false ? 0 : undefined);
+      const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType, searchDepth, choiceIndex, parentHash);
       
       if (pregenPath) {
         try {
@@ -7442,18 +7498,21 @@ app.post('/api/tts', async (req, res) => {
       
       try {
         const messageType = finalIsNarrator !== false ? 'narrator' : 'character';
+        // Для welcome сообщений (когда нет locationId или это первое сообщение) используем depth=0
+        // Если depth не передан, но есть locationId и это narrator - вероятно это welcome, используем depth=0
+        const finalDepth = depth !== undefined ? depth : (locationId && finalIsNarrator !== false ? 0 : undefined);
         // Используем depth, choiceIndex, parentHash для правильного сохранения цепочек диалогов
-        const audioPath = getPregenAudioPath(scenarioGameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash);
+        const audioPath = getPregenAudioPath(scenarioGameId, text, locationId, characterId, messageType, finalDepth, choiceIndex, parentHash);
         const audioDir = path.dirname(audioPath);
         try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
         fs.writeFileSync(audioPath, audioBuffer);
         
         // Сохраняем также текст
-        const textPath = getPregenTextPath(scenarioGameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash);
+        const textPath = getPregenTextPath(scenarioGameId, text, locationId, characterId, messageType, finalDepth, choiceIndex, parentHash);
         try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
         fs.writeFileSync(textPath, text, 'utf-8');
         
-        console.log(`[TTS] 💾 Saved generated audio and text for scenarioGameId=${scenarioGameId}, locationId=${locationId || 'none'}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+        console.log(`[TTS] 💾 Saved generated audio and text for scenarioGameId=${scenarioGameId}, locationId=${locationId || 'none'}, depth=${finalDepth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
       } catch (e) {
         console.warn('[TTS] Failed to save generated audio:', e);
       }

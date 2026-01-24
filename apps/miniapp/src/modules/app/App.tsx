@@ -953,11 +953,6 @@ const GameChat: React.FC = () => {
         return;
       }
       
-      // Добавляем сообщение с текстом
-      if (!lobbyId) {
-        setMessages((m) => [...m, { from: 'bot' as const, text: fullText }]);
-      }
-      
       setIsGenerating(false); // Скрываем "генерация"
       
       // Используем прегенерированное аудио, если оно есть
@@ -989,27 +984,26 @@ const GameChat: React.FC = () => {
           }
         } catch {}
       } else {
-        if (fullText) {
-          const txt = String(fullText);
-          setMessages((m) => {
-            const next = [...m, { from: 'bot' as const, text: txt }];
-            // Используем прегенерированное аудио, если есть
-            if (preGeneratedAudio?.data) {
-              console.log('[CLIENT] Using pre-generated audio from server response');
-              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
-              const audioUrl = URL.createObjectURL(audioBlob);
-              speakWithAudio(audioUrl, txt).catch((err) => {
-                console.error('[CLIENT] speakWithAudio failed:', err);
-              });
-            } else {
-              console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
-              speak(txt);
-            }
-            try { applyBgFromText(txt); } catch {}
-            if (!isFallback) saveChatHistory(id, next as any).catch(() => {});
-            return next;
+        const txt = String(fullText);
+        setMessages((m) => {
+          const next = [...m, { from: 'bot' as const, text: txt }];
+          return next;
+        });
+        
+        // Используем прегенерированное аудио, если есть
+        if (preGeneratedAudio?.data) {
+          console.log('[CLIENT] Using pre-generated audio from server response');
+          const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          speakWithAudio(audioUrl, txt).catch((err) => {
+            console.error('[CLIENT] speakWithAudio failed:', err);
           });
+        } else {
+          console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
+          speak(txt);
         }
+        try { applyBgFromText(txt); } catch {}
+        // saveChatHistory будет вызван автоматически через useEffect при изменении messages
       }
 
       // Адаптация под D&D 5e: Если сервер предложил бросок, открываем окно кубиков
