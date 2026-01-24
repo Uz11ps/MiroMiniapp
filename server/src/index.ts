@@ -3998,9 +3998,9 @@ app.post('/api/chat/welcome', async (req, res) => {
             }
           }
           
-          // Если включено использование прегенерированных материалов - НЕ генерируем в реальном времени
-          // Если не включено - генерируем в реальном времени, если прегенерированного нет
-          if (!audioData && !game?.usePregenMaterials) {
+          // Если прегенерированного аудио нет - генерируем в реальном времени
+          // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
+          if (!audioData) {
             const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
             const ttsUrl = `${apiBase}/api/tts`;
             console.log('[WELCOME] 🎤 Generating TTS for welcome message, text length:', text.length);
@@ -4024,17 +4024,30 @@ app.post('/api/chat/welcome', async (req, res) => {
               audioData = { buffer: audioBuffer, contentType };
               console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
               
-              // Сохраняем сгенерированное аудио для будущего использования
-              if (gameId && first?.id) {
+              // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
+              if (game?.usePregenMaterials && gameId && first?.id) {
                 try {
-                  const contextString = `${text.trim()}_${first.id}_narrator`;
-                  const textHash = crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
-                  const gameDir = path.join(PRAGEN_DIR, gameId);
-                  const locationDir = path.join(gameDir, first.id);
-                  try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
-                  const savePath = path.join(locationDir, `narrator_${textHash}.wav`);
-                  fs.writeFileSync(savePath, audioBuffer);
-                  console.log('[WELCOME] 💾 Saved generated audio for future use:', savePath);
+                  const audioPath = getPregenAudioPath(gameId, text, first.id, undefined, 'narrator');
+                  const audioDir = path.dirname(audioPath);
+                  try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+                  fs.writeFileSync(audioPath, audioBuffer);
+                  
+                  // Сохраняем также текст
+                  const textPath = audioPath.replace('.wav', '.txt');
+                  fs.writeFileSync(textPath, text, 'utf-8');
+                  
+                  console.log('[WELCOME] 💾 Saved generated audio and text for future use (usePregenMaterials=true):', audioPath);
+                } catch (e) {
+                  console.warn('[WELCOME] Failed to save generated audio:', e);
+                }
+              } else if (gameId && first?.id) {
+                // Сохраняем и при выключенном флаге для кэширования
+                try {
+                  const audioPath = getPregenAudioPath(gameId, text, first.id, undefined, 'narrator');
+                  const audioDir = path.dirname(audioPath);
+                  try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+                  fs.writeFileSync(audioPath, audioBuffer);
+                  console.log('[WELCOME] 💾 Saved generated audio for caching:', audioPath);
                 } catch (e) {
                   console.warn('[WELCOME] Failed to save generated audio:', e);
                 }
@@ -4946,9 +4959,9 @@ app.post('/api/chat/reply', async (req, res) => {
         }
       }
       
-      // Если включено использование прегенерированных материалов - НЕ генерируем в реальном времени
-      // Если не включено - генерируем в реальном времени, если прегенерированного нет
-      if (!audioData && !game?.usePregenMaterials) {
+      // Если прегенерированного аудио нет - генерируем в реальном времени
+      // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
+      if (!audioData) {
         const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
         const ttsUrl = `${apiBase}/api/tts`;
         
@@ -4977,18 +4990,30 @@ app.post('/api/chat/reply', async (req, res) => {
           const ttsDuration = Date.now() - ttsStartTime;
           console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
           
-          // Сохраняем сгенерированное аудио для будущего использования
-          if (gameId) {
+          // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
+          if (game?.usePregenMaterials && gameId) {
             try {
-              const contextString = `${text.trim()}_${locationId || ''}_${characterId || ''}_narrator`;
-              const textHash = crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
-              const subDir = locationId ? locationId : 'general';
-              const gameDir = path.join(PRAGEN_DIR, gameId);
-              const locationDir = path.join(gameDir, subDir);
-              try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
-              const savePath = path.join(locationDir, `narrator_${textHash}.wav`);
-              fs.writeFileSync(savePath, audioBuffer);
-              console.log('[REPLY] 💾 Saved generated audio for future use:', savePath);
+              const audioPath = getPregenAudioPath(gameId, text, locationId, characterId, 'narrator');
+              const audioDir = path.dirname(audioPath);
+              try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+              fs.writeFileSync(audioPath, audioBuffer);
+              
+              // Сохраняем также текст
+              const textPath = audioPath.replace('.wav', '.txt');
+              fs.writeFileSync(textPath, text, 'utf-8');
+              
+              console.log('[REPLY] 💾 Saved generated audio and text for future use (usePregenMaterials=true):', audioPath);
+            } catch (e) {
+              console.warn('[REPLY] Failed to save generated audio:', e);
+            }
+          } else if (gameId) {
+            // Сохраняем и при выключенном флаге для кэширования
+            try {
+              const audioPath = getPregenAudioPath(gameId, text, locationId, characterId, 'narrator');
+              const audioDir = path.dirname(audioPath);
+              try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+              fs.writeFileSync(audioPath, audioBuffer);
+              console.log('[REPLY] 💾 Saved generated audio for caching:', audioPath);
             } catch (e) {
               console.warn('[REPLY] Failed to save generated audio:', e);
             }
