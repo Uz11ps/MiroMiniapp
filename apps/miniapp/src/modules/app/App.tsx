@@ -20,7 +20,8 @@ function resolveAssetUrlGlobal(u?: string | null): string {
   return raw;
 }
 
-const BottomNav: React.FC = () => {
+// Мемоизируем BottomNav, чтобы он не пересоздавался при каждом рендере
+const BottomNav: React.FC = React.memo(() => {
   return (
     <nav className="bottom-nav">
       <NavLink to="/catalog" className={({ isActive }) => `bottom-item${isActive ? ' active' : ''}`}>Каталог</NavLink>
@@ -29,7 +30,7 @@ const BottomNav: React.FC = () => {
       <NavLink to="/profile" className={({ isActive }) => `bottom-item${isActive ? ' active' : ''}`}>Профиль</NavLink>
     </nav>
   );
-};
+});
 
 const GameChat: React.FC = () => {
   const navigate = useNavigate();
@@ -1647,7 +1648,9 @@ const CharacterDetails: React.FC = () => {
 
 const Layout: React.FC = () => {
   const location = useLocation();
-  const hideBottom = /^\/game\//.test(location.pathname);
+  // Мемоизируем проверку, чтобы не пересчитывать при каждом рендере
+  const hideBottom = useMemo(() => /^\/game\//.test(location.pathname), [location.pathname]);
+  
   return (
     <div className="screen">
       <Outlet />
