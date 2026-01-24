@@ -30,12 +30,11 @@ if (typeof document !== 'undefined') {
       console.warn('[CSS] ⚠️ CSS от Vite не найден, загружаем принудительно...');
       
       // Пробуем разные пути (dev и production)
-      const basePath = import.meta.env.DEV ? '/src/styles.css' : '/assets/styles.css';
+      // В dev режиме Vite обрабатывает /src/styles.css, в production - /assets/styles.[hash].css
       const paths = [
-        basePath,
         '/src/styles.css',
-        './src/styles.css',
         '/assets/styles.css',
+        './src/styles.css',
         './assets/styles.css'
       ];
       
