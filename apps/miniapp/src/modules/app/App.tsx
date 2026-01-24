@@ -2519,25 +2519,39 @@ export const App: React.FC = () => {
     const m = /^\/lobby\/([A-Za-z0-9-]+)/.exec(location.pathname);
     if (m) pLobby = m[1] ?? null;
     const next = qLobby || pLobby;
-    setActiveLobbyId(next);
-    try { if (next) window.localStorage.setItem('mira_active_lobby_id', next); } catch {}
+    // Обновляем только если значение действительно изменилось
+    setActiveLobbyId((prev) => {
+      if (prev === next) return prev;
+      try { if (next) window.localStorage.setItem('mira_active_lobby_id', next); } catch {}
+      return next;
+    });
   }, [location.pathname, location.search]);
+  const lobbyInitializedRef = React.useRef<boolean>(false);
   useEffect(() => {
     // начальная инициализация из localStorage, если нет в URL — но только если лобби ещё актуально (проверим членство)
+    // Защита от повторных запусков
+    if (lobbyInitializedRef.current || activeLobbyId) {
+      return;
+    }
+    lobbyInitializedRef.current = true;
+    
     (async () => {
-      if (!activeLobbyId) {
-        try {
-          const saved = window.localStorage.getItem('mira_active_lobby_id') || '';
-          if (saved) {
-            const my = await getMyLobbies().catch(() => []);
-            const exists = Array.isArray(my) && my.some((l) => l.id === saved);
-            if (exists) setActiveLobbyId(saved);
-            else window.localStorage.removeItem('mira_active_lobby_id');
-          }
-        } catch {}
-      }
+      try {
+        const saved = window.localStorage.getItem('mira_active_lobby_id') || '';
+        if (saved) {
+          const my = await getMyLobbies().catch(() => []);
+          const exists = Array.isArray(my) && my.some((l) => l.id === saved);
+          if (exists) setActiveLobbyId(saved);
+          else window.localStorage.removeItem('mira_active_lobby_id');
+        }
+      } catch {}
     })();
   }, [activeLobbyId]);
+  
+  // Сбрасываем флаг при смене location
+  useEffect(() => {
+    lobbyInitializedRef.current = false;
+  }, [location.pathname]);
   const lobbyProcessedRef = React.useRef<string | null>(null);
   useEffect(() => {
     // deep-link ?lobby=<id>
@@ -2567,7 +2581,7 @@ export const App: React.FC = () => {
       }
     });
     return () => { rt.close(); };
-  }, [activeLobbyId, navigate]);
+  }, [navigate]); // Убираем activeLobbyId из зависимостей, так как он не используется в эффекте
   // Глобальный fallback-пуллинг ТОЛЬКО по активному лобби
   useEffect(() => {
     if (!activeLobbyId) return;
