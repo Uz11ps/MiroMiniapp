@@ -7102,6 +7102,11 @@ app.post('/api/tts', async (req, res) => {
     const gender = typeof req.body?.gender === 'string' ? req.body.gender : undefined;
     const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : undefined; // undefined = автоопределение
     
+    // Параметры для цепочек диалогов (depth, choiceIndex, parentHash)
+    const depth = typeof req.body?.depth === 'number' ? req.body.depth : undefined;
+    const choiceIndex = typeof req.body?.choiceIndex === 'number' ? req.body.choiceIndex : undefined;
+    const parentHash = typeof req.body?.parentHash === 'string' ? req.body.parentHash : undefined;
+    
     // Логируем только важную информацию
     if (text.length > 500) {
       console.log(`[TTS] Request: ${text.length} chars, format=${format}`);
