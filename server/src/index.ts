@@ -407,13 +407,51 @@ app.patch('/api/games/:id', async (req, res) => {
 });
 
 app.delete('/api/games/:id', async (req, res) => {
+  const gameId = req.params.id;
   try {
     const prisma = getPrisma();
-    await prisma.game.delete({ where: { id: req.params.id } });
+    
+    // Устанавливаем флаг остановки для всех активных задач генерации этой игры
+    generationStopFlags.set(gameId, true);
+    console.log(`[GAME-DELETE] Stopping all generation tasks for game ${gameId}`);
+    
+    // Удаляем игру из БД
+    await prisma.game.delete({ where: { id: gameId } });
+    
+    // Удаляем все прегенерированные файлы игры
+    const gameDir = path.join(PRAGEN_DIR, gameId);
+    try {
+      if (fs.existsSync(gameDir)) {
+        fs.rmSync(gameDir, { recursive: true, force: true });
+        console.log(`[GAME-DELETE] Deleted pregenerated files directory: ${gameDir}`);
+      }
+    } catch (e) {
+      console.error(`[GAME-DELETE] Failed to delete pregenerated files for game ${gameId}:`, e);
+    }
+    
+    // Флаг остановки оставляем установленным, чтобы активные генерации могли его проверить и остановиться
+    // Он будет удален автоматически при следующем запуске генерации для этой игры (если она будет создана заново)
+    
     res.status(204).end();
   } catch {
-    const ok = deleteGame(req.params.id);
+    const ok = deleteGame(gameId);
     if (!ok) return res.status(404).json({ error: 'Not found' });
+    
+    // Устанавливаем флаг остановки
+    generationStopFlags.set(gameId, true);
+    
+    // Удаляем прегенерированные файлы
+    const gameDir = path.join(PRAGEN_DIR, gameId);
+    try {
+      if (fs.existsSync(gameDir)) {
+        fs.rmSync(gameDir, { recursive: true, force: true });
+        console.log(`[GAME-DELETE] Deleted pregenerated files directory: ${gameDir}`);
+      }
+    } catch (e) {
+      console.error(`[GAME-DELETE] Failed to delete pregenerated files for game ${gameId}:`, e);
+    }
+    
+    // Флаг остановки оставляем установленным, чтобы активные генерации могли его проверить и остановиться
     res.status(204).end();
   }
 });
@@ -1224,6 +1262,9 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
 
 type IngestJob = { status: 'queued' | 'running' | 'done' | 'error'; error?: string; gameId?: string; progress?: string };
 const ingestJobs = new Map<string, IngestJob>();
+
+// Map для отслеживания флагов остановки генерации по gameId
+const generationStopFlags = new Map<string, boolean>();
 
 app.post('/api/admin/ingest-import', (req, res, next) => {
   upload.fields([
@@ -7493,6 +7534,9 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
       return res.status(400).json({ error: 'no_locations' });
     }
     
+    // Сбрасываем флаг остановки при запуске новой генерации
+    generationStopFlags.delete(gameId);
+    
     // Запускаем прегенерацию асинхронно
     const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
     res.json({ 
@@ -7512,6 +7556,12 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
       console.log(`[PRAGEN-TTS] Starting pre-generation for game ${gameId}, ${game.locations.length} locations`);
       
       for (let i = 0; i < game.locations.length; i++) {
+        // Проверяем флаг остановки перед каждой итерацией
+        if (generationStopFlags.get(gameId)) {
+          console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} at location ${i + 1}/${game.locations.length}`);
+          break;
+        }
+        
         const location = game.locations[i];
         if (!location) continue;
         
@@ -7565,8 +7615,25 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             }
           }
           
+          // Проверяем флаг остановки перед генерацией
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} before generating text for location ${location.id}`);
+            break;
+          }
+          
           // Используем buildGptSceneContext, как в /api/chat/welcome
           const sc = await buildGptSceneContext(prisma, { gameId, userId: tempSessionCreated ? tempUserId : null, history: [] });
+          
+          // Проверяем флаг остановки после получения контекста
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} after getting context for location ${location.id}`);
+            if (tempSessionCreated) {
+              try {
+                await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+              } catch {}
+            }
+            break;
+          }
           
           // Удаляем временную сессию после использования
           if (tempSessionCreated) {
@@ -7581,6 +7648,12 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             userPrompt: 'Контекст сцены:\n' + sc,
             history: []
           });
+          
+          // Проверяем флаг остановки после генерации текста
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} after generating text for location ${location.id}`);
+            break;
+          }
           
           let text = generatedText || (location.description || `Сцена: ${location.title}`);
           if (text) {
@@ -7631,16 +7704,31 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             failCount++;
           }
           
+          // Проверяем флаг остановки перед задержкой
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} after processing location ${location.id}`);
+            break;
+          }
+          
           // Небольшая задержка между запросами, чтобы не перегружать API
           await new Promise(resolve => setTimeout(resolve, 1000));
           
         } catch (e) {
+          // Проверяем флаг остановки при ошибке
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-TTS] Generation stopped for game ${gameId} due to error`);
+            break;
+          }
           console.error(`[PRAGEN-TTS] ❌ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - Error:`, e);
           failCount++;
         }
       }
       
-      console.log(`[PRAGEN-TTS] ✅ Pre-generation completed: ${successCount} success, ${failCount} failed`);
+      if (generationStopFlags.get(gameId)) {
+        console.log(`[PRAGEN-TTS] ⚠️ Pre-generation stopped for game ${gameId}: ${successCount} success, ${failCount} failed`);
+      } else {
+        console.log(`[PRAGEN-TTS] ✅ Pre-generation completed: ${successCount} success, ${failCount} failed`);
+      }
     })().catch(e => {
       console.error('[PRAGEN-TTS] Fatal error:', e);
     });
@@ -7680,6 +7768,9 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       return res.status(400).json({ error: 'no_locations' });
     }
     
+    // Сбрасываем флаг остановки при запуске новой генерации
+    generationStopFlags.delete(gameId);
+    
     // Запускаем прегенерацию асинхронно
     const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
     res.json({ 
@@ -7711,6 +7802,12 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       
       // Функция для генерации текста и аудио для локации
       const generateLocationTTS = async (location: any, index: number) => {
+        // Проверяем флаг остановки в начале функции
+        if (generationStopFlags.get(gameId)) {
+          console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} before processing location ${location.id}`);
+          return false;
+        }
+        
         try {
           const locationDir = path.join(gameDir, location.id);
           try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
@@ -7761,8 +7858,30 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             }
           }
           
+          // Проверяем флаг остановки перед генерацией
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} before generating text for location ${location.id}`);
+            if (tempSessionCreated) {
+              try {
+                await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+              } catch {}
+            }
+            return false;
+          }
+          
           // Используем buildGptSceneContext, как в /api/chat/welcome
           const sc = await buildGptSceneContext(prisma, { gameId, userId: tempSessionCreated ? tempUserId : null, history: [] });
+          
+          // Проверяем флаг остановки после получения контекста
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after getting context for location ${location.id}`);
+            if (tempSessionCreated) {
+              try {
+                await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: tempUserId } }).catch(() => {});
+              } catch {}
+            }
+            return false;
+          }
           
           // Удаляем временную сессию после использования
           if (tempSessionCreated) {
@@ -7777,6 +7896,12 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             userPrompt: 'Контекст сцены:\n' + sc,
             history: []
           });
+          
+          // Проверяем флаг остановки после генерации текста
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after generating text for location ${location.id}`);
+            return false;
+          }
           
           let text = generatedText || (location.description || `Сцена: ${location.title}`);
           if (text) {
@@ -7823,6 +7948,11 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               depth: number,
               locationId: string
             ): Promise<void> => {
+              // Проверяем флаг остановки в начале рекурсивной функции
+              if (generationStopFlags.get(gameId)) {
+                return;
+              }
+              
               if (depth >= MAX_DIALOGUE_DEPTH) {
                 return; // Достигли максимальной глубины
               }
@@ -7994,12 +8124,25 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                     console.log(`[PRAGEN-ALL] ✅ Dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..."`);
                     choiceResponseSuccessCount++;
                     
+                    // Проверяем флаг остановки перед рекурсивной генерацией
+                    if (generationStopFlags.get(gameId)) {
+                      return;
+                    }
+                    
                     // Парсим варианты из ответа и рекурсивно генерируем ответы на них
                     const nextChoices = parseChoiceOptions(formattedChoiceText);
                     if (nextChoices.length > 0 && depth < MAX_DIALOGUE_DEPTH - 1) {
                       const newHistory = [...parentHistory, { from: 'me', text: choiceText }, { from: 'bot', text: formattedChoiceText }];
                       for (const nextChoice of nextChoices) {
+                        // Проверяем флаг остановки перед каждой рекурсивной итерацией
+                        if (generationStopFlags.get(gameId)) {
+                          return;
+                        }
                         await generateDialogueChain(formattedChoiceText, newHistory, nextChoice, depth + 1, locationId);
+                        // Проверяем флаг остановки перед задержкой
+                        if (generationStopFlags.get(gameId)) {
+                          return;
+                        }
                         // Небольшая задержка между запросами
                         await new Promise(resolve => setTimeout(resolve, 1000));
                       }
@@ -8019,16 +8162,29 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
               }
             };
             
+            // Проверяем флаг остановки перед генерацией диалогов
+            if (generationStopFlags.get(gameId)) {
+              return true; // Возвращаем true, так как основная генерация локации успешна
+            }
+            
             // Используем РЕАЛЬНЫЕ кнопки (exits) из базы данных, а не парсим из текста
             const exits = location.exits || [];
             if (exits.length > 0) {
               console.log(`[PRAGEN-ALL] Found ${exits.length} exits (buttons) for location ${location.title}, generating ALL dialogue chains...`);
               const initialHistory = [{ from: 'bot', text }];
               for (let exitIdx = 0; exitIdx < exits.length; exitIdx++) {
+                // Проверяем флаг остановки перед каждой итерацией
+                if (generationStopFlags.get(gameId)) {
+                  break;
+                }
                 const exit = exits[exitIdx];
                 // Используем buttonText или triggerText из базы данных
                 const choiceText = exit.buttonText || exit.triggerText || `Вариант ${exitIdx + 1}`;
                 await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
+                // Проверяем флаг остановки перед задержкой
+                if (generationStopFlags.get(gameId)) {
+                  break;
+                }
                 // Небольшая задержка между начальными вариантами
                 await new Promise(resolve => setTimeout(resolve, 1000));
               }
@@ -8039,8 +8195,16 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                 console.log(`[PRAGEN-ALL] No exits in DB, parsing ${choices.length} choice options from text for location ${location.title}, generating ALL dialogue chains...`);
                 const initialHistory = [{ from: 'bot', text }];
                 for (let choiceIdx = 0; choiceIdx < choices.length; choiceIdx++) {
+                  // Проверяем флаг остановки перед каждой итерацией
+                  if (generationStopFlags.get(gameId)) {
+                    break;
+                  }
                   const choiceText = choices[choiceIdx];
                   await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
+                  // Проверяем флаг остановки перед задержкой
+                  if (generationStopFlags.get(gameId)) {
+                    break;
+                  }
                   // Небольшая задержка между начальными вариантами
                   await new Promise(resolve => setTimeout(resolve, 1000));
                 }
@@ -8061,6 +8225,11 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       // Функция для генерации текста и аудио для варианта
       // Используем ТОЧНО ТУ ЖЕ логику, что и в /api/engine/session/:id/describe
       const generateExitTTS = async (exit: any, fromLocation: any, targetLocation: any, exitIndex: number, totalExits: number) => {
+        // Проверяем флаг остановки в начале функции
+        if (generationStopFlags.get(gameId)) {
+          return false;
+        }
+        
         try {
           if (!exit.targetLocationId) {
             return false; // Пропускаем варианты без целевой локации
@@ -8106,12 +8275,22 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             npcs,
           ].filter(Boolean).join('\n\n');
           
+          // Проверяем флаг остановки перед генерацией текста
+          if (generationStopFlags.get(gameId)) {
+            return false;
+          }
+          
           // Генерируем текст ТОЧНО так же, как в /api/engine/session/:id/describe
           const { text: generatedText } = await generateChatCompletion({
             systemPrompt: sys,
             userPrompt: user,
             history: []
           });
+          
+          // Проверяем флаг остановки после генерации текста
+          if (generationStopFlags.get(gameId)) {
+            return false;
+          }
           
           let text = generatedText || (targetLocation.description || `Сцена: ${targetLocation.title}`);
           if (text) {
@@ -8162,6 +8341,12 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
       
       // Прегенерация для всех локаций
       for (let i = 0; i < game.locations.length; i++) {
+        // Проверяем флаг остановки перед каждой итерацией
+        if (generationStopFlags.get(gameId)) {
+          console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} at location ${i + 1}/${game.locations.length}`);
+          break;
+        }
+        
         const location = game.locations[i];
         if (!location) continue;
         
@@ -8172,42 +8357,76 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
           locationFailCount++;
         }
         
+        // Проверяем флаг остановки перед задержкой
+        if (generationStopFlags.get(gameId)) {
+          console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after processing location ${location.id}`);
+          break;
+        }
+        
         // Небольшая задержка между запросами
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
       // Прегенерация для всех вариантов
-      const allExits: Array<{ exit: any; fromLocation: any; targetLocation: any }> = [];
-      for (const location of game.locations) {
-        if (!location.exits || location.exits.length === 0) continue;
+      // Проверяем флаг остановки перед началом прегенерации вариантов
+      if (generationStopFlags.get(gameId)) {
+        console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} before processing exits`);
+      } else {
+        const allExits: Array<{ exit: any; fromLocation: any; targetLocation: any }> = [];
+        for (const location of game.locations) {
+          // Проверяем флаг остановки при сборе exits
+          if (generationStopFlags.get(gameId)) {
+            break;
+          }
+          if (!location.exits || location.exits.length === 0) continue;
+          
+          for (const exit of location.exits) {
+            if (!exit.targetLocationId) continue; // Пропускаем варианты без целевой локации
+            
+            const targetLocation = game.locations.find(l => l.id === exit.targetLocationId);
+            if (!targetLocation) continue;
+            
+            allExits.push({ exit, fromLocation: location, targetLocation });
+          }
+        }
         
-        for (const exit of location.exits) {
-          if (!exit.targetLocationId) continue; // Пропускаем варианты без целевой локации
+        for (let i = 0; i < allExits.length; i++) {
+          // Проверяем флаг остановки перед каждой итерацией
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} at exit ${i + 1}/${allExits.length}`);
+            break;
+          }
           
-          const targetLocation = game.locations.find(l => l.id === exit.targetLocationId);
-          if (!targetLocation) continue;
+          const { exit, fromLocation, targetLocation } = allExits[i];
+          const success = await generateExitTTS(exit, fromLocation, targetLocation, i, allExits.length);
+          if (success) {
+            exitSuccessCount++;
+          } else {
+            exitFailCount++;
+          }
           
-          allExits.push({ exit, fromLocation: location, targetLocation });
+          // Проверяем флаг остановки перед задержкой
+          if (generationStopFlags.get(gameId)) {
+            console.log(`[PRAGEN-ALL] Generation stopped for game ${gameId} after processing exit ${exit.id}`);
+            break;
+          }
+          
+          // Небольшая задержка между запросами
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
       
-      for (let i = 0; i < allExits.length; i++) {
-        const { exit, fromLocation, targetLocation } = allExits[i];
-        const success = await generateExitTTS(exit, fromLocation, targetLocation, i, allExits.length);
-        if (success) {
-          exitSuccessCount++;
-        } else {
-          exitFailCount++;
-        }
-        
-        // Небольшая задержка между запросами
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      if (generationStopFlags.get(gameId)) {
+        console.log(`[PRAGEN-ALL] ⚠️ Pre-generation stopped for game ${gameId}:`);
+        console.log(`[PRAGEN-ALL]   Locations: ${locationSuccessCount} success, ${locationFailCount} failed`);
+        console.log(`[PRAGEN-ALL]   Exits: ${exitSuccessCount} success, ${exitFailCount} failed`);
+        console.log(`[PRAGEN-ALL]   Choice responses: ${choiceResponseSuccessCount} success, ${choiceResponseFailCount} failed`);
+      } else {
+        console.log(`[PRAGEN-ALL] ✅ Full pre-generation completed:`);
+        console.log(`[PRAGEN-ALL]   Locations: ${locationSuccessCount} success, ${locationFailCount} failed`);
+        console.log(`[PRAGEN-ALL]   Exits: ${exitSuccessCount} success, ${exitFailCount} failed`);
+        console.log(`[PRAGEN-ALL]   Choice responses: ${choiceResponseSuccessCount} success, ${choiceResponseFailCount} failed`);
       }
-      
-      console.log(`[PRAGEN-ALL] ✅ Full pre-generation completed:`);
-      console.log(`[PRAGEN-ALL]   Locations: ${locationSuccessCount} success, ${locationFailCount} failed`);
-      console.log(`[PRAGEN-ALL]   Exits: ${exitSuccessCount} success, ${exitFailCount} failed`);
-      console.log(`[PRAGEN-ALL]   Choice responses: ${choiceResponseSuccessCount} success, ${choiceResponseFailCount} failed`);
     })().catch(e => {
       console.error('[PRAGEN-ALL] Fatal error:', e);
     });
