@@ -811,8 +811,15 @@ const GameChat: React.FC = () => {
       }
       if (e.type === 'chat_updated' && e.lobbyId === lobbyId) {
         getChatHistory(id, lobbyId).then((h) => {
-          if (Array.isArray(h)) {
-            setMessages(h as any);
+          if (Array.isArray(h) && h.length > 0) {
+            // Обновляем только если есть новые сообщения, чтобы избежать лишних обновлений
+            setMessages((prev) => {
+              // Проверяем, действительно ли есть изменения
+              if (prev.length === h.length && prev.every((m, i) => m.text === h[i]?.text && m.from === h[i]?.from)) {
+                return prev; // Нет изменений, возвращаем старое состояние
+              }
+              return h as any;
+            });
             const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
             if (lastBot?.text) {
               speak(lastBot.text);
@@ -1048,8 +1055,17 @@ const GameChat: React.FC = () => {
     }
   }, [id, messages, lobbyId]);
 
+  const welcomeLoadedRef = React.useRef<boolean>(false);
   useEffect(() => {
+    // Защита от повторных запусков
+    if (welcomeLoadedRef.current || messages.length > 0 || isGenerating) {
+      return;
+    }
+    
     const run = async () => {
+      // Помечаем, что загрузка началась
+      welcomeLoadedRef.current = true;
+      
       try {
         const hist = await getChatHistory(id, lobbyId);
         if (hist && hist.length) {
@@ -1161,8 +1177,13 @@ const GameChat: React.FC = () => {
         setMessages((m) => { const next = [...m, { from: 'bot' as const, text: 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.' }]; return next; });
       }
     };
-    if (!messages.length) run();
+    run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, lobbyId]);
+  
+  // Сбрасываем флаг при смене игры или лобби
+  useEffect(() => {
+    welcomeLoadedRef.current = false;
   }, [id, lobbyId]);
 
   const fileInputId = 'file_input_hidden';
@@ -2517,20 +2538,25 @@ export const App: React.FC = () => {
       }
     })();
   }, [activeLobbyId]);
+  const lobbyProcessedRef = React.useRef<string | null>(null);
   useEffect(() => {
     // deep-link ?lobby=<id>
     const params = new URLSearchParams(location.search);
     const lobId = params.get('lobby');
-    // Обрабатываем только если мы НЕ на страницах лобби/игры
-    if (lobId && !/^\/(lobby|game)\//.test(location.pathname)) {
+    // Обрабатываем только если мы НЕ на страницах лобби/игры и еще не обрабатывали этот лобби
+    if (lobId && !/^\/(lobby|game)\//.test(location.pathname) && lobbyProcessedRef.current !== lobId) {
+      lobbyProcessedRef.current = lobId;
       (async () => {
         try {
           await joinLobby(lobId).catch(() => {});
           navigate(`/lobby/${lobId}`, { replace: true });
         } catch {}
       })();
+    } else if (!lobId) {
+      // Сбрасываем флаг, если лобби нет в URL
+      lobbyProcessedRef.current = null;
     }
-  }, [location.search, navigate]);
+  }, [location.search, location.pathname, navigate]);
   useEffect(() => {
     const rt = connectRealtime((e) => {
       if (e.type === 'lobby_invite') {
