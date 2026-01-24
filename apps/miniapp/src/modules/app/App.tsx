@@ -44,6 +44,7 @@ const GameChat: React.FC = () => {
   const [showUser, setShowUser] = useState<{ name: string; avatar: string } | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{ from: 'bot' | 'me'; text: string }>>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [recOn, setRecOn] = useState(false);
   const recRef = React.useRef<MediaRecorder | null>(null);
   const recChunksRef = React.useRef<BlobPart[]>([]);
@@ -265,6 +266,59 @@ const GameChat: React.FC = () => {
         resolve();
       });
     });
+  };
+
+  // Функция для воспроизведения прегенерированного аудио
+  const speakWithAudio = async (audioUrl: string, text: string) => {
+    try {
+      const t = String(text || '');
+      if (!t.trim()) return;
+      
+      console.log('[TTS-CLIENT] Using pre-generated audio for text:', t.slice(0, 100));
+      const seq = ++speakSeqRef.current;
+      activeSpeakSeqRef.current = seq;
+      speakingInFlightRef.current = true;
+      
+      // Остановить предыдущее воспроизведение
+      try {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current.src = '';
+          audioRef.current.load();
+          audioRef.current = null;
+        }
+        if (audioUrlRef.current) {
+          URL.revokeObjectURL(audioUrlRef.current);
+          audioUrlRef.current = null;
+        }
+      } catch {}
+      
+      // Создаем новый audio элемент
+      const audio = new Audio(audioUrl);
+      audioRef.current = audio;
+      audioUrlRef.current = audioUrl;
+      
+      await new Promise<void>((resolve, reject) => {
+        audio.onended = () => {
+          if (seq === activeSpeakSeqRef.current) {
+            lastSpokenRef.current = t;
+            speakingInFlightRef.current = false;
+          }
+          resolve();
+        };
+        audio.onerror = (e) => {
+          console.error('[TTS-CLIENT] Audio playback error:', e);
+          speakingInFlightRef.current = false;
+          reject(e);
+        };
+        audio.play().catch(reject);
+      });
+    } catch (err) {
+      console.error('[TTS-CLIENT] speakWithAudio error:', err);
+      speakingInFlightRef.current = false;
+      // Fallback на обычный синтез
+      speak(text);
+    }
   };
 
   const speak = async (text: string, context?: { characterId?: string; locationId?: string; gender?: string; isNarrator?: boolean }) => {
@@ -850,8 +904,10 @@ const GameChat: React.FC = () => {
       if (self.tgId) body.tgId = self.tgId;
       if (self.tgUsername) body.tgUsername = self.tgUsername;
       if (!body.userId && !body.tgId && !body.tgUsername) body.deviceId = getDeviceIdLocal();
+      setIsGenerating(true); // Показываем "генерация"
       const r = await fetch(`${apiBase}/chat/reply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!r.ok) {
+        setIsGenerating(false);
         const err = await r.json().catch(() => ({} as any));
         if (r.status === 403 && (err?.error === 'not_your_turn')) {
           alert('Сейчас ход другого игрока.');
@@ -863,7 +919,12 @@ const GameChat: React.FC = () => {
         return;
       }
       const data = await r.json();
+      setIsGenerating(false); // Скрываем "генерация"
       const isFallback = Boolean((data as any)?.fallback);
+      
+      // Используем прегенерированное аудио, если оно есть
+      const preGeneratedAudio = (data as any)?.audio;
+      
       // Если сервер просит бросок (requestDice) — ТОЛЬКО покажем подсказку в ленте (она уже в истории),
       // авто‑окно и авто‑бросок не открываем: пользователь сам нажмёт 🎲.
       if (lobbyId) {
@@ -873,11 +934,42 @@ const GameChat: React.FC = () => {
           if (Array.isArray(h)) {
             setMessages(h as any);
             const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
-            if (lastBot?.text) speak(lastBot.text);
+            if (lastBot?.text) {
+              // Используем прегенерированное аудио, если есть
+              if (preGeneratedAudio?.data) {
+                const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                speakWithAudio(audioUrl, lastBot.text);
+              } else {
+                speak(lastBot.text);
+              }
+            }
           }
         } catch {}
       } else {
-        if (data?.message) setMessages((m) => { const txt = String(data.message); const next = [...m, { from: 'bot' as const, text: txt }]; speak(txt); try { applyBgFromText(txt); } catch {} if (!isFallback) saveChatHistory(id, next as any).catch(() => {}); return next; });
+        if (data?.message) {
+          const txt = String(data.message);
+          setMessages((m) => {
+            const next = [...m, { from: 'bot' as const, text: txt }];
+            // Используем прегенерированное аудио, если есть - НЕ вызываем speak() чтобы избежать повторного запроса
+            if (preGeneratedAudio?.data) {
+              console.log('[CLIENT] Using pre-generated audio from server response');
+              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+              const audioUrl = URL.createObjectURL(audioBlob);
+              speakWithAudio(audioUrl, txt).catch((err) => {
+                console.error('[CLIENT] speakWithAudio failed, falling back to speak:', err);
+                speak(txt);
+              });
+            } else {
+              // Если прегенерированного аудио нет, используем обычный синтез
+              console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
+              speak(txt);
+            }
+            try { applyBgFromText(txt); } catch {}
+            if (!isFallback) saveChatHistory(id, next as any).catch(() => {});
+            return next;
+          });
+        }
       }
 
       // Адаптация под D&D 5e: Если сервер предложил бросок, открываем окно кубиков
@@ -951,7 +1043,10 @@ const GameChat: React.FC = () => {
           }
           setMessages(list as any);
           const lastBot = [...list].reverse().find((m: any) => m.from === 'bot');
-          if (lastBot?.text) { speak(lastBot.text); applyBgFromText(lastBot.text); }
+          if (lastBot?.text) {
+            // НЕ вызываем speak() здесь - аудио уже прегенерировано и будет использовано из ответа
+            applyBgFromText(lastBot.text);
+          }
           if (modified) { try { await saveChatHistory(id, list as any); } catch {} }
           return;
         }
@@ -965,17 +1060,21 @@ const GameChat: React.FC = () => {
         if (self.tgUsername) body.tgUsername = self.tgUsername;
         body.deviceId = getDeviceIdLocal();
         if (lobbyId) body.lobbyId = lobbyId;
+        setIsGenerating(true); // Показываем "генерация"
         const r = await fetch(`${apiBase}/chat/welcome`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         const ok = r.ok;
         let text = '';
         let isFallback = false;
         let rd: any = null;
+        let preGeneratedAudio: any = null;
         try {
           const data = await r.json();
           text = (data && typeof data.message === 'string') ? data.message : '';
           isFallback = Boolean((data as any).fallback);
           rd = (data as any).requestDice;
+          preGeneratedAudio = (data as any)?.audio;
         } catch {}
+        setIsGenerating(false); // Скрываем "генерация"
         if (lobbyId) {
           // Для лобби НИКОГДА не создаём своё приветствие: ждём общее из сервера
           for (let i = 0; i < 6; i++) {
@@ -1006,7 +1105,20 @@ const GameChat: React.FC = () => {
               isFallback = true;
             }
           }
-          setMessages((m) => { const next = [...m, { from: 'bot' as const, text }]; try { speak(text); applyBgFromText(text); } catch {} if (!isFallback) saveChatHistory(id, next as any).catch(() => {}); return next; });
+          setMessages((m) => {
+            const next = [...m, { from: 'bot' as const, text }];
+            // Используем прегенерированное аудио, если есть
+            if (preGeneratedAudio?.data) {
+              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+              const audioUrl = URL.createObjectURL(audioBlob);
+              speakWithAudio(audioUrl, text).catch(() => speak(text));
+            } else {
+              try { speak(text); } catch {}
+            }
+            try { applyBgFromText(text); } catch {}
+            if (!isFallback) saveChatHistory(id, next as any).catch(() => {});
+            return next;
+          });
           if (rd) {
             setTimeout(() => { rollDiceUi(rd); }, 1200);
           }
@@ -1085,6 +1197,12 @@ const GameChat: React.FC = () => {
           </div>
           );
         })}
+        {isGenerating && (
+          <div className="msg">
+            <div className="avatar"><img src={(gmAvatar || 'https://picsum.photos/seed/master/64/64')} alt="bot" /></div>
+            <div className="bubble" style={{ opacity: 0.7, fontStyle: 'italic' }}>Генерация...</div>
+          </div>
+        )}
       </div>
 
       <div style={{ height: 4 }} />

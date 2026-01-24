@@ -3838,13 +3838,56 @@ app.post('/api/chat/welcome', async (req, res) => {
           text = offlineText;
         }
       }
+      // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ для первого сообщения
+      let audioData: { buffer: Buffer; contentType: string } | null = null;
+      if (text) {
+        try {
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const ttsUrl = `${apiBase}/api/tts`;
+          console.log('[WELCOME] 🎤 Pre-generating TTS for welcome message, text length:', text.length);
+          
+          const ttsResponse = await undiciFetch(ttsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text,
+              gameId,
+              locationId: first?.id,
+              format: 'oggopus'
+            }),
+            signal: AbortSignal.timeout(120000)
+          });
+          
+          if (ttsResponse.ok) {
+            const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+            audioData = { buffer: audioBuffer, contentType };
+            console.log('[WELCOME] ✅ TTS pre-generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+          } else {
+            console.warn('[WELCOME] TTS pre-generation failed:', ttsResponse.status);
+          }
+        } catch (ttsErr: any) {
+          console.warn('[WELCOME] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
+        }
+      }
+      
       await prisma.chatSession.upsert({
         where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
         update: { history: ([{ from: 'bot', text }] as any) },
         create: { userId: 'lobby:' + lobbyId, gameId, history: ([{ from: 'bot', text }] as any) },
       });
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
-      return res.json({ message: '', fallback: !Boolean(apiKey) });
+      
+      const response: any = { message: text || '', fallback: !Boolean(apiKey) };
+      if (audioData) {
+        response.audio = {
+          data: audioData.buffer.toString('base64'),
+          contentType: audioData.contentType,
+          format: 'base64'
+        };
+        console.log('[WELCOME] ✅ Returning pre-generated audio with welcome message');
+      }
+      return res.json(response);
     }
     // SOLO: стартуем/возобновляем движок c первой локации и даём описание с действиями из сцены
     const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
@@ -3898,12 +3941,56 @@ app.post('/api/chat/welcome', async (req, res) => {
       }
     }
     text = (text || '').trim();
+    
+    // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ для первого сообщения (SOLO режим)
+    let audioData: { buffer: Buffer; contentType: string } | null = null;
+    if (text) {
+      try {
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts`;
+        console.log('[WELCOME] 🎤 Pre-generating TTS for welcome message (SOLO), text length:', text.length);
+        
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            gameId,
+            locationId: first?.id,
+            format: 'oggopus'
+          }),
+          signal: AbortSignal.timeout(120000)
+        });
+        
+        if (ttsResponse.ok) {
+          const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          audioData = { buffer: audioBuffer, contentType };
+          console.log('[WELCOME] ✅ TTS pre-generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
+        } else {
+          console.warn('[WELCOME] TTS pre-generation failed (SOLO):', ttsResponse.status);
+        }
+      } catch (ttsErr: any) {
+        console.warn('[WELCOME] TTS pre-generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
+      }
+    }
+    
     await prisma.chatSession.upsert({
       where: { userId_gameId: { userId: uid, gameId } },
       update: { history: ([{ from: 'bot', text }] as any) },
       create: { userId: uid, gameId, history: ([{ from: 'bot', text }] as any) },
     });
-    return res.json({ message: text, fallback: !Boolean(client) });
+    
+    const response: any = { message: text, fallback: !Boolean(client) };
+    if (audioData) {
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType,
+        format: 'base64'
+      };
+      console.log('[WELCOME] ✅ Returning pre-generated audio with welcome message (SOLO)');
+    }
+    return res.json(response);
   } catch (e) {
     console.error('Welcome handler error:', e);
     return res.json({ message: 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.', fallback: true });
@@ -4597,6 +4684,7 @@ app.post('/api/chat/reply', async (req, res) => {
       const ttsUrl = `${apiBase}/api/tts`;
       
       console.log('[REPLY] Calling TTS endpoint for pre-generation...');
+      const ttsStartTime = Date.now();
       const ttsResponse = await undiciFetch(ttsUrl, {
         method: 'POST',
         headers: {
@@ -4618,13 +4706,15 @@ app.post('/api/chat/reply', async (req, res) => {
         const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
         const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
         audioData = { buffer: audioBuffer, contentType };
-        console.log('[REPLY] ✅ TTS pre-generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+        const ttsDuration = Date.now() - ttsStartTime;
+        console.log(`[REPLY] ✅ TTS pre-generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
       } else {
         const errorText = await ttsResponse.text().catch(() => '');
         console.warn('[REPLY] TTS pre-generation failed:', ttsResponse.status, errorText.slice(0, 200));
       }
       
       // Сохраняем аудио в переменную для возврата клиенту
+      // КРИТИЧЕСКИ ВАЖНО: ответ отправляется ТОЛЬКО после завершения TTS
       (req as any).preGeneratedAudio = audioData;
     } catch (ttsErr: any) {
       console.warn('[REPLY] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
