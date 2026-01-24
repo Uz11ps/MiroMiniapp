@@ -5538,6 +5538,87 @@ app.post('/api/chat/reply', async (req, res) => {
   }
 });
 
+// Потоковый endpoint для генерации текста с параллельной генерацией TTS
+app.post('/api/chat/reply-stream', async (req, res) => {
+  const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
+  const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
+  
+  // Настраиваем SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  
+  const sendSSE = (event: string, data: any) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  
+  try {
+    const prisma = getPrisma();
+    
+    // Получаем игру и настраиваем промпты (упрощенная версия из основного endpoint)
+    const game = gameId ? await prisma.game.findUnique({ where: { id: gameId } }) : null;
+    const sys = game?.systemPrompt || getSysPrompt();
+    
+    // Генерируем текст через Gemini 2.5 Pro (используем generateChatCompletion, который уже использует gemini-2.5-pro)
+    sendSSE('status', { type: 'generating_text' });
+    const { text: generatedText } = await generateChatCompletion({
+      systemPrompt: sys,
+      userPrompt: userText,
+      history: history
+    });
+    const fullText = generatedText || '';
+    sendSSE('text_complete', { text: fullText });
+    
+    // Параллельно запускаем генерацию TTS
+    sendSSE('status', { type: 'generating_audio' });
+    
+    (async () => {
+      try {
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts`;
+        
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: fullText,
+            gameId: gameId || undefined,
+            format: 'wav',
+            isNarrator: true
+          }),
+          signal: AbortSignal.timeout(60000)
+        });
+        
+        if (ttsResponse.ok) {
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          const audioBase64 = audioBuffer.toString('base64');
+          sendSSE('audio_ready', { 
+            audio: audioBase64,
+            contentType: 'audio/wav',
+            format: 'base64'
+          });
+        } else {
+          sendSSE('audio_error', { error: 'TTS generation failed' });
+        }
+      } catch (ttsErr) {
+        sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
+      }
+    })();
+    
+    // Закрываем соединение после небольшой задержки
+    setTimeout(() => {
+      res.end();
+    }, 100);
+    
+  } catch (e) {
+    sendSSE('error', { error: String(e) });
+    res.end();
+  }
+});
+
 function advanceTurn(lobbyId: string) {
   const t = lobbyTurns.get(lobbyId);
   if (!t || !t.order.length) return;
@@ -9856,7 +9937,7 @@ async function generateViaGeminiText(params: {
   apiKey: string;
   modelName?: string;
 }): Promise<string> {
-  const { systemPrompt, userPrompt, history = [], apiKey, modelName = process.env.GEMINI_MODEL || 'gemini-2.5-pro' } = params;
+  const { systemPrompt, userPrompt, history = [], apiKey, modelName = 'gemini-2.5-pro' } = params; // ВСЕГДА используем gemini-2.5-pro
   
   const proxies = parseGeminiProxies();
   const attempts = proxies.length ? proxies : ['__direct__'];
@@ -9957,9 +10038,43 @@ async function generateChatCompletion(params: {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
   const openaiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
   
-  // Проверяем, какой провайдер использовать для прегенерации (если указан)
+  // ВСЕГДА используем Gemini 2.5 Pro для генерации текста (кроме случаев, когда явно указан OpenAI)
   const pregenProvider = process.env.PREGEN_AI_PROVIDER?.toLowerCase();
   const preferOpenAI = pregenProvider === 'openai' || pregenProvider === 'gpt';
+
+  // Сначала пробуем Gemini 2.5 Pro (если не указан явно OpenAI)
+  if (geminiKey && !preferOpenAI) {
+    try {
+      // Для Gemini используем расширенную историю без обрезки (или с минимальной)
+      const chatHistory = (params.history || []).map(h => ({
+        role: (h.from === 'bot' ? 'model' : 'user') as any,
+        content: h.text
+      }));
+
+      const text = await generateViaGeminiText({
+        apiKey: geminiKey,
+        systemPrompt: params.systemPrompt,
+        userPrompt: params.userPrompt,
+        history: chatHistory,
+        modelName: 'gemini-2.5-pro' // ВСЕГДА используем gemini-2.5-pro
+      });
+      if (text) return { text, provider: 'gemini' };
+    } catch (e: any) {
+      const errorMsg = e?.error?.message || e?.message || String(e);
+      const isOverloaded = errorMsg.includes('overloaded') || errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE');
+      const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
+      console.error('[COMPLETION] Gemini failed:', errorMsg);
+      
+      // Если Gemini перегружен или квота превышена - переключаемся на OpenAI
+      if ((isOverloaded || isQuotaError) && openaiKey) {
+        console.log('[COMPLETION] Gemini overloaded/quota exceeded, switching to OpenAI');
+      } else {
+        if (openaiKey) {
+          console.log('[COMPLETION] Trying OpenAI as fallback');
+        }
+      }
+    }
+  }
 
   // Если указано использовать OpenAI для прегенерации и есть ключ - используем его
   if (preferOpenAI && openaiKey) {
@@ -9985,41 +10100,8 @@ async function generateChatCompletion(params: {
     }
   }
 
-  if (geminiKey && !preferOpenAI) {
-    try {
-      // Для Gemini используем расширенную историю без обрезки (или с минимальной)
-      const chatHistory = (params.history || []).map(h => ({
-        role: (h.from === 'bot' ? 'model' : 'user') as any,
-        content: h.text
-      }));
-
-      const text = await generateViaGeminiText({
-        apiKey: geminiKey,
-        systemPrompt: params.systemPrompt,
-        userPrompt: params.userPrompt,
-        history: chatHistory,
-        modelName: process.env.GEMINI_MODEL || 'gemini-2.5-pro'
-      });
-      if (text) return { text, provider: 'gemini' };
-    } catch (e: any) {
-      const errorMsg = e?.error?.message || e?.message || String(e);
-      const isOverloaded = errorMsg.includes('overloaded') || errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE');
-      const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
-      console.error('[COMPLETION] Gemini failed:', errorMsg);
-      
-      // Если Gemini перегружен или квота превышена - сразу переключаемся на OpenAI без ожидания
-      if ((isOverloaded || isQuotaError) && openaiKey) {
-        console.log('[COMPLETION] Gemini overloaded/quota exceeded, switching to OpenAI');
-      } else {
-        // Для других ошибок тоже пробуем OpenAI как fallback
-        if (openaiKey) {
-          console.log('[COMPLETION] Trying OpenAI as fallback');
-        }
-      }
-    }
-  }
-
-  if (openaiKey) {
+  // OpenAI используется только как fallback, если Gemini не сработал или явно указан preferOpenAI
+  if (openaiKey && (preferOpenAI || !geminiKey)) {
     try {
       const client = createOpenAIClient(openaiKey);
       // Для OpenAI оставляем обрезку или стандартное поведение

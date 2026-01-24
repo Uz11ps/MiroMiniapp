@@ -909,25 +909,165 @@ const GameChat: React.FC = () => {
       if (self.tgUsername) body.tgUsername = self.tgUsername;
       if (!body.userId && !body.tgId && !body.tgUsername) body.deviceId = getDeviceIdLocal();
       setIsGenerating(true); // Показываем "генерация"
-      const r = await fetch(`${apiBase}/chat/reply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!r.ok) {
-        setIsGenerating(false);
-        const err = await r.json().catch(() => ({} as any));
-        if (r.status === 403 && (err?.error === 'not_your_turn')) {
-          alert('Сейчас ход другого игрока.');
-          if (!lobbyId) setMessages((m) => m.slice(0, -1));
+      
+      // Используем streaming endpoint для постепенной генерации текста
+      let fullText = '';
+      let isTextComplete = false;
+      let audioData: any = null;
+      let requestDice: any = null;
+      let isFallback = false;
+      
+      try {
+        const r = await fetch(`${apiBase}/chat/reply-stream`, { 
+          method: 'POST', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify(body) 
+        });
+        
+        if (!r.ok) {
+          setIsGenerating(false);
+          const err = await r.json().catch(() => ({} as any));
+          if (r.status === 403 && (err?.error === 'not_your_turn')) {
+            alert('Сейчас ход другого игрока.');
+            if (!lobbyId) setMessages((m) => m.slice(0, -1));
+            return;
+          }
+          const errText = typeof err === 'string' ? err : (err?.error || 'Ошибка AI');
+          if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: `Ошибка AI: ${errText}` }]);
           return;
         }
-        const errText = typeof err === 'string' ? err : (err?.error || 'Ошибка AI');
-        if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: `Ошибка AI: ${errText}` }]);
-        return;
+        
+        // Создаем временное сообщение для постепенного обновления
+        let streamingMessageId: number | null = null;
+        if (!lobbyId) {
+          setMessages((m) => {
+            const newMsg = [...m, { from: 'bot' as const, text: '' }];
+            streamingMessageId = newMsg.length - 1;
+            return newMsg;
+          });
+        }
+        
+        // Читаем SSE поток
+        const reader = r.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            
+            let currentEvent = '';
+            for (const line of lines) {
+              if (line.startsWith('event: ')) {
+                currentEvent = line.slice(7).trim();
+                continue;
+              }
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  
+                  if (currentEvent === 'status' && data.type === 'generating_text') {
+                    // Начало генерации текста
+                    if (!lobbyId && streamingMessageId !== null) {
+                      setMessages((m) => {
+                        const updated = [...m];
+                        updated[streamingMessageId!] = { from: 'bot' as const, text: '...' };
+                        return updated;
+                      });
+                    }
+                  } else if (currentEvent === 'text_chunk' && data.text) {
+                    // Новый кусок текста
+                    fullText += data.text;
+                    if (!lobbyId && streamingMessageId !== null) {
+                      setMessages((m) => {
+                        const updated = [...m];
+                        updated[streamingMessageId!] = { from: 'bot' as const, text: fullText };
+                        return updated;
+                      });
+                    }
+                  } else if (currentEvent === 'text_complete' && data.text) {
+                    // Текст полностью готов
+                    fullText = data.text;
+                    isTextComplete = true;
+                    if (!lobbyId && streamingMessageId !== null) {
+                      setMessages((m) => {
+                        const updated = [...m];
+                        updated[streamingMessageId!] = { from: 'bot' as const, text: fullText };
+                        return updated;
+                      });
+                    }
+                  } else if (currentEvent === 'status' && data.type === 'generating_audio') {
+                    // Начало генерации аудио
+                    if (!lobbyId && streamingMessageId !== null) {
+                      setMessages((m) => {
+                        const updated = [...m];
+                        updated[streamingMessageId!] = { from: 'bot' as const, text: fullText + '\n\n🎤 Генерация озвучки...' };
+                        return updated;
+                      });
+                    }
+                  } else if (currentEvent === 'audio_ready' && data.audio) {
+                    // Аудио готово
+                    audioData = data;
+                    if (!lobbyId && streamingMessageId !== null) {
+                      setMessages((m) => {
+                        const updated = [...m];
+                        updated[streamingMessageId!] = { from: 'bot' as const, text: fullText };
+                        return updated;
+                      });
+                    }
+                  } else if (currentEvent === 'audio_error' || currentEvent === 'error') {
+                    console.error('[STREAM] Error:', data.error || data);
+                  }
+                } catch (e) {
+                  console.error('[STREAM] Parse error:', e, line);
+                }
+                currentEvent = ''; // Сбрасываем событие после обработки данных
+              }
+            }
+          }
+        }
+        
+        // Если streaming не сработал, используем обычный endpoint как fallback
+        if (!fullText) {
+          const fallbackR = await fetch(`${apiBase}/chat/reply`, { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(body) 
+          });
+          if (fallbackR.ok) {
+            const fallbackData = await fallbackR.json();
+            fullText = fallbackData.message || '';
+            audioData = fallbackData.audio;
+            requestDice = fallbackData.requestDice;
+            isFallback = Boolean(fallbackData.fallback);
+          }
+        }
+      } catch (streamErr) {
+        console.error('[STREAM] Streaming failed, using fallback:', streamErr);
+        // Fallback на обычный endpoint
+        const fallbackR = await fetch(`${apiBase}/chat/reply`, { 
+          method: 'POST', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify(body) 
+        });
+        if (fallbackR.ok) {
+          const fallbackData = await fallbackR.json();
+          fullText = fallbackData.message || '';
+          audioData = fallbackData.audio;
+          requestDice = fallbackData.requestDice;
+          isFallback = Boolean(fallbackData.fallback);
+        }
       }
-      const data = await r.json();
+      
       setIsGenerating(false); // Скрываем "генерация"
-      const isFallback = Boolean((data as any)?.fallback);
       
       // Используем прегенерированное аудио, если оно есть
-      const preGeneratedAudio = (data as any)?.audio;
+      const preGeneratedAudio = audioData;
       
       // Если сервер просит бросок (requestDice) — ТОЛЬКО покажем подсказку в ленте (она уже в истории),
       // авто‑окно и авто‑бросок не открываем: пользователь сам нажмёт 🎲.
@@ -940,14 +1080,12 @@ const GameChat: React.FC = () => {
             const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
             if (lastBot?.text) {
               // Используем прегенерированное аудио, если есть - НЕ делаем повторный запрос к TTS
-              if (preGeneratedAudio?.data) {
+              if (preGeneratedAudio?.audio) {
                 console.log('[CLIENT] Using pre-generated audio from server response (lobby mode)');
-                const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+                const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.audio), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
                 const audioUrl = URL.createObjectURL(audioBlob);
                 speakWithAudio(audioUrl, lastBot.text).catch((err) => {
                   console.error('[CLIENT] speakWithAudio failed (lobby):', err);
-                  // НЕ делаем fallback на speak() - если прегенерированное аудио не работает, просто не озвучиваем
-                  // Это предотвращает повторный запрос к TTS
                 });
               } else {
                 console.log('[CLIENT] No pre-generated audio (lobby mode), using TTS synthesis');
@@ -957,36 +1095,56 @@ const GameChat: React.FC = () => {
           }
         } catch {}
       } else {
-        if (data?.message) {
-          const txt = String(data.message);
-          setMessages((m) => {
-            const next = [...m, { from: 'bot' as const, text: txt }];
-            // Используем прегенерированное аудио, если есть - НЕ вызываем speak() чтобы избежать повторного запроса
-            if (preGeneratedAudio?.data) {
-              console.log('[CLIENT] Using pre-generated audio from server response');
-              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+        if (fullText) {
+          const txt = String(fullText);
+          // Если сообщение уже добавлено через streaming, просто обновляем аудио
+          if (streamingMessageId === null) {
+            setMessages((m) => {
+              const next = [...m, { from: 'bot' as const, text: txt }];
+              // Используем прегенерированное аудио, если есть
+              if (preGeneratedAudio?.audio) {
+                console.log('[CLIENT] Using pre-generated audio from server response');
+                const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.audio), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                speakWithAudio(audioUrl, txt).catch((err) => {
+                  console.error('[CLIENT] speakWithAudio failed:', err);
+                });
+              } else {
+                console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
+                speak(txt);
+              }
+              try { applyBgFromText(txt); } catch {}
+              if (!isFallback) saveChatHistory(id, next as any).catch(() => {});
+              return next;
+            });
+          } else {
+            // Сообщение уже добавлено через streaming, просто обновляем аудио
+            if (preGeneratedAudio?.audio) {
+              console.log('[CLIENT] Using pre-generated audio from streaming');
+              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.audio), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
               const audioUrl = URL.createObjectURL(audioBlob);
               speakWithAudio(audioUrl, txt).catch((err) => {
                 console.error('[CLIENT] speakWithAudio failed:', err);
-                // НЕ делаем fallback на speak() - если прегенерированное аудио не работает, просто не озвучиваем
-                // Это предотвращает повторный запрос к TTS
               });
             } else {
-              // Если прегенерированного аудио нет, используем обычный синтез
-              console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
+              console.log('[CLIENT] No pre-generated audio from streaming, using TTS synthesis');
               speak(txt);
             }
             try { applyBgFromText(txt); } catch {}
-            if (!isFallback) saveChatHistory(id, next as any).catch(() => {});
-            return next;
-          });
+            if (!isFallback) {
+              setMessages((m) => {
+                saveChatHistory(id, m as any).catch(() => {});
+                return m;
+              });
+            }
+          }
         }
       }
 
       // Адаптация под D&D 5e: Если сервер предложил бросок, открываем окно кубиков
-      if (data?.requestDice) {
+      if (requestDice) {
         setTimeout(() => {
-          rollDiceUi(data.requestDice);
+          rollDiceUi(requestDice);
         }, 800);
       }
     } catch {}
