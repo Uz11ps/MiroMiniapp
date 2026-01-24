@@ -1174,7 +1174,7 @@ const GameChat: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           {charAvatar && (
             <div onClick={() => selectedCharId && navigate(`/game/${id}/character/${selectedCharId}`)} style={{ cursor: 'pointer' }}>
-              <img src={charAvatar} alt="char" style={{ width: 44, height: 44, borderRadius: 22, border: '2px solid var(--tg-theme-button-color)', objectFit: 'cover' }} />
+              <img src={charAvatar} alt="" style={{ width: 44, height: 44, borderRadius: 22, border: '2px solid var(--tg-theme-button-color)', objectFit: 'cover' }} />
             </div>
           )}
           <div style={{ textAlign: 'left' }}>
@@ -1207,8 +1207,6 @@ const GameChat: React.FC = () => {
           }}>✕</button>
         </div>
       </div>
-
-      <div className="mic">🎤</div>
 
       <div className="messages">
         {messages.map((m, i) => {
