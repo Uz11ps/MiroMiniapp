@@ -916,6 +916,7 @@ const GameChat: React.FC = () => {
       let audioData: any = null;
       let requestDice: any = null;
       let isFallback = false;
+      let streamingMessageId: number | null = null; // ID сообщения для streaming обновления
       
       try {
         const r = await fetch(`${apiBase}/chat/reply-stream`, { 
@@ -938,7 +939,6 @@ const GameChat: React.FC = () => {
         }
         
         // Создаем временное сообщение для постепенного обновления
-        let streamingMessageId: number | null = null;
         if (!lobbyId) {
           setMessages((m) => {
             const newMsg = [...m, { from: 'bot' as const, text: '' }];
