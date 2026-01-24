@@ -7580,8 +7580,7 @@ app.post('/api/tts', async (req, res) => {
       // Используем только специализированные TTS модели
       // Остальные модели не поддерживают TTS или возвращают текст вместо аудио
       const modelsToTry = [
-        'gemini-2.5-pro-preview-tts',        // Лучшее качество, более естественное произношение
-        'gemini-2.5-flash-native-audio'      // Ещё более живая речевая модель (через Live/Studio)
+        'gemini-2.5-pro-preview-tts'        // Лучшее качество, более естественное произношение
       ];
       
       const proxies = parseGeminiProxies();
