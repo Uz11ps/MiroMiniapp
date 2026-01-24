@@ -56,12 +56,10 @@ input, textarea, .bubble {
   transform: translateZ(0); /* Аппаратное ускорение */
 }
 
-/* Убираем padding и скролл для страницы чата */
+/* Убираем padding для страницы чата, но НЕ блокируем скролл - скролл должен работать внутри .messages */
 .screen:has(.chat) {
   padding: 0;
-  overflow: hidden;
-  overflow-y: hidden;
-  overflow-x: hidden;
+  overflow: visible; /* Разрешаем скролл внутри дочерних элементов */
 }
 
 .card {
@@ -158,6 +156,7 @@ input, textarea, .bubble {
   top: 0;
   left: 0;
   right: 0;
+  z-index: 100; /* Поверх сообщений при скролле */
   display: flex; 
   align-items: center; 
   justify-content: space-between;
@@ -181,6 +180,8 @@ input, textarea, .bubble {
 }
 .messages { 
   flex: 1;
+  position: relative; /* Для правильного позиционирования относительно header */
+  z-index: 1; /* Ниже header и composer */
   display: grid; 
   gap: 8px; 
   padding: 80px 16px 140px; /* padding-top для header (60px + 20px), padding-bottom для composer (увеличен) */
@@ -225,6 +226,7 @@ input, textarea, .bubble {
   bottom: 0;
   left: 0;
   right: 0;
+  z-index: 100; /* Поверх сообщений при скролле */
   display: grid; 
   grid-template-columns: auto 1fr auto; 
   gap: 8px; 
