@@ -764,6 +764,26 @@ const ScenarioPage: React.FC = () => {
               <span>Импорт JSON</span>
               <input type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value=''; if (f) void handleImport(f); }} />
             </label>
+            <button 
+              onClick={async () => {
+                if (!confirm('Запустить массовую прегенерацию всех локаций и всех вариантов? Это может занять много времени.')) return;
+                try {
+                  const r = await fetch(`${API}/admin/games/${game.id}/pregenerate-all-tts`, { method: 'POST' });
+                  const j = await r.json().catch(() => ({} as any));
+                  if (r.ok) {
+                    alert(`Массовая прегенерация запущена!\n\nЛокаций: ${j.locationsCount || 0}\nВариантов: ${j.exitsCount || 0}\n\nПроцесс выполняется в фоне. Проверьте логи сервера для отслеживания прогресса.`);
+                  } else {
+                    alert(`Ошибка: ${j.error || 'unknown'}\n${j.message || ''}`);
+                  }
+                } catch (e) {
+                  alert('Не удалось запустить массовую прегенерацию: ' + String(e));
+                }
+              }}
+              title="Прегенерировать текст и аудио для всех локаций и всех вариантов"
+              style={{ backgroundColor: '#4CAF50', color: 'white' }}
+            >
+              🎤 Прегенерировать всё
+            </button>
             <a href="/admin/games"><button>Назад к играм</button></a>
           </div>
         </div>
@@ -1025,6 +1045,29 @@ const ScenarioPage: React.FC = () => {
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <input type="checkbox" defaultChecked={Boolean(ex.isGameOver)} onChange={(e) => updateExit(ex.id, { isGameOver: e.target.checked })} /> Game Over
                     </label>
+                    <button 
+                      onClick={async () => {
+                        if (!ex.targetLocationId) {
+                          alert('Укажите целевую сцену для прегенерации');
+                          return;
+                        }
+                        try {
+                          const r = await fetch(`${API}/admin/exits/${ex.id}/pregenerate-tts`, { method: 'POST' });
+                          const j = await r.json().catch(() => ({} as any));
+                          if (r.ok && j.ok) {
+                            alert(`Прегенерация завершена!\nТекст: ${(j.text || '').slice(0, 100)}...\nРазмер аудио: ${Math.round((j.audioSize || 0) / 1024)} KB`);
+                          } else {
+                            alert(`Ошибка: ${j.error || 'unknown'}\n${j.message || ''}`);
+                          }
+                        } catch (e) {
+                          alert('Не удалось запустить прегенерацию: ' + String(e));
+                        }
+                      }}
+                      className="header-btn"
+                      title="Прегенерировать текст и аудио для этого варианта"
+                    >
+                      🎤 Прегенерировать
+                    </button>
                     <button onClick={() => deleteExit(ex.id)} className="header-btn danger">Удалить</button>
                   </div>
                 ))}

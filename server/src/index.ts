@@ -109,6 +109,75 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
 try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
 app.use('/uploads', express.static(UPLOAD_DIR));
 
+// Директория для прегенерированных аудио
+const PRAGEN_DIR = process.env.PRAGEN_DIR || path.join(UPLOAD_DIR, 'pregen');
+try { fs.mkdirSync(PRAGEN_DIR, { recursive: true }); } catch {}
+app.use('/pregen', express.static(PRAGEN_DIR));
+
+// Единая функция для создания хеша аудио файла
+// Используется для сопоставления предгенерированных сообщений с аудио
+function createAudioHash(text: string, locationId?: string, characterId?: string, messageType: 'narrator' | 'character' = 'narrator'): string {
+  const contextString = `${text.trim()}_${locationId || ''}_${characterId || ''}_${messageType}`;
+  return crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
+}
+
+// Парсит варианты выбора из текста (формат: "1. Вариант 1\n2. Вариант 2" или "- Вариант 1\n- Вариант 2")
+function parseChoiceOptions(text: string): string[] {
+  if (!text || typeof text !== 'string') return [];
+  
+  const choices: string[] = [];
+  const lines = text.split('\n');
+  
+  for (const line of lines) {
+    // Ищем нумерованные варианты: "1. Вариант", "2. Вариант"
+    const numberedMatch = line.match(/^\s*\d+\.\s+(.+)$/);
+    if (numberedMatch) {
+      choices.push(numberedMatch[1].trim());
+      continue;
+    }
+    
+    // Ищем варианты с дефисом: "- Вариант", "— Вариант"
+    const dashMatch = line.match(/^\s*[-—]\s+(.+)$/);
+    if (dashMatch) {
+      choices.push(dashMatch[1].trim());
+      continue;
+    }
+  }
+  
+  return choices.filter(Boolean);
+}
+
+// Функция для получения пути к предгенерированному аудио файлу
+function getPregenAudioPath(gameId: string, text: string, locationId?: string, characterId?: string, messageType: 'narrator' | 'character' = 'narrator'): string {
+  const textHash = createAudioHash(text, locationId, characterId, messageType);
+  const subDir = locationId ? locationId : 'general';
+  return path.join(PRAGEN_DIR, gameId, subDir, `${messageType}_${textHash}.wav`);
+}
+
+// Функция для поиска предгенерированного аудио (проверяет несколько возможных путей)
+function findPregenAudio(gameId: string, text: string, locationId?: string, characterId?: string, messageType: 'narrator' | 'character' = 'narrator'): string | null {
+  const possiblePaths = [
+    // Основной путь (новый формат)
+    getPregenAudioPath(gameId, text, locationId, characterId, messageType),
+    // Старый формат welcome (для обратной совместимости)
+    locationId ? path.join(PRAGEN_DIR, gameId, locationId, `welcome_${createAudioHash(text, locationId, characterId, messageType).slice(0, 12)}.wav`) : null,
+    // Общий формат (без локации)
+    path.join(PRAGEN_DIR, gameId, `msg_${createAudioHash(text, locationId, characterId, messageType)}.wav`),
+  ].filter(Boolean) as string[];
+  
+  for (const audioPath of possiblePaths) {
+    try {
+      if (fs.existsSync(audioPath)) {
+        return audioPath;
+      }
+    } catch (e) {
+      // Продолжаем проверку других путей
+    }
+  }
+  
+  return null;
+}
+
 // -------------------- AI Prompts (runtime editable) --------------------
 type AiPrompts = {
   system: string;
@@ -3839,35 +3908,72 @@ app.post('/api/chat/welcome', async (req, res) => {
         }
       }
       // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ для первого сообщения
+      // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
       let audioData: { buffer: Buffer; contentType: string } | null = null;
       if (text) {
         try {
-          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-          const ttsUrl = `${apiBase}/api/tts`;
-          console.log('[WELCOME] 🎤 Pre-generating TTS for welcome message, text length:', text.length);
+          // Сначала проверяем прегенерированное аудио
+          if (gameId && first?.id) {
+            const pregenPath = findPregenAudio(gameId, text, first.id, undefined, 'narrator');
+            
+            if (pregenPath) {
+              try {
+                console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
+                const audioBuffer = fs.readFileSync(pregenPath);
+                audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+              } catch (e) {
+                console.warn('[WELCOME] Failed to read pre-generated audio:', e);
+              }
+            }
+          }
           
-          const ttsResponse = await undiciFetch(ttsUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text,
-              gameId,
-              locationId: first?.id,
-              format: 'oggopus'
-            }),
-            signal: AbortSignal.timeout(120000)
-          });
-          
-          if (ttsResponse.ok) {
-            const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
-            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            audioData = { buffer: audioBuffer, contentType };
-            console.log('[WELCOME] ✅ TTS pre-generation successful, audio size:', audioBuffer.byteLength, 'bytes');
-          } else {
-            console.warn('[WELCOME] TTS pre-generation failed:', ttsResponse.status);
+          // Если прегенерированного аудио нет, генерируем новое
+          if (!audioData) {
+            const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+            const ttsUrl = `${apiBase}/api/tts`;
+            console.log('[WELCOME] 🎤 Generating TTS for welcome message, text length:', text.length);
+            
+            const ttsResponse = await undiciFetch(ttsUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text,
+                gameId,
+                locationId: first?.id,
+                format: 'wav',
+                isNarrator: true
+              }),
+              signal: AbortSignal.timeout(120000)
+            });
+            
+            if (ttsResponse.ok) {
+              const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+              const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+              audioData = { buffer: audioBuffer, contentType };
+              console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+              
+              // Сохраняем сгенерированное аудио для будущего использования
+              if (gameId && first?.id) {
+                try {
+                  const contextString = `${text.trim()}_${first.id}_narrator`;
+                  const textHash = crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
+                  const gameDir = path.join(PRAGEN_DIR, gameId);
+                  const locationDir = path.join(gameDir, first.id);
+                  try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
+                  const savePath = path.join(locationDir, `narrator_${textHash}.wav`);
+                  fs.writeFileSync(savePath, audioBuffer);
+                  console.log('[WELCOME] 💾 Saved generated audio for future use:', savePath);
+                } catch (e) {
+                  console.warn('[WELCOME] Failed to save generated audio:', e);
+                }
+              }
+            } else {
+              console.warn('[WELCOME] TTS generation failed:', ttsResponse.status);
+            }
           }
         } catch (ttsErr: any) {
-          console.warn('[WELCOME] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
+          console.warn('[WELCOME] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
         }
       }
       
@@ -3882,10 +3988,12 @@ app.post('/api/chat/welcome', async (req, res) => {
       if (audioData) {
         response.audio = {
           data: audioData.buffer.toString('base64'),
-          contentType: audioData.contentType,
+          contentType: audioData.contentType || 'audio/wav',
           format: 'base64'
         };
-        console.log('[WELCOME] ✅ Returning pre-generated audio with welcome message');
+        console.log('[WELCOME] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+      } else {
+        console.warn('[WELCOME] ⚠️ No audio generated - response will be sent without audio');
       }
       return res.json(response);
     }
@@ -3943,35 +4051,72 @@ app.post('/api/chat/welcome', async (req, res) => {
     text = (text || '').trim();
     
     // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ для первого сообщения (SOLO режим)
+    // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
     let audioData: { buffer: Buffer; contentType: string } | null = null;
     if (text) {
       try {
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const ttsUrl = `${apiBase}/api/tts`;
-        console.log('[WELCOME] 🎤 Pre-generating TTS for welcome message (SOLO), text length:', text.length);
+        // Сначала проверяем прегенерированное аудио
+        if (gameId && first?.id) {
+          const pregenPath = findPregenAudio(gameId, text, first.id, undefined, 'narrator');
+          
+          if (pregenPath) {
+            try {
+              console.log('[WELCOME] ✅ Using pre-generated audio from (SOLO):', pregenPath);
+              const audioBuffer = fs.readFileSync(pregenPath);
+              audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+              console.log(`[WELCOME] ✅ Pre-generated audio loaded (SOLO), size: ${audioBuffer.byteLength} bytes`);
+            } catch (e) {
+              console.warn('[WELCOME] Failed to read pre-generated audio (SOLO):', e);
+            }
+          }
+        }
         
-        const ttsResponse = await undiciFetch(ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text,
-            gameId,
-            locationId: first?.id,
-            format: 'oggopus'
-          }),
-          signal: AbortSignal.timeout(120000)
-        });
-        
-        if (ttsResponse.ok) {
-          const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
-          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          audioData = { buffer: audioBuffer, contentType };
-          console.log('[WELCOME] ✅ TTS pre-generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
-        } else {
-          console.warn('[WELCOME] TTS pre-generation failed (SOLO):', ttsResponse.status);
+        // Если прегенерированного аудио нет, генерируем новое
+        if (!audioData) {
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const ttsUrl = `${apiBase}/api/tts`;
+          console.log('[WELCOME] 🎤 Generating TTS for welcome message (SOLO), text length:', text.length);
+          
+          const ttsResponse = await undiciFetch(ttsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text,
+              gameId,
+              locationId: first?.id,
+              format: 'wav',
+              isNarrator: true
+            }),
+            signal: AbortSignal.timeout(120000)
+          });
+          
+          if (ttsResponse.ok) {
+            const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+            audioData = { buffer: audioBuffer, contentType };
+            console.log('[WELCOME] ✅ TTS generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
+            
+            // Сохраняем сгенерированное аудио для будущего использования
+            if (gameId && first?.id) {
+              try {
+                const contextString = `${text.trim()}_${first.id}_narrator`;
+                const textHash = crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
+                const gameDir = path.join(PRAGEN_DIR, gameId);
+                const locationDir = path.join(gameDir, first.id);
+                try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
+                const savePath = path.join(locationDir, `narrator_${textHash}.wav`);
+                fs.writeFileSync(savePath, audioBuffer);
+                console.log('[WELCOME] 💾 Saved generated audio for future use (SOLO):', savePath);
+              } catch (e) {
+                console.warn('[WELCOME] Failed to save generated audio (SOLO):', e);
+              }
+            }
+          } else {
+            console.warn('[WELCOME] TTS generation failed (SOLO):', ttsResponse.status);
+          }
         }
       } catch (ttsErr: any) {
-        console.warn('[WELCOME] TTS pre-generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
+        console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
       }
     }
     
@@ -3985,10 +4130,12 @@ app.post('/api/chat/welcome', async (req, res) => {
     if (audioData) {
       response.audio = {
         data: audioData.buffer.toString('base64'),
-        contentType: audioData.contentType,
+        contentType: audioData.contentType || 'audio/wav',
         format: 'base64'
       };
-      console.log('[WELCOME] ✅ Returning pre-generated audio with welcome message (SOLO)');
+      console.log('[WELCOME] ✅ Returning text + audio together (SOLO, audio size:', audioData.buffer.byteLength, 'bytes)');
+    } else {
+      console.warn('[WELCOME] ⚠️ No audio generated (SOLO) - response will be sent without audio');
     }
     return res.json(response);
   } catch (e) {
@@ -4654,7 +4801,10 @@ app.post('/api/chat/reply', async (req, res) => {
     }
 
     // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ - генерируем аудио перед отправкой текста
-    console.log('[REPLY] 🎤 Pre-generating TTS for text length:', text.length);
+    // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
+    console.log('[REPLY] 🎤 Generating TTS for text length:', text.length);
+    let audioData: { buffer: Buffer; contentType: string } | null = null;
+    
     try {
       // Получаем контекст для TTS (локация, персонаж и т.д.)
       let locationId: string | undefined = undefined;
@@ -4677,48 +4827,80 @@ app.post('/api/chat/reply', async (req, res) => {
         }
       }
       
-      // Вызываем TTS endpoint напрямую через внутренний HTTP запрос
-      // Ждем завершения генерации перед отправкой текста клиенту
-      // Сохраняем аудио, чтобы вернуть его клиенту
-      const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-      const ttsUrl = `${apiBase}/api/tts`;
+      // Сначала проверяем прегенерированное аудио для ВСЕХ сообщений
+      if (gameId) {
+        const pregenPath = findPregenAudio(gameId, text, locationId, characterId, 'narrator');
+        
+        if (pregenPath) {
+          try {
+            console.log('[REPLY] ✅ Using pre-generated audio from:', pregenPath);
+            const audioBuffer = fs.readFileSync(pregenPath);
+            audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+            console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+          } catch (e) {
+            console.warn('[REPLY] Failed to read pre-generated audio:', e);
+          }
+        }
+      }
       
-      console.log('[REPLY] Calling TTS endpoint for pre-generation...');
-      const ttsStartTime = Date.now();
-      const ttsResponse = await undiciFetch(ttsUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text,
-          gameId: gameId || undefined,
-          locationId,
-          characterId,
-          format: 'oggopus'
-        }),
-        signal: AbortSignal.timeout(120000) // 2 минуты таймаут
-      });
-      
-      let audioData: { buffer: Buffer; contentType: string } | null = null;
-      
-      if (ttsResponse.ok) {
-        const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
-        const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-        audioData = { buffer: audioBuffer, contentType };
-        const ttsDuration = Date.now() - ttsStartTime;
-        console.log(`[REPLY] ✅ TTS pre-generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
-      } else {
-        const errorText = await ttsResponse.text().catch(() => '');
-        console.warn('[REPLY] TTS pre-generation failed:', ttsResponse.status, errorText.slice(0, 200));
+      // Если прегенерированного аудио нет, генерируем новое
+      if (!audioData) {
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts`;
+        
+        console.log('[REPLY] Calling TTS endpoint for generation...');
+        const ttsStartTime = Date.now();
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text,
+            gameId: gameId || undefined,
+            locationId,
+            characterId,
+            format: 'wav',
+            isNarrator: true
+          }),
+          signal: AbortSignal.timeout(120000) // 2 минуты таймаут
+        });
+        
+        if (ttsResponse.ok) {
+          const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          audioData = { buffer: audioBuffer, contentType };
+          const ttsDuration = Date.now() - ttsStartTime;
+          console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
+          
+          // Сохраняем сгенерированное аудио для будущего использования
+          if (gameId) {
+            try {
+              const contextString = `${text.trim()}_${locationId || ''}_${characterId || ''}_narrator`;
+              const textHash = crypto.createHash('md5').update(contextString).digest('hex').slice(0, 16);
+              const subDir = locationId ? locationId : 'general';
+              const gameDir = path.join(PRAGEN_DIR, gameId);
+              const locationDir = path.join(gameDir, subDir);
+              try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
+              const savePath = path.join(locationDir, `narrator_${textHash}.wav`);
+              fs.writeFileSync(savePath, audioBuffer);
+              console.log('[REPLY] 💾 Saved generated audio for future use:', savePath);
+            } catch (e) {
+              console.warn('[REPLY] Failed to save generated audio:', e);
+            }
+          }
+        } else {
+          const errorText = await ttsResponse.text().catch(() => '');
+          console.warn('[REPLY] TTS generation failed:', ttsResponse.status, errorText.slice(0, 200));
+        }
       }
       
       // Сохраняем аудио в переменную для возврата клиенту
       // КРИТИЧЕСКИ ВАЖНО: ответ отправляется ТОЛЬКО после завершения TTS
       (req as any).preGeneratedAudio = audioData;
-      console.log('[REPLY] ✅ TTS pre-generation finished, proceeding to send response to client');
+      console.log('[REPLY] ✅ TTS ready, proceeding to send response to client');
     } catch (ttsErr: any) {
-      console.warn('[REPLY] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
       // НЕ блокируем отправку текста, если TTS не сгенерировался - клиент может запросить позже
       (req as any).preGeneratedAudio = null;
     }
@@ -4740,17 +4922,19 @@ app.post('/api/chat/reply', async (req, res) => {
       advanceTurn(lobbyId);
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
-      // Возвращаем текст с прегенерированным аудио (если есть)
+      // Возвращаем текст с аудио - ВСЕГДА вместе
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
       if ((req as any).preGeneratedAudio) {
         const audio = (req as any).preGeneratedAudio;
         // Конвертируем аудио в base64 для отправки клиенту
         response.audio = {
           data: audio.buffer.toString('base64'),
-          contentType: audio.contentType,
+          contentType: audio.contentType || 'audio/wav',
           format: 'base64'
         };
-        console.log('[REPLY] ✅ Returning pre-generated audio with text response');
+        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audio.buffer.byteLength, 'bytes)');
+      } else {
+        console.warn('[REPLY] ⚠️ No audio generated - response will be sent without audio');
       }
       return res.json(response);
     } else {
@@ -4769,17 +4953,19 @@ app.post('/api/chat/reply', async (req, res) => {
         await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       }
       
-      // Возвращаем текст с прегенерированным аудио (если есть)
+      // Возвращаем текст с аудио - ВСЕГДА вместе
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
       if ((req as any).preGeneratedAudio) {
         const audio = (req as any).preGeneratedAudio;
         // Конвертируем аудио в base64 для отправки клиенту
         response.audio = {
           data: audio.buffer.toString('base64'),
-          contentType: audio.contentType,
+          contentType: audio.contentType || 'audio/wav',
           format: 'base64'
         };
-        console.log('[REPLY] ✅ Returning pre-generated audio with text response');
+        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audio.buffer.byteLength, 'bytes)');
+      } else {
+        console.warn('[REPLY] ⚠️ No audio generated - response will be sent without audio');
       }
       return res.json(response);
     }
@@ -6370,6 +6556,25 @@ app.post('/api/tts', async (req, res) => {
       return res.status(400).json({ error: 'text_required' });
     }
     
+    // ПРОВЕРКА ПРЕГЕНЕРИРОВАННОГО АУДИО ДЛЯ ВСЕХ СООБЩЕНИЙ
+    // Проверяем наличие прегенерированного файла для любого сообщения
+    if (gameId) {
+      const messageType = isNarrator !== false ? 'narrator' : 'character';
+      const pregenPath = findPregenAudio(gameId, text, locationId, characterId, messageType);
+      
+      if (pregenPath) {
+        try {
+          console.log('[TTS] ✅ Using pre-generated audio from:', pregenPath);
+          const audioBuffer = fs.readFileSync(pregenPath);
+          res.setHeader('Content-Type', 'audio/wav');
+          res.setHeader('Content-Length', String(audioBuffer.length));
+          return res.send(audioBuffer);
+        } catch (e) {
+          console.warn('[TTS] Failed to read pre-generated audio:', e);
+        }
+      }
+    }
+    
     // Если включен режим сегментов, разбиваем текст и обрабатываем каждый сегмент
     if (segmentMode) {
       // Получаем список персонажей для контекста с полной информацией
@@ -6893,13 +7098,13 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
             console.log(`[GEMINI-TTS] Request body for ${modelName}:`, JSON.stringify(requestBody, null, 2).slice(0, 500));
             
             const response = await undiciFetch(url, {
-              method: 'POST',
+            method: 'POST',
               dispatcher,
               headers: {
                 'Content-Type': 'application/json',
                 'X-Goog-Api-Key': geminiApiKey
               },
-              body: JSON.stringify(requestBody),
+            body: JSON.stringify(requestBody),
               signal: AbortSignal.timeout(120000) // 2 минуты для длинных текстов
             });
             
@@ -6911,9 +7116,9 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               if (contentType.includes('audio')) {
                 const audioBuffer = Buffer.from(await response.arrayBuffer());
                 console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
-                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-                res.setHeader('Content-Length', String(audioBuffer.length));
-                return res.send(audioBuffer);
+              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+              res.setHeader('Content-Length', String(audioBuffer.length));
+              return res.send(audioBuffer);
               }
               
               // Проверяем JSON ответ с аудио в inlineData
@@ -6996,12 +7201,12 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     console.warn(`[GEMINI-TTS] ${modelName} returned text instead of audio. Text preview:`, part.text.slice(0, 200));
                   }
                 }
-              } else {
+            } else {
                 console.warn(`[GEMINI-TTS] ${modelName} response structure:`, JSON.stringify(json).slice(0, 1000));
-              }
+            }
               
               console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
-            } else {
+          } else {
               const errorText = await response.text().catch(() => '');
               // Пропускаем 404 - модель не поддерживает TTS, пробуем следующую
               if (response.status === 404) {
@@ -7033,6 +7238,782 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
   } catch (e) {
     console.error('[TTS] TTS endpoint error:', e);
     return res.status(500).json({ error: 'tts_error', details: String(e) });
+  }
+});
+
+// Endpoint для прегенерации TTS для всех локаций игры
+app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
+  try {
+    const gameId = req.params.id;
+    if (!gameId) {
+      return res.status(400).json({ error: 'game_id_required' });
+    }
+    
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({ 
+      where: { id: gameId },
+      include: { locations: { orderBy: { order: 'asc' } } }
+    });
+    
+    if (!game) {
+      return res.status(404).json({ error: 'game_not_found' });
+    }
+    
+    if (!game.locations || game.locations.length === 0) {
+      return res.status(400).json({ error: 'no_locations' });
+    }
+    
+    // Запускаем прегенерацию асинхронно
+    const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
+    res.json({ 
+      jobId,
+      message: 'Прегенерация TTS запущена',
+      locationsCount: game.locations.length
+    });
+    
+    // Асинхронная прегенерация
+    (async () => {
+      const gameDir = path.join(PRAGEN_DIR, gameId);
+      try { fs.mkdirSync(gameDir, { recursive: true }); } catch {}
+      
+      let successCount = 0;
+      let failCount = 0;
+      
+      console.log(`[PRAGEN-TTS] Starting pre-generation for game ${gameId}, ${game.locations.length} locations`);
+      
+      for (let i = 0; i < game.locations.length; i++) {
+        const location = game.locations[i];
+        if (!location) continue;
+        
+        try {
+          const locationDir = path.join(gameDir, location.id);
+          try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
+          
+          console.log(`[PRAGEN-TTS] Processing location ${i + 1}/${game.locations.length}: ${location.title || location.id}`);
+          
+          // Генерируем welcome текст для локации
+          const sys = getSysPrompt() +
+            'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
+            'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
+            'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
+            'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
+            'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
+            'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
+            'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
+            'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
+            'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
+            'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
+            'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
+            'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
+            'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
+          
+          // Получаем контекст локации
+          const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
+          const visual = location.backgroundUrl ? `Фон (изображение): ${location.backgroundUrl}` : '';
+          const rules = [
+            game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+            game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+          ].filter(Boolean).join('\n');
+          const npcs = chars && chars.length ? (
+            'Персонажи (D&D 5e):\n' + chars.map((c) => {
+              const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
+              const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
+              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+              return `- ${c.name} (${traits})${stats}. ${extras}`;
+            }).join('\n')
+          ) : '';
+          
+          const userMsg = [
+            `Сцена: ${location.title}`,
+            visual,
+            location.description ? `Описание сцены: ${location.description}` : '',
+            rules,
+            npcs,
+          ].filter(Boolean).join('\n\n');
+          
+          // Генерируем текст
+          const { text: generatedText } = await generateChatCompletion({
+            systemPrompt: sys,
+            userPrompt: userMsg,
+            history: []
+          });
+          
+          let text = generatedText || (location.description || `Сцена: ${location.title}`);
+          if (text) {
+            text = formatChoiceOptions(text.trim());
+          }
+          
+          if (!text || text.length < 10) {
+            console.warn(`[PRAGEN-TTS] Location ${location.id}: Generated text too short, skipping`);
+            failCount++;
+            continue;
+          }
+          
+          // Генерируем TTS
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const ttsUrl = `${apiBase}/api/tts`;
+          
+          const ttsResponse = await undiciFetch(ttsUrl, {
+        method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text,
+              gameId,
+              locationId: location.id,
+              format: 'wav',
+              isNarrator: true
+            }),
+            signal: AbortSignal.timeout(120000)
+          });
+          
+          if (ttsResponse.ok) {
+            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+            // Используем единую функцию для создания пути, чтобы файлы находились при поиске
+            const audioPath = getPregenAudioPath(gameId, text, location.id, undefined, 'narrator');
+            // Создаем директорию, если её нет
+            const audioDir = path.dirname(audioPath);
+            try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+            fs.writeFileSync(audioPath, audioBuffer);
+            
+            // Сохраняем также текст для справки
+            const textPath = audioPath.replace('.wav', '.txt');
+            fs.writeFileSync(textPath, text, 'utf-8');
+            
+            console.log(`[PRAGEN-TTS] ✅ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - ${audioBuffer.length} bytes`);
+            console.log(`[PRAGEN-TTS] Saved to: ${audioPath}`);
+            successCount++;
+          } else {
+            console.warn(`[PRAGEN-TTS] ❌ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - TTS failed: ${ttsResponse.status}`);
+            failCount++;
+          }
+          
+          // Небольшая задержка между запросами, чтобы не перегружать API
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+        } catch (e) {
+          console.error(`[PRAGEN-TTS] ❌ Location ${i + 1}/${game.locations.length}: ${location.title || location.id} - Error:`, e);
+          failCount++;
+        }
+      }
+      
+      console.log(`[PRAGEN-TTS] ✅ Pre-generation completed: ${successCount} success, ${failCount} failed`);
+    })().catch(e => {
+      console.error('[PRAGEN-TTS] Fatal error:', e);
+    });
+    
+  } catch (e) {
+    console.error('[PRAGEN-TTS] Error:', e);
+    return res.status(500).json({ error: 'pregeneration_failed', details: String(e) });
+  }
+});
+
+// Массовая прегенерация TTS для всех локаций и всех вариантов игры
+app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
+  try {
+    const gameId = req.params.id;
+    if (!gameId) {
+      return res.status(400).json({ error: 'game_id_required' });
+    }
+    
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({ 
+      where: { id: gameId },
+      include: { 
+        locations: { 
+          orderBy: { order: 'asc' },
+          include: {
+            exits: true
+          }
+        } 
+      }
+    });
+    
+    if (!game) {
+      return res.status(404).json({ error: 'game_not_found' });
+    }
+    
+    if (!game.locations || game.locations.length === 0) {
+      return res.status(400).json({ error: 'no_locations' });
+    }
+    
+    // Запускаем прегенерацию асинхронно
+    const jobId = (crypto as any).randomUUID ? (crypto as any).randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
+    res.json({ 
+      jobId,
+      message: 'Массовая прегенерация TTS запущена',
+      locationsCount: game.locations.length,
+      exitsCount: game.locations.reduce((sum, loc) => sum + (loc.exits?.length || 0), 0)
+    });
+    
+    // Асинхронная прегенерация
+    (async () => {
+      const gameDir = path.join(PRAGEN_DIR, gameId);
+      try { fs.mkdirSync(gameDir, { recursive: true }); } catch {}
+      
+      let locationSuccessCount = 0;
+      let locationFailCount = 0;
+      let exitSuccessCount = 0;
+      let exitFailCount = 0;
+      let choiceResponseSuccessCount = 0;
+      let choiceResponseFailCount = 0;
+      const MAX_DIALOGUE_DEPTH = 20; // Максимальная глубина рекурсивной прегенерации диалогов
+      const processedDialogues = new Set<string>(); // Для избежания дубликатов
+      
+      const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+      const ttsUrl = `${apiBase}/api/tts`;
+      const sys = getSysPrompt();
+      
+      console.log(`[PRAGEN-ALL] Starting full pre-generation for game ${gameId}, ${game.locations.length} locations`);
+      
+      // Функция для генерации текста и аудио для локации
+      const generateLocationTTS = async (location: any, index: number) => {
+        try {
+          const locationDir = path.join(gameDir, location.id);
+          try { fs.mkdirSync(locationDir, { recursive: true }); } catch {}
+          
+          console.log(`[PRAGEN-ALL] Processing location ${index + 1}/${game.locations.length}: ${location.title || location.id}`);
+          
+          // Генерируем welcome текст для локации
+          const sysPrompt = sys +
+            'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
+            'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
+            'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
+            'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
+            'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
+            'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
+            'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
+            'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
+            'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
+            'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
+            'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
+            'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
+            'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
+          
+          const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
+          const visual = location.backgroundUrl ? `Фон (изображение): ${location.backgroundUrl}` : '';
+          const rules = [
+            game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+            game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+          ].filter(Boolean).join('\n');
+          const npcs = chars && chars.length ? (
+            'Персонажи (D&D 5e):\n' + chars.map((c) => {
+              const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
+              const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
+              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+              return `- ${c.name} (${traits})${stats}. ${extras}`;
+            }).join('\n')
+          ) : '';
+          
+          const userMsg = [
+            `Сцена: ${location.title}`,
+            visual,
+            location.description ? `Описание сцены: ${location.description}` : '',
+            rules,
+            npcs,
+          ].filter(Boolean).join('\n\n');
+          
+          // Генерируем текст
+          const { text: generatedText } = await generateChatCompletion({
+            systemPrompt: sysPrompt,
+            userPrompt: userMsg,
+            history: []
+          });
+          
+          let text = generatedText || (location.description || `Сцена: ${location.title}`);
+          if (text) {
+            text = formatChoiceOptions(text.trim());
+          }
+          
+          if (!text || text.length < 10) {
+            console.warn(`[PRAGEN-ALL] Location ${location.id}: Generated text too short, skipping`);
+            return false;
+          }
+          
+          // Генерируем TTS
+          const ttsResponse = await undiciFetch(ttsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text,
+              gameId,
+              locationId: location.id,
+              format: 'wav',
+              isNarrator: true
+            }),
+            signal: AbortSignal.timeout(120000)
+          });
+          
+          if (ttsResponse.ok) {
+            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+            const audioPath = getPregenAudioPath(gameId, text, location.id, undefined, 'narrator');
+            const audioDir = path.dirname(audioPath);
+            try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+            fs.writeFileSync(audioPath, audioBuffer);
+            
+            // Сохраняем также текст
+            const textPath = audioPath.replace('.wav', '.txt');
+            fs.writeFileSync(textPath, text, 'utf-8');
+            
+            console.log(`[PRAGEN-ALL] ✅ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - ${audioBuffer.length} bytes`);
+            
+            // Рекурсивная функция для генерации всех диалоговых цепочек
+            const generateDialogueChain = async (
+              parentText: string,
+              parentHistory: Array<{ from: 'bot' | 'me'; text: string }>,
+              choiceText: string,
+              depth: number,
+              locationId: string
+            ): Promise<void> => {
+              if (depth >= MAX_DIALOGUE_DEPTH) {
+                return; // Достигли максимальной глубины
+              }
+              
+              // Создаем уникальный ключ для этого диалога, чтобы избежать дубликатов
+              const dialogueKey = `${locationId}_${depth}_${choiceText.slice(0, 100)}`;
+              if (processedDialogues.has(dialogueKey)) {
+                return; // Уже обработали этот диалог
+              }
+              processedDialogues.add(dialogueKey);
+              
+              try {
+                const choiceResponseSys = sys +
+                  'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
+                  'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
+                  'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
+                  'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
+                  'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
+                  'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
+                  'Никогда не выходи за пределы текущей сцены и Flow. Не создавай новые локации, предметы или пути, если их нет в сценарии. Все действия игрока должны соответствовать кнопкам или триггерам. ' +
+                  'Если игрок пишет что-то вне кнопок — мягко возвращай его к выбору, но через атмосферное описание. ' +
+                  'После атмосферного описания всегда выводи чёткие варианты действий, опираясь на кнопки текущей сцены. ' +
+                  'ВАЖНО: Варианты выбора форматируй ТОЛЬКО нумерованным списком (1. Вариант, 2. Вариант), БЕЗ звездочек (*) или других символов. Каждый вариант на новой строке. ' +
+                  'Это нужно, чтобы игрок мог выбрать вариант, просто отправив номер (1, 2, 3), и чтобы TTS не озвучивал звездочки. ' +
+                  'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
+                  'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
+                
+                // Используем тот же контекст, что и в /api/chat/reply
+                const context: string[] = [];
+                context.push(`Игра: ${game.title}`);
+                if (game.description) context.push(`Описание: ${game.description}`);
+                if (game.worldRules) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
+                if (game.gameplayRules) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
+                if (game.author) context.push(`Автор: ${game.author}`);
+                if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
+                if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
+                if ((game as any).winCondition) context.push(`Условие победы: ${(game as any).winCondition}`);
+                if ((game as any).loseCondition) context.push(`Условие поражения: ${(game as any).loseCondition}`);
+                if ((game as any).deathCondition) context.push(`Условие смерти: ${(game as any).deathCondition}`);
+                if ((game as any).introduction) context.push(`Введение: ${(game as any).introduction}`);
+                if ((game as any).backstory) context.push(`Предыстория: ${(game as any).backstory}`);
+                if ((game as any).adventureHooks) context.push(`Зацепки приключения: ${(game as any).adventureHooks}`);
+                
+                // Добавляем NPC
+                const npcsForChoice = chars && chars.length ? (
+                  'Персонажи (D&D 5e):\n' + chars.map((c) => {
+                    const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
+                    const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
+                    const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+                    return `- ${c.name} (${traits})${stats}. ${extras}`;
+                  }).join('\n')
+                ) : '';
+                if (npcsForChoice) context.push(npcsForChoice);
+                
+                const choiceUserMsg = [
+                  'Контекст игры:\n' + context.filter(Boolean).join('\n\n'),
+                  `Контекст сцены:\n${userMsg}`,
+                  `Действие игрока: ${choiceText}`
+                ].filter(Boolean).join('\n\n');
+                
+                const { text: choiceResponseText } = await generateChatCompletion({
+                  systemPrompt: choiceResponseSys,
+                  userPrompt: choiceUserMsg,
+                  history: parentHistory
+                });
+                
+                if (choiceResponseText && choiceResponseText.trim().length >= 10) {
+                  let formattedChoiceText = formatChoiceOptions(choiceResponseText.trim());
+                  
+                  // Генерируем TTS для ответа на выбор
+                  const choiceTtsResponse = await undiciFetch(ttsUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      text: formattedChoiceText,
+                      gameId,
+                      locationId: locationId,
+                      format: 'wav',
+                      isNarrator: true
+                    }),
+                    signal: AbortSignal.timeout(120000)
+                  });
+                  
+                  if (choiceTtsResponse.ok) {
+                    const choiceAudioBuffer = Buffer.from(await choiceTtsResponse.arrayBuffer());
+                    const choiceAudioPath = getPregenAudioPath(gameId, formattedChoiceText, locationId, undefined, 'narrator');
+                    const choiceAudioDir = path.dirname(choiceAudioPath);
+                    try { fs.mkdirSync(choiceAudioDir, { recursive: true }); } catch {}
+                    fs.writeFileSync(choiceAudioPath, choiceAudioBuffer);
+                    
+                    // Сохраняем также текст
+                    const choiceTextPath = choiceAudioPath.replace('.wav', '.txt');
+                    fs.writeFileSync(choiceTextPath, formattedChoiceText, 'utf-8');
+                    
+                    console.log(`[PRAGEN-ALL] ✅ Dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..."`);
+                    choiceResponseSuccessCount++;
+                    
+                    // Парсим варианты из ответа и рекурсивно генерируем ответы на них
+                    const nextChoices = parseChoiceOptions(formattedChoiceText);
+                    if (nextChoices.length > 0 && depth < MAX_DIALOGUE_DEPTH - 1) {
+                      const newHistory = [...parentHistory, { from: 'me', text: choiceText }, { from: 'bot', text: formattedChoiceText }];
+                      for (const nextChoice of nextChoices) {
+                        await generateDialogueChain(formattedChoiceText, newHistory, nextChoice, depth + 1, locationId);
+                        // Небольшая задержка между запросами
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                      }
+                    }
+                    
+                    // Небольшая задержка между запросами
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                  } else {
+                    choiceResponseFailCount++;
+                  }
+                } else {
+                  choiceResponseFailCount++;
+                }
+              } catch (e) {
+                console.warn(`[PRAGEN-ALL] ⚠️ Failed to generate dialogue at depth ${depth} for choice "${choiceText}":`, e);
+                choiceResponseFailCount++;
+              }
+            };
+            
+            // Парсим варианты выбора из текста и запускаем рекурсивную генерацию всех диалогов
+            const choices = parseChoiceOptions(text);
+            if (choices.length > 0) {
+              console.log(`[PRAGEN-ALL] Found ${choices.length} choice options in location ${location.title}, generating ALL dialogue chains...`);
+              const initialHistory = [{ from: 'bot', text }];
+              for (let choiceIdx = 0; choiceIdx < choices.length; choiceIdx++) {
+                const choiceText = choices[choiceIdx];
+                await generateDialogueChain(text, initialHistory, choiceText, 0, location.id);
+                // Небольшая задержка между начальными вариантами
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+            
+            return true;
+          } else {
+            console.warn(`[PRAGEN-ALL] ❌ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - TTS failed: ${ttsResponse.status}`);
+            return false;
+          }
+        } catch (e) {
+          console.error(`[PRAGEN-ALL] ❌ Location ${index + 1}/${game.locations.length}: ${location.title || location.id} - Error:`, e);
+          return false;
+        }
+      };
+      
+      // Функция для генерации текста и аудио для варианта
+      const generateExitTTS = async (exit: any, fromLocation: any, targetLocation: any, exitIndex: number, totalExits: number) => {
+        try {
+          if (!exit.targetLocationId) {
+            return false; // Пропускаем варианты без целевой локации
+          }
+          
+          console.log(`[PRAGEN-ALL] Processing exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} (${fromLocation.title} -> ${targetLocation.title})`);
+          
+          const visual = [
+            targetLocation.backgroundUrl ? `Фон (изображение): ${targetLocation.backgroundUrl}` : '',
+            targetLocation.musicUrl ? `Музыка (URL): ${targetLocation.musicUrl}` : '',
+          ].filter(Boolean).join('\n');
+          const rules = [
+            game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+            game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+            (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
+            (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
+            (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
+            (game as any)?.author ? `Автор: ${(game as any).author}` : '',
+            game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
+            (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
+            (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
+            (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
+            (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
+            (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
+          ].filter(Boolean).join('\n');
+          const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
+          const npcs = chars && chars.length ? (
+            'Персонажи (D&D 5e):\n' + chars.map((c) => {
+              const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
+              const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
+              const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+              return `- ${c.name} (${traits})${stats}. ${extras}`;
+            }).join('\n')
+          ) : '';
+          
+          const base = targetLocation.description || '';
+          const userMsg = [
+            `Сцена: ${targetLocation.title}`,
+            visual,
+            base ? `Описание сцены: ${base}` : '',
+            rules,
+            npcs,
+          ].filter(Boolean).join('\n\n');
+          
+          // Генерируем текст
+          const { text: generatedText } = await generateChatCompletion({
+            systemPrompt: sys,
+            userPrompt: userMsg,
+            history: []
+          });
+          
+          let text = generatedText || (targetLocation.description || `Сцена: ${targetLocation.title}`);
+          if (text) {
+            text = formatChoiceOptions(text.trim());
+          }
+          
+          if (!text || text.length < 10) {
+            console.warn(`[PRAGEN-ALL] Exit ${exit.id}: Generated text too short, skipping`);
+            return false;
+          }
+          
+          // Генерируем TTS
+          const ttsResponse = await undiciFetch(ttsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text,
+              gameId,
+              locationId: targetLocation.id,
+              format: 'wav',
+              isNarrator: true
+            }),
+            signal: AbortSignal.timeout(120000)
+          });
+          
+          if (ttsResponse.ok) {
+            const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+            const audioPath = getPregenAudioPath(gameId, text, targetLocation.id, undefined, 'narrator');
+            const audioDir = path.dirname(audioPath);
+            try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+            fs.writeFileSync(audioPath, audioBuffer);
+            
+            // Сохраняем также текст
+            const textPath = audioPath.replace('.wav', '.txt');
+            fs.writeFileSync(textPath, text, 'utf-8');
+            
+            console.log(`[PRAGEN-ALL] ✅ Exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} -> ${targetLocation.title}`);
+            return true;
+          } else {
+            console.warn(`[PRAGEN-ALL] ❌ Exit ${exitIndex + 1}/${totalExits}: ${exit.buttonText || exit.triggerText || 'unnamed'} - TTS failed: ${ttsResponse.status}`);
+            return false;
+          }
+        } catch (e) {
+          console.error(`[PRAGEN-ALL] ❌ Exit ${exit.id}: Error:`, e);
+          return false;
+        }
+      };
+      
+      // Прегенерация для всех локаций
+      for (let i = 0; i < game.locations.length; i++) {
+        const location = game.locations[i];
+        if (!location) continue;
+        
+        const success = await generateLocationTTS(location, i);
+        if (success) {
+          locationSuccessCount++;
+        } else {
+          locationFailCount++;
+        }
+        
+        // Небольшая задержка между запросами
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      // Прегенерация для всех вариантов
+      const allExits: Array<{ exit: any; fromLocation: any; targetLocation: any }> = [];
+      for (const location of game.locations) {
+        if (!location.exits || location.exits.length === 0) continue;
+        
+        for (const exit of location.exits) {
+          if (!exit.targetLocationId) continue; // Пропускаем варианты без целевой локации
+          
+          const targetLocation = game.locations.find(l => l.id === exit.targetLocationId);
+          if (!targetLocation) continue;
+          
+          allExits.push({ exit, fromLocation: location, targetLocation });
+        }
+      }
+      
+      for (let i = 0; i < allExits.length; i++) {
+        const { exit, fromLocation, targetLocation } = allExits[i];
+        const success = await generateExitTTS(exit, fromLocation, targetLocation, i, allExits.length);
+        if (success) {
+          exitSuccessCount++;
+        } else {
+          exitFailCount++;
+        }
+        
+        // Небольшая задержка между запросами
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      console.log(`[PRAGEN-ALL] ✅ Full pre-generation completed:`);
+      console.log(`[PRAGEN-ALL]   Locations: ${locationSuccessCount} success, ${locationFailCount} failed`);
+      console.log(`[PRAGEN-ALL]   Exits: ${exitSuccessCount} success, ${exitFailCount} failed`);
+      console.log(`[PRAGEN-ALL]   Choice responses: ${choiceResponseSuccessCount} success, ${choiceResponseFailCount} failed`);
+    })().catch(e => {
+      console.error('[PRAGEN-ALL] Fatal error:', e);
+    });
+    
+  } catch (e) {
+    console.error('[PRAGEN-ALL] Error:', e);
+    return res.status(500).json({ error: 'pregeneration_failed', details: String(e) });
+  }
+});
+
+// Прегенерация TTS для варианта (LocationExit)
+app.post('/api/admin/exits/:id/pregenerate-tts', async (req, res) => {
+  try {
+    const exitId = req.params.id;
+    if (!exitId) {
+      return res.status(400).json({ error: 'exit_id_required' });
+    }
+    
+    const prisma = getPrisma();
+    const exit = await prisma.locationExit.findUnique({ 
+      where: { id: exitId },
+      include: { 
+        location: { 
+          include: { 
+            game: true 
+          } 
+        } 
+      }
+    });
+    
+    if (!exit) {
+      return res.status(404).json({ error: 'exit_not_found' });
+    }
+    
+    if (!exit.targetLocationId) {
+      return res.status(400).json({ error: 'no_target_location', message: 'У варианта нет целевой локации' });
+    }
+    
+    const game = exit.location.game;
+    const gameId = game.id;
+    const fromLocationId = exit.locationId;
+    const targetLocationId = exit.targetLocationId;
+    
+    const targetLoc = await prisma.location.findUnique({ where: { id: targetLocationId } });
+    if (!targetLoc) {
+      return res.status(404).json({ error: 'target_location_not_found' });
+    }
+    
+    // Генерируем текст точно так же, как в /api/engine/session/:id/describe
+    // Используем тот же systemPrompt, чтобы хеш совпадал
+    const sys = getSysPrompt();
+    
+    const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
+    const visual = [
+      targetLoc.backgroundUrl ? `Фон (изображение): ${targetLoc.backgroundUrl}` : '',
+      targetLoc.musicUrl ? `Музыка (URL): ${targetLoc.musicUrl}` : '',
+    ].filter(Boolean).join('\n');
+    const rules = [
+      game.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+      game.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+      (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
+      (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
+      (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
+      (game as any)?.author ? `Автор: ${(game as any).author}` : '',
+      game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
+      // Используем полные правила для ИИ
+      (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
+      (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
+      (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
+      (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
+      (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
+    ].filter(Boolean).join('\n');
+    const npcs = chars && chars.length ? (
+      'Персонажи (D&D 5e):\n' + chars.map((c) => {
+        const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
+        const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
+        const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+        return `- ${c.name} (${traits})${stats}. ${extras}`;
+      }).join('\n')
+    ) : '';
+    
+    // Генерируем текст точно так же, как при реальном переходе через /api/engine/session/:id/describe
+    // НЕ добавляем информацию о выборе, чтобы хеш совпадал с реальной генерацией
+    const base = targetLoc.description || '';
+    const userMsg = [
+      `Сцена: ${targetLoc.title}`,
+      visual,
+      base ? `Описание сцены: ${base}` : '',
+      rules,
+      npcs,
+    ].filter(Boolean).join('\n\n');
+    
+    // Генерируем текст
+    const { text: generatedText } = await generateChatCompletion({
+      systemPrompt: sys,
+      userPrompt: userMsg,
+      history: []
+    });
+    
+    let text = generatedText || (targetLoc.description || `Сцена: ${targetLoc.title}`);
+    if (text) {
+      text = formatChoiceOptions(text.trim());
+    }
+    
+    if (!text || text.length < 10) {
+      return res.status(400).json({ error: 'text_too_short', message: 'Сгенерированный текст слишком короткий' });
+    }
+    
+    // Генерируем TTS
+    const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+    const ttsUrl = `${apiBase}/api/tts`;
+    
+    const ttsResponse = await undiciFetch(ttsUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        gameId,
+        locationId: targetLocationId,
+        format: 'wav',
+        isNarrator: true
+      }),
+      signal: AbortSignal.timeout(120000)
+    });
+    
+    if (!ttsResponse.ok) {
+      return res.status(500).json({ error: 'tts_generation_failed', message: `TTS вернул статус ${ttsResponse.status}` });
+    }
+    
+    const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+    // Используем единую функцию для создания пути, чтобы файлы находились при поиске
+    const audioPath = getPregenAudioPath(gameId, text, targetLocationId, undefined, 'narrator');
+    // Создаем директорию, если её нет
+    const audioDir = path.dirname(audioPath);
+    try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+    fs.writeFileSync(audioPath, audioBuffer);
+    
+    // Сохраняем также текст для справки
+    const textPath = audioPath.replace('.wav', '.txt');
+    fs.writeFileSync(textPath, text, 'utf-8');
+    
+    console.log(`[PRAGEN-EXIT] ✅ Exit ${exitId}: ${exit.buttonText || exit.triggerText || 'unnamed'} -> ${targetLoc.title}`);
+    console.log(`[PRAGEN-EXIT] Saved to: ${audioPath}`);
+    
+    return res.json({ 
+      ok: true, 
+      exitId,
+      text,
+      audioPath,
+      audioSize: audioBuffer.length,
+      message: 'Прегенерация завершена успешно'
+    });
+    
+  } catch (e) {
+    console.error('[PRAGEN-EXIT] Error:', e);
+    return res.status(500).json({ error: 'pregeneration_failed', details: String(e) });
   }
 });
 
