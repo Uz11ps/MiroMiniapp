@@ -6684,9 +6684,44 @@ Voice: ${finalGender?.toLowerCase().includes('жен') ? 'female' : finalGender?
                   });
                   
                   if (mimeType.includes('audio') && data) {
-                    const audioBuffer = Buffer.from(data, 'base64');
-                    console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes`);
-                    res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                    let audioBuffer = Buffer.from(data, 'base64');
+                    let contentType = format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
+                    
+                    // Gemini возвращает PCM (L16), нужно конвертировать в WAV или OGG
+                    if (mimeType.includes('L16') || mimeType.includes('pcm')) {
+                      // Конвертируем PCM в WAV (добавляем WAV заголовок)
+                      const sampleRate = 24000; // Из mimeType: rate=24000
+                      const channels = 1; // Моно
+                      const bitsPerSample = 16;
+                      const byteRate = sampleRate * channels * (bitsPerSample / 8);
+                      const blockAlign = channels * (bitsPerSample / 8);
+                      const dataSize = audioBuffer.length;
+                      const fileSize = 36 + dataSize;
+                      
+                      // Создаем WAV заголовок
+                      const wavHeader = Buffer.alloc(44);
+                      wavHeader.write('RIFF', 0);
+                      wavHeader.writeUInt32LE(fileSize, 4);
+                      wavHeader.write('WAVE', 8);
+                      wavHeader.write('fmt ', 12);
+                      wavHeader.writeUInt32LE(16, 16); // fmt chunk size
+                      wavHeader.writeUInt16LE(1, 20); // audio format (PCM)
+                      wavHeader.writeUInt16LE(channels, 22);
+                      wavHeader.writeUInt32LE(sampleRate, 24);
+                      wavHeader.writeUInt32LE(byteRate, 28);
+                      wavHeader.writeUInt16LE(blockAlign, 32);
+                      wavHeader.writeUInt16LE(bitsPerSample, 34);
+                      wavHeader.write('data', 36);
+                      wavHeader.writeUInt32LE(dataSize, 40);
+                      
+                      // Объединяем заголовок и данные
+                      audioBuffer = Buffer.concat([wavHeader, audioBuffer]);
+                      contentType = 'audio/wav';
+                      console.log(`[GEMINI-TTS] Converted PCM to WAV, final size: ${audioBuffer.length} bytes`);
+                    }
+                    
+                    console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes, Content-Type: ${contentType}`);
+                    res.setHeader('Content-Type', contentType);
                     res.setHeader('Content-Length', String(audioBuffer.length));
                     return res.send(audioBuffer);
                   }
