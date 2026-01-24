@@ -4,7 +4,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import WebApp from '@twa-dev/sdk';
 
 import { App } from './modules/app/App';
-import './styles.css';
+// CSS загружается через <link> в index.html для загрузки ДО рендера страницы
 
 // Инициализация Telegram WebApp (в мини-приложении это есть в окне TG)
 try {
