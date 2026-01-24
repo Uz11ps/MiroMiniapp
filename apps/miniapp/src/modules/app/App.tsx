@@ -104,12 +104,15 @@ const BottomNav: React.FC = React.memo(() => {
         top: 'auto',
         width: '100%',
         maxWidth: '100vw',
-        zIndex: 10,
+        zIndex: 9999, // ОЧЕНЬ ВЫСОКИЙ z-index, чтобы быть поверх всего
         margin: 0,
         padding: 0,
         transform: 'translateZ(0)', // Аппаратное ускорение для плавности
         pointerEvents: 'auto',
-        boxSizing: 'border-box'
+        boxSizing: 'border-box',
+        display: 'block', // Гарантируем, что элемент виден
+        visibility: 'visible', // Гарантируем видимость
+        opacity: 1 // Гарантируем непрозрачность
       }}
     >
       <NavLink to="/catalog" className={({ isActive }) => `bottom-item${isActive ? ' active' : ''}`}>Каталог</NavLink>
@@ -1737,13 +1740,17 @@ const CharacterDetails: React.FC = () => {
 const Layout: React.FC = () => {
   const location = useLocation();
   // Мемоизируем проверку, чтобы не пересчитывать при каждом рендере
+  // Навигация скрывается ТОЛЬКО на страницах игры (/game/*)
   const hideBottom = useMemo(() => /^\/game\//.test(location.pathname), [location.pathname]);
   
   return (
-    <div className="screen">
-      <Outlet />
+    <>
+      <div className="screen">
+        <Outlet />
+      </div>
+      {/* Навигация рендерится ВНЕ .screen, чтобы не перекрывалась и всегда была видна на всех страницах */}
       {!hideBottom ? <BottomNav /> : null}
-    </div>
+    </>
   );
 };
 
