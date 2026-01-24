@@ -184,7 +184,7 @@ input, textarea, .bubble {
   flex: 1;
   display: grid; 
   gap: 8px; 
-  padding: 20px 16px 120px; /* padding-top уменьшен, так как mic уже имеет отступ, padding-bottom увеличен для composer */
+  padding: 80px 16px 120px; /* padding-top для header (60px + 20px), padding-bottom для composer */
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
