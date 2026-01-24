@@ -6671,81 +6671,25 @@ async function generateSSMLWithIntonation(params: {
     if (characterInt !== null) characterInfo.push(`Интеллект: ${characterInt}`);
     if (characterWis !== null) characterInfo.push(`Мудрость: ${characterWis}`);
     
-    const systemPrompt = `Ты эксперт по синтезу речи, лингвистике и SSML разметке. Твоя задача - создать SSML разметку с ПОЛНЫМ пониманием семантического смысла текста.
+    // Упрощенный промпт для быстрой генерации SSML
+    const systemPrompt = `Создай SSML разметку для синтеза речи.
 
-${isNarrator ? 'Это текст рассказчика (мастера игры). Рассказчик должен говорить мягко, с интонацией, не роботизированно.' : `Это реплика персонажа${characterName ? ` по имени ${characterName}` : ''}.`}
-
-${characterInfo.length > 0 ? `Характеристики персонажа:\n${characterInfo.join('\n')}` : ''}
-
+${isNarrator ? 'Текст рассказчика - мягкий, с интонацией.' : `Реплика персонажа${characterName ? ` ${characterName}` : ''}.`}
+${characterInfo.length > 0 ? `Характеристики: ${characterInfo.join(', ')}` : ''}
 Эмоция: ${emotion}, интенсивность: ${intensity}
 
-КРИТИЧЕСКИ ВАЖНО - Ты должен ПОЛНОСТЬЮ понимать семантический смысл текста:
+Правила:
+- Паузы <break time="100ms"/> после запятых, точек
+- Акценты <emphasis level="moderate"> на ключевых словах
+- Интонации <prosody pitch="+2st"> для вопросов/восклицаний
+- Естественный ритм
 
-1. **Семантический анализ:**
-   - Понимай контекст каждого предложения и абзаца
-   - Определяй главную мысль и подтекст
-   - Распознавай иронию, сарказм, метафоры, аллегории
-   - Понимай эмоциональную окраску каждого слова и фразы
-   - Определяй логические акценты и ударения
+Верни ТОЛЬКО SSML:
+<speak><prosody rate="${baseRate}" pitch="${basePitch >= 0 ? '+' : ''}${basePitch}st">текст</prosody></speak>`;
 
-2. **Интонационная структура:**
-   - Вопросы должны иметь восходящую интонацию
-   - Восклицания - нисходящую с акцентом
-   - Перечисления - паузы между элементами
-   - Противопоставления (но, однако, а) - пауза и изменение интонации
-   - Вводные слова и конструкции - отдельные паузы
+    const userPrompt = `Создай SSML для: "${text}"
 
-3. **Акценты и выделения:**
-   - Выделяй ключевые слова, несущие основной смысл
-   - Подчеркивай эмоционально значимые слова
-   - Акцентируй контрасты и противопоставления
-   - Выделяй имена собственные, важные термины
-
-4. **Ритм и темп:**
-   - Быстрый темп для напряженных, динамичных сцен
-   - Медленный темп для размышлений, описаний, важных моментов
-   - Вариации темпа внутри текста в зависимости от смысла
-   - Естественные паузы после смысловых блоков
-
-5. **Эмоциональная окраска:**
-   - Радость - более высокий pitch, быстрый темп
-   - Печаль - более низкий pitch, медленный темп
-   - Страх - дрожащий голос, паузы
-   - Гнев - резкие акценты, повышенная громкость
-   - Удивление - резкое изменение pitch
-
-6. **Синтаксическая структура:**
-   - Паузы после запятых, точек, двоеточий, тире
-   - Более длинные паузы между абзацами и смысловыми блоками
-   - Паузы перед важными словами для усиления эффекта
-
-Верни ТОЛЬКО SSML разметку (без дополнительного текста, только SSML):
-<speak>
-  <prosody rate="${baseRate}" pitch="${basePitch >= 0 ? '+' : ''}${basePitch}st" volume="+1dB">
-    <!-- здесь текст с глубоким семантическим пониманием и интонациями -->
-  </prosody>
-</speak>
-
-Правила создания SSML:
-- Анализируй КАЖДОЕ слово и фразу на семантический смысл
-- Используй <break time="50ms-300ms"/> в зависимости от смысловой важности паузы
-- Используй <emphasis level="moderate/strong"> для ключевых слов
-- Меняй pitch внутри текста через вложенные <prosody> для передачи эмоций
-- Меняй rate внутри текста для передачи динамики
-- Создавай живую, естественную речь, которая передает ВЕСЬ смысл текста
-- Не делай роботизированным - каждый элемент должен иметь смысл`;
-
-    const userPrompt = `Создай SSML разметку для текста с естественной интонацией:
-
-"${text}"
-
-БЫСТРО создай SSML с:
-- Естественными паузами (<break time="50-200ms"/>)
-- Акцентами на ключевых словах (<emphasis level="moderate">)
-- Интонациями для вопросов/восклицаний (<prosody pitch="+2st">)
-- Ритмом в зависимости от смысла
-
-Верни ТОЛЬКО SSML (без объяснений).`;
+БЫСТРО: паузы, акценты, интонации. ТОЛЬКО SSML.`;
 
     const startTime = Date.now();
     
@@ -7383,17 +7327,10 @@ app.post('/api/tts', async (req, res) => {
       });
     }
     
-    // Анализируем текст через LLM
-    try {
-      speechContext = await analyzeSpeechContext({
-        text,
-        gameId,
-        availableCharacters
-      });
-      console.log('[TTS] AI analysis result:', speechContext);
-    } catch (e) {
-      console.error('[TTS] AI analysis failed, using fallback:', e);
-      // Fallback на переданные параметры или паттерн-бейзированное определение
+    // Оптимизация: используем AI анализ только если параметры не переданы явно
+    // Если параметры переданы - используем их напрямую для ускорения
+    if (isNarrator !== undefined || characterId || characterName || gender) {
+      // Параметры переданы явно - используем их без AI анализа
       const emotion = detectEmotion(text);
       speechContext = {
         isNarrator: isNarrator !== undefined ? isNarrator : true,
@@ -7403,6 +7340,41 @@ app.post('/api/tts', async (req, res) => {
         emotion: emotion.emotion,
         intensity: emotion.intensity
       };
+    } else {
+      // Параметры не переданы - используем быстрый анализ только для коротких текстов
+      if (text.length < 50) {
+        const emotion = detectEmotion(text);
+        const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
+        speechContext = {
+          isNarrator: !hasQuotes,
+          characterId: characterId,
+          characterName: characterName || undefined,
+          gender: gender || characterGender,
+          emotion: emotion.emotion,
+          intensity: emotion.intensity
+        };
+      } else {
+        // Для длинных текстов - используем AI анализ
+        try {
+          speechContext = await analyzeSpeechContext({
+            text,
+            gameId,
+            availableCharacters
+          });
+        } catch (e) {
+          // Fallback на паттерн-бейзированное определение
+          const emotion = detectEmotion(text);
+          const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
+          speechContext = {
+            isNarrator: !hasQuotes,
+            characterId: characterId,
+            characterName: characterName || undefined,
+            gender: gender || characterGender,
+            emotion: emotion.emotion,
+            intensity: emotion.intensity
+          };
+        }
+      }
     }
     
     // Используем результат анализа для выбора голоса
