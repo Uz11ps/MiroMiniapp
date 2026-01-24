@@ -7576,6 +7576,94 @@ app.post('/api/tts', async (req, res) => {
       });
     }
     
+    // Функция для генерации через Google TTS (используется как fallback)
+    const generateGoogleTTS = async (): Promise<Buffer | null> => {
+      try {
+        const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
+        
+        if (!googleKey) {
+          console.warn('[GOOGLE-TTS] API key not configured');
+          return null;
+        }
+        
+        // Генерируем SSML для интонации
+        const ssmlText = await generateSSMLWithIntonation({
+          text,
+          isNarrator: finalIsNarrator,
+          characterName: finalCharacterName,
+          characterClass: characterInfo?.class || null,
+          characterRace: characterInfo?.race || null,
+          characterPersona: characterInfo?.persona || null,
+          characterCha: finalCharacterCha,
+          characterInt: finalCharacterInt,
+          characterWis: finalCharacterWis,
+          emotion: emotion.emotion,
+          intensity: emotion.intensity,
+          basePitch: finalPitch,
+          baseRate: finalSpeed
+        }).catch(() => null);
+        
+        // Выбираем голос для Google TTS
+        const isFemale = finalIsNarrator || (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f'));
+        const isMale = !finalIsNarrator && (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m'));
+        
+        // Лучшие голоса Google TTS для русского языка с интонацией
+        let voiceName = 'ru-RU-Wavenet-D'; // Мужской голос по умолчанию
+        if (finalIsNarrator || isFemale) {
+          voiceName = 'ru-RU-Wavenet-A'; // Женский голос для рассказчика
+        } else if (isMale) {
+          voiceName = 'ru-RU-Wavenet-D'; // Мужской голос
+        }
+        
+        // Используем Google Cloud TTS REST API
+        const googleTtsUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
+        
+        const requestBody = {
+          input: {
+            ssml: ssmlText || `<speak><prosody rate="${finalSpeed}" pitch="${finalPitch >= 0 ? '+' : ''}${finalPitch}st">${text}</prosody></speak>`
+          },
+          voice: {
+            languageCode: 'ru-RU',
+            name: voiceName,
+            ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
+          },
+          audioConfig: {
+            audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
+            sampleRateHertz: 24000,
+            speakingRate: finalSpeed,
+            pitch: finalPitch,
+            volumeGainDb: 0.0,
+            effectsProfileId: ['headphone-class-device'] // Для лучшего качества
+          }
+        };
+        
+        console.log('[GOOGLE-TTS] Requesting synthesis with voice:', voiceName);
+        const googleResponse = await undiciFetch(googleTtsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+          signal: AbortSignal.timeout(30000)
+        });
+        
+        if (googleResponse.ok) {
+          const googleData = await googleResponse.json() as any;
+          if (googleData.audioContent) {
+            const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
+            console.log('[GOOGLE-TTS] ✅ Successfully generated audio, size:', audioBuffer.length, 'bytes');
+            return audioBuffer;
+          }
+        } else {
+          const errorText = await googleResponse.text().catch(() => '');
+          console.error('[GOOGLE-TTS] Failed:', googleResponse.status, errorText.slice(0, 200));
+        }
+      } catch (googleErr) {
+        console.error('[GOOGLE-TTS] Error:', googleErr);
+      }
+      return null;
+    };
+    
     try {
       // Используем только специализированные TTS модели
       // Остальные модели не поддерживают TTS или возвращают текст вместо аудио
@@ -7585,6 +7673,68 @@ app.post('/api/tts', async (req, res) => {
       
       const proxies = parseGeminiProxies();
       const attempts = proxies.length ? proxies : ['__direct__'];
+      
+      // ПРОВЕРКА КВОТЫ: Делаем быстрый тестовый запрос для проверки доступности Gemini
+      // Если сразу получаем 429 - пропускаем Gemini и сразу используем Google TTS
+      let geminiQuotaAvailable = true;
+      try {
+        const testModelName = modelsToTry[0];
+        const testRequestBody = {
+          contents: [{
+            role: 'user',
+            parts: [{ text: 'test' }] // Минимальный текст для проверки
+          }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: 'Aoede'
+                }
+              }
+            }
+          }
+        };
+        
+        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${testModelName}:generateContent`;
+        const testDispatcher = attempts[0] !== '__direct__' ? new ProxyAgent(attempts[0]) : undefined;
+        
+        console.log('[GEMINI-TTS] 🔍 Checking quota availability...');
+        const testResponse = await undiciFetch(testUrl, {
+          method: 'POST',
+          dispatcher: testDispatcher,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': geminiApiKey
+          },
+          body: JSON.stringify(testRequestBody),
+          signal: AbortSignal.timeout(5000) // Быстрая проверка - 5 секунд
+        });
+        
+        if (testResponse.status === 429) {
+          const errorText = await testResponse.text().catch(() => '');
+          const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+          if (isQuotaError) {
+            console.warn('[GEMINI-TTS] ⚠️ Quota exceeded (429) - skipping Gemini, using Google TTS directly');
+            geminiQuotaAvailable = false;
+          }
+        } else if (testResponse.ok) {
+          console.log('[GEMINI-TTS] ✅ Quota available, proceeding with Gemini TTS');
+        }
+      } catch (testErr) {
+        // Игнорируем ошибки тестового запроса, продолжаем с обычной логикой
+        console.log('[GEMINI-TTS] Test request failed, proceeding with normal flow:', testErr);
+      }
+      
+      // Если квота недоступна - сразу используем Google TTS
+      if (!geminiQuotaAvailable) {
+        const googleAudio = await generateGoogleTTS();
+        if (googleAudio) {
+          res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
+          res.setHeader('Content-Length', googleAudio.length.toString());
+          return res.send(googleAudio);
+        }
+      }
       
       // Формируем директорские заметки на основе полного контекста персонажа
       const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
@@ -7855,6 +8005,22 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
           } else {
               const errorText = await response.text().catch(() => '');
+              
+              // Если получили 429 - сразу переходим на Google TTS (не тратим время на другие попытки)
+              if (response.status === 429) {
+                const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+                if (isQuotaError) {
+                  console.warn(`[GEMINI-TTS] ⚠️ Quota exceeded (429) for ${modelName} - switching to Google TTS immediately`);
+                  const googleAudio = await generateGoogleTTS();
+                  if (googleAudio) {
+                    res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
+                    res.setHeader('Content-Length', googleAudio.length.toString());
+                    return res.send(googleAudio);
+                  }
+                  break; // Выходим из цикла моделей
+                }
+              }
+              
               // Пропускаем 404 - модель не поддерживает TTS, пробуем следующую
               if (response.status === 404) {
                 console.log(`[GEMINI-TTS] ${modelName} doesn't support TTS (404), trying next model...`);
@@ -7881,90 +8047,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
     // FALLBACK: Если Gemini не сработал (любая ошибка), используем Google TTS с интонацией
     // Это работает для ВСЕХ запросов: прегенерация, welcome, reply, и обычные TTS запросы
     console.log('[TTS] Falling back to Google TTS (works for all requests: pregen, welcome, reply, regular)...');
-    try {
-      const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
-      
-      if (googleKey) {
-        // Генерируем SSML для интонации
-        const ssmlText = await generateSSMLWithIntonation({
-          text,
-          isNarrator: finalIsNarrator,
-          characterName: finalCharacterName,
-          characterClass: characterInfo?.class || null,
-          characterRace: characterInfo?.race || null,
-          characterPersona: characterInfo?.persona || null,
-          characterCha: finalCharacterCha,
-          characterInt: finalCharacterInt,
-          characterWis: finalCharacterWis,
-          emotion: emotion.emotion,
-          intensity: emotion.intensity,
-          basePitch: finalPitch,
-          baseRate: finalSpeed
-        }).catch(() => null);
-        
-        // Выбираем голос для Google TTS
-        const isFemale = finalIsNarrator || (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f'));
-        const isMale = !finalIsNarrator && (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m'));
-        
-        // Лучшие голоса Google TTS для русского языка с интонацией
-        let voiceName = 'ru-RU-Wavenet-D'; // Мужской голос по умолчанию
-        if (finalIsNarrator || isFemale) {
-          voiceName = 'ru-RU-Wavenet-A'; // Женский голос для рассказчика
-        } else if (isMale) {
-          voiceName = 'ru-RU-Wavenet-D'; // Мужской голос
-        }
-        
-        // Используем Google Cloud TTS REST API
-        const googleTtsUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
-        
-        const requestBody = {
-          input: {
-            ssml: ssmlText || `<speak><prosody rate="${finalSpeed}" pitch="${finalPitch >= 0 ? '+' : ''}${finalPitch}st">${text}</prosody></speak>`
-          },
-          voice: {
-            languageCode: 'ru-RU',
-            name: voiceName,
-            ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
-          },
-          audioConfig: {
-            audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
-            sampleRateHertz: 24000,
-            speakingRate: finalSpeed,
-            pitch: finalPitch,
-            volumeGainDb: 0.0,
-            effectsProfileId: ['headphone-class-device'] // Для лучшего качества
-          }
-        };
-        
-        console.log('[GOOGLE-TTS] Requesting synthesis with voice:', voiceName);
-        const googleResponse = await undiciFetch(googleTtsUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody),
-          signal: AbortSignal.timeout(30000)
-        });
-        
-        if (googleResponse.ok) {
-          const googleData = await googleResponse.json() as any;
-          if (googleData.audioContent) {
-            const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
-            console.log('[GOOGLE-TTS] ✅ Successfully generated audio, size:', audioBuffer.length, 'bytes');
-            
-            res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
-            res.setHeader('Content-Length', audioBuffer.length.toString());
-            return res.send(audioBuffer);
-          }
-        } else {
-          const errorText = await googleResponse.text().catch(() => '');
-          console.error('[GOOGLE-TTS] Failed:', googleResponse.status, errorText.slice(0, 200));
-        }
-      } else {
-        console.warn('[GOOGLE-TTS] API key not configured');
-      }
-    } catch (googleErr) {
-      console.error('[GOOGLE-TTS] Error:', googleErr);
+    const googleAudio = await generateGoogleTTS();
+    if (googleAudio) {
+      res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
+      res.setHeader('Content-Length', googleAudio.length.toString());
+      return res.send(googleAudio);
     }
     
     return res.status(502).json({ 
