@@ -8096,6 +8096,21 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             signal: AbortSignal.timeout(120000)
           });
           
+          // Проверяем ошибку квоты в ответе TTS
+          if (ttsResponse.status === 429) {
+            const errorText = await ttsResponse.text().catch(() => '');
+            const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+            
+            if (isQuotaError) {
+              console.error(`[PRAGEN-TTS] ⚠️ QUOTA ERROR for location ${location.id}: TTS API quota exceeded`);
+              console.error(`[PRAGEN-TTS] Quota error details: ${errorText.slice(0, 200)}`);
+              console.error(`[PRAGEN-TTS] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
+              console.error(`[PRAGEN-TTS] Stopping pre-generation due to TTS quota limit`);
+              failCount++;
+              break; // Прерываем всю прегенерацию при ошибке квоты TTS
+            }
+          }
+          
           if (ttsResponse.ok) {
             const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
             // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
@@ -8125,8 +8140,8 @@ app.post('/api/admin/games/:id/pregenerate-tts', async (req, res) => {
             break;
           }
           
-          // Небольшая задержка между запросами, чтобы не перегружать API
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // УВЕЛИЧЕННАЯ задержка между TTS запросами, чтобы не превышать квоту API (минимум 5 секунд для Gemini)
+          await new Promise(resolve => setTimeout(resolve, 5000));
           
         } catch (e) {
           // Проверяем флаг остановки при ошибке
@@ -8357,6 +8372,20 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
             signal: AbortSignal.timeout(120000)
             });
             
+            // Проверяем ошибку квоты в ответе TTS
+            if (ttsResponse.status === 429) {
+              const errorText = await ttsResponse.text().catch(() => '');
+              const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+              
+              if (isQuotaError) {
+                console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR for location ${location.id}: TTS API quota exceeded`);
+                console.error(`[PRAGEN-ALL] Quota error details: ${errorText.slice(0, 200)}`);
+                console.error(`[PRAGEN-ALL] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
+                console.error(`[PRAGEN-ALL] Stopping pre-generation due to TTS quota limit`);
+                return false; // Прерываем генерацию локации при ошибке квоты TTS
+              }
+            }
+            
             if (ttsResponse.ok) {
               const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
               // ИСПРАВЛЕНИЕ: Используем scenarioGameId (ID сценария) для сохранения
@@ -8563,6 +8592,21 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       signal: AbortSignal.timeout(120000)
                     });
                     
+                    // Проверяем ошибку квоты в ответе TTS
+                    if (choiceTtsResponse.status === 429) {
+                      const errorText = await choiceTtsResponse.text().catch(() => '');
+                      const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+                      
+                      if (isQuotaError) {
+                        console.error(`[PRAGEN-ALL] ⚠️ QUOTA ERROR at dialogue depth ${depth}, choice: "${choiceText.slice(0, 50)}..." - TTS API quota exceeded`);
+                        console.error(`[PRAGEN-ALL] Quota error details: ${errorText.slice(0, 200)}`);
+                        console.error(`[PRAGEN-ALL] 💡 TIP: Set PREGEN_AI_PROVIDER=openai in .env to use OpenAI for pregeneration`);
+                        console.error(`[PRAGEN-ALL] Stopping dialogue generation due to TTS quota limit`);
+                        choiceResponseFailCount++;
+                        return; // Выходим из функции, но не прерываем всю прегенерацию
+                      }
+                    }
+                    
                     if (choiceTtsResponse.ok) {
                       const choiceAudioBuffer = Buffer.from(await choiceTtsResponse.arrayBuffer());
                       
@@ -8607,13 +8651,13 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                       if (generationStopFlags.get(gameId)) {
                         return;
                       }
-                        // Увеличенная задержка между запросами для избежания превышения квоты
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                      // УВЕЛИЧЕННАЯ задержка между TTS запросами для избежания превышения квоты (минимум 5 секунд для Gemini)
+                      await new Promise(resolve => setTimeout(resolve, 5000));
                       }
                     }
                     
-                    // Увеличенная задержка между запросами для избежания превышения квоты
-                    await new Promise(resolve => setTimeout(resolve, 2000));
+                      // УВЕЛИЧЕННАЯ задержка между TTS запросами для избежания превышения квоты (минимум 5 секунд для Gemini)
+                      await new Promise(resolve => setTimeout(resolve, 5000));
                 } else {
                   choiceResponseFailCount++;
                 }
