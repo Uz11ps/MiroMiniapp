@@ -4592,6 +4592,7 @@ app.post('/api/chat/reply', async (req, res) => {
       
       // Вызываем TTS endpoint напрямую через внутренний HTTP запрос
       // Ждем завершения генерации перед отправкой текста клиенту
+      // Сохраняем аудио, чтобы вернуть его клиенту
       const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
       const ttsUrl = `${apiBase}/api/tts`;
       
@@ -4611,13 +4612,20 @@ app.post('/api/chat/reply', async (req, res) => {
         signal: AbortSignal.timeout(120000) // 2 минуты таймаут
       });
       
+      let audioData: { buffer: Buffer; contentType: string } | null = null;
+      
       if (ttsResponse.ok) {
-        const audioBuffer = await ttsResponse.arrayBuffer();
+        const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+        const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+        audioData = { buffer: audioBuffer, contentType };
         console.log('[REPLY] ✅ TTS pre-generation successful, audio size:', audioBuffer.byteLength, 'bytes');
       } else {
         const errorText = await ttsResponse.text().catch(() => '');
         console.warn('[REPLY] TTS pre-generation failed:', ttsResponse.status, errorText.slice(0, 200));
       }
+      
+      // Сохраняем аудио в переменную для возврата клиенту
+      (req as any).preGeneratedAudio = audioData;
     } catch (ttsErr: any) {
       console.warn('[REPLY] TTS pre-generation error (non-critical):', ttsErr?.message || String(ttsErr));
       // НЕ блокируем отправку текста, если TTS не сгенерировался - клиент может запросить позже
@@ -4637,7 +4645,20 @@ app.post('/api/chat/reply', async (req, res) => {
       await prisma.chatSession.update({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       advanceTurn(lobbyId);
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
-      return res.json({ message: text, fallback: false, requestDice: aiRequestDice });
+      
+      // Возвращаем текст с прегенерированным аудио (если есть)
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
+      if ((req as any).preGeneratedAudio) {
+        const audio = (req as any).preGeneratedAudio;
+        // Конвертируем аудио в base64 для отправки клиенту
+        response.audio = {
+          data: audio.buffer.toString('base64'),
+          contentType: audio.contentType,
+          format: 'base64'
+        };
+        console.log('[REPLY] ✅ Returning pre-generated audio with text response');
+      }
+      return res.json(response);
     } else {
       const uid = await resolveUserIdFromQueryOrBody(req, prisma);
       if (uid) {
@@ -4653,7 +4674,20 @@ app.post('/api/chat/reply', async (req, res) => {
         ]);
         await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       }
-      return res.json({ message: text, fallback: false, requestDice: aiRequestDice });
+      
+      // Возвращаем текст с прегенерированным аудио (если есть)
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
+      if ((req as any).preGeneratedAudio) {
+        const audio = (req as any).preGeneratedAudio;
+        // Конвертируем аудио в base64 для отправки клиенту
+        response.audio = {
+          data: audio.buffer.toString('base64'),
+          contentType: audio.contentType,
+          format: 'base64'
+        };
+        console.log('[REPLY] ✅ Returning pre-generated audio with text response');
+      }
+      return res.json(response);
     }
   } catch (e) {
     console.error('Reply handler error:', e);
