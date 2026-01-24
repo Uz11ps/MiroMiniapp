@@ -166,14 +166,25 @@ input, textarea, .bubble {
   background: rgba(10, 20, 40, 0.9);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  height: 60px;
+  box-sizing: border-box;
 }
 .chip-btn { padding: 8px 12px; border-radius: 20px; background: rgba(255,255,255,0.12); }
-.mic { width: 160px; height: 160px; border-radius: 80px; background: rgba(255,255,255,0.08); display:flex; align-items:center; justify-content:center; margin: 0 auto; }
+.mic { 
+  width: 160px; 
+  height: 160px; 
+  border-radius: 80px; 
+  background: rgba(255,255,255,0.08); 
+  display:flex; 
+  align-items:center; 
+  justify-content:center; 
+  margin: 80px auto 20px; /* Отступ сверху для header */
+}
 .messages { 
   flex: 1;
   display: grid; 
   gap: 8px; 
-  padding: 80px 16px 100px;
+  padding: 20px 16px 120px; /* padding-top уменьшен, так как mic уже имеет отступ, padding-bottom увеличен для composer */
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
@@ -225,6 +236,8 @@ input, textarea, .bubble {
   background: rgba(10, 20, 40, 0.9);
   backdrop-filter: blur(8px);
   border-top: 1px solid rgba(255, 255, 255, 0.1);
+  min-height: 80px;
+  box-sizing: border-box;
 }
 .icon-btn { 
   width: 44px; 
