@@ -1435,6 +1435,7 @@ const CharacterDetails: React.FC = () => {
   }, [id, charId]);
   return (
     <Sheet title={ch?.name || 'Персонаж'} onClose={() => navigate(-1)}>
+      <div className="sheet-scroll">
       <div style={{ textAlign: 'center' }}>
         <img
           src={ch?.avatarUrl ? resolveAssetUrlGlobal(ch.avatarUrl) : `https://picsum.photos/seed/char_${(charId || '1')}/300/220`}
@@ -1571,7 +1572,8 @@ const CharacterDetails: React.FC = () => {
           </div>
         </div>
       </div>
-      <div style={{ height: 12 }} />
+      </div>
+      <div className="sheet-footer">
       <button
         className="btn block"
         disabled={!ch?.id || ch.isPlayable === false}
@@ -1596,6 +1598,7 @@ const CharacterDetails: React.FC = () => {
       >
         {!ch?.id ? 'Выберите персонажа' : ch.isPlayable === false ? 'Выберите игрового персонажа' : 'Начать игру'}
       </button>
+      </div>
     </Sheet>
   );
 };
