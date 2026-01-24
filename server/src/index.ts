@@ -4334,7 +4334,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                 format: 'wav',
                 isNarrator: true
               }),
-              signal: AbortSignal.timeout(20000)
+              signal: AbortSignal.timeout(60000) // 60 секунд для SSML генерации
             });
             
             if (ttsResponse.ok) {
@@ -5409,7 +5409,7 @@ app.post('/api/chat/reply', async (req, res) => {
             format: 'wav',
             isNarrator: true
           }),
-          signal: AbortSignal.timeout(30000) // 30 секунд таймаут
+          signal: AbortSignal.timeout(60000) // 60 секунд таймаут (нужно время для SSML генерации)
         });
         
         if (ttsResponse.ok) {
@@ -7721,6 +7721,8 @@ app.post('/api/tts', async (req, res) => {
           if (audioBuffer) {
             console.log('[GOOGLE-TTS] ✅ Successfully generated audio, size:', audioBuffer.length, 'bytes');
             return audioBuffer;
+          } else {
+            console.error('[GOOGLE-TTS] ❌ generateChunk returned null/undefined for single chunk');
           }
         } else {
           // Нужно разбить на части
@@ -7815,9 +7817,12 @@ app.post('/api/tts', async (req, res) => {
       if (!geminiQuotaAvailable) {
         const googleAudio = await generateGoogleTTS();
         if (googleAudio) {
+          console.log('[TTS] ✅ Returning Google TTS audio to client, size:', googleAudio.length, 'bytes');
           res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
           res.setHeader('Content-Length', googleAudio.length.toString());
           return res.send(googleAudio);
+        } else {
+          console.warn('[TTS] ⚠️ Google TTS returned null/undefined, continuing with Gemini fallback');
         }
       }
       
@@ -8134,9 +8139,12 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
     console.log('[TTS] Falling back to Google TTS (works for all requests: pregen, welcome, reply, regular)...');
     const googleAudio = await generateGoogleTTS();
     if (googleAudio) {
+      console.log('[TTS] ✅ Returning Google TTS fallback audio to client, size:', googleAudio.length, 'bytes');
       res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
       res.setHeader('Content-Length', googleAudio.length.toString());
       return res.send(googleAudio);
+    } else {
+      console.error('[TTS] ❌ Google TTS fallback also returned null/undefined!');
     }
     
     return res.status(502).json({ 
@@ -8849,7 +8857,7 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                         format: 'wav',
                         isNarrator: true,
                       }),
-                      signal: AbortSignal.timeout(20000)
+                      signal: AbortSignal.timeout(60000) // 60 секунд для SSML генерации
                     });
                     
                     // Проверяем ошибку квоты в ответе TTS
