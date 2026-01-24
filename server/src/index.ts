@@ -8036,7 +8036,8 @@ app.post('/api/admin/games/:id/pregenerate-all-tts', async (req, res) => {
                     }).join('\n'));
                   }
                   
-                  // Добавляем NPC
+                  // Добавляем NPC (получаем из базы данных)
+                  const chars = await prisma.character.findMany({ where: { gameId, isPlayable: false }, take: 10 });
                   if (Array.isArray(chars) && chars.length) {
                     context.push('NPC, доступные в мире (используй их в сценах):\n' + chars.map((n) => {
                       const traits = [n.role, n.race, n.gender].filter(Boolean).join(', ');
