@@ -63,7 +63,6 @@ const GameChat: React.FC = () => {
   const activeSpeakSeqRef = React.useRef<number>(0);
   const speakingInFlightRef = React.useRef<boolean>(false);
   const brokenBgSetRef = React.useRef<Set<string>>(new Set());
-  const messagesEndRef = React.useRef<HTMLDivElement | null>(null);
   const resolveAssetUrl = (u?: string | null): string => {
     const raw = String(u || '').trim();
     if (!raw) return '';
@@ -1188,28 +1187,7 @@ const GameChat: React.FC = () => {
 
       <div className="mic">🎤</div>
 
-      <div 
-        className="messages"
-        ref={(messagesEl) => {
-          if (messagesEl) {
-            // Автоскролл к последнему сообщению при монтировании
-            setTimeout(() => {
-              messagesEl.scrollTop = messagesEl.scrollHeight;
-            }, 100);
-          }
-        }}
-        style={{
-          maxHeight: 'calc(100dvh - 200px)', /* Динамическая высота для мобильных */
-          overflowY: 'auto',
-          overflowX: 'hidden',
-          WebkitOverflowScrolling: 'touch',
-          overscrollBehavior: 'contain',
-          paddingBottom: '8px',
-          /* Улучшаем производительность */
-          willChange: 'scroll-position',
-          transform: 'translateZ(0)'
-        }}
-      >
+      <div className="messages">
         {messages.map((m, i) => {
           const isUser = (m as any).from === 'user';
           const isMine = isUser ? ((m as any).userId && ((m as any).userId === self.userId)) : (m.from === 'me');
@@ -1236,7 +1214,6 @@ const GameChat: React.FC = () => {
             <div className="bubble" style={{ opacity: 0.7, fontStyle: 'italic' }}>Генерация...</div>
           </div>
         )}
-        <div ref={messagesEndRef} style={{ height: 1 }} />
       </div>
 
       <div style={{ height: 4 }} />
