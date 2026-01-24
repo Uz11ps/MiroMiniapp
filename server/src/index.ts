@@ -7576,6 +7576,11 @@ app.post('/api/tts', async (req, res) => {
       });
     }
     
+    // Находим информацию о персонаже для использования в TTS
+    const characterInfo = finalCharacterId && availableCharacters.length > 0
+      ? availableCharacters.find(c => c.id === finalCharacterId)
+      : null;
+    
     // Функция для генерации через Google TTS (используется как fallback)
     const generateGoogleTTS = async (): Promise<Buffer | null> => {
       try {
@@ -7737,7 +7742,7 @@ app.post('/api/tts', async (req, res) => {
       }
       
       // Формируем директорские заметки на основе полного контекста персонажа
-      const characterInfo = availableCharacters.find(c => c.id === finalCharacterId);
+      // characterInfo уже определен выше
       let directorsNotes = '';
       
       if (finalIsNarrator) {
