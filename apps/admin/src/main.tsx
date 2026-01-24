@@ -660,6 +660,7 @@ const ScenarioPage: React.FC = () => {
       loseCondition: game.loseCondition,
       deathCondition: game.deathCondition,
       finalScreenUrl: game.finalScreenUrl,
+      usePregenMaterials: game.usePregenMaterials || false,
     }) });
     setSaving(false);
     load();
@@ -742,6 +743,42 @@ const ScenarioPage: React.FC = () => {
         <div className="card" style={{ padding: 12, display: 'grid', gap: 10 }}>
           <h2 style={{ margin: 0 }}>Редактор сценария — {game.title}</h2>
           <div className="muted">ID: {game.id}</div>
+          <div style={{ 
+            padding: '20px', 
+            backgroundColor: game.usePregenMaterials ? '#4CAF50' : '#f44336', 
+            borderRadius: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '16px',
+            cursor: 'pointer',
+            transition: 'all 0.3s',
+            border: '3px solid',
+            borderColor: game.usePregenMaterials ? '#2E7D32' : '#C62828'
+          }}
+          onClick={async () => {
+            try {
+              const newValue = !game.usePregenMaterials;
+              await fetch(`${API}/admin/games/${game.id}`, { 
+                method: 'PATCH', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ usePregenMaterials: newValue }) 
+              });
+              setGame({ ...game, usePregenMaterials: newValue });
+            } catch {
+              alert('Не удалось изменить настройку');
+            }
+          }}
+          title={game.usePregenMaterials ? 'Отключить использование прегенерированных материалов' : 'Включить использование прегенерированных материалов'}
+          >
+            <div style={{ fontSize: '48px' }}>{game.usePregenMaterials ? '✅' : '❌'}</div>
+            <div style={{ color: 'white', fontSize: '24px', fontWeight: 'bold', textAlign: 'center' }}>
+              {game.usePregenMaterials 
+                ? '✅ ИСПОЛЬЗОВАТЬ ПРЕГЕНЕРИРОВАННЫЕ МАТЕРИАЛЫ' 
+                : '❌ ГЕНЕРИРОВАТЬ В РЕАЛЬНОМ ВРЕМЕНИ'}
+            </div>
+            <div style={{ fontSize: '48px' }}>{game.usePregenMaterials ? '✅' : '❌'}</div>
+          </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button onClick={save} disabled={saving}>{saving ? 'Сохранение...' : 'Сохранить метаданные'}</button>
             <button

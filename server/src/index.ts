@@ -178,6 +178,23 @@ function findPregenAudio(gameId: string, text: string, locationId?: string, char
   return null;
 }
 
+// Функция для поиска предгенерированного текста
+function findPregenText(gameId: string, text: string, locationId?: string, characterId?: string, messageType: 'narrator' | 'character' = 'narrator'): string | null {
+  const audioPath = findPregenAudio(gameId, text, locationId, characterId, messageType);
+  if (!audioPath) return null;
+  
+  const textPath = audioPath.replace('.wav', '.txt');
+  try {
+    if (fs.existsSync(textPath)) {
+      return fs.readFileSync(textPath, 'utf-8');
+    }
+  } catch (e) {
+    // Игнорируем ошибки
+  }
+  
+  return null;
+}
+
 // -------------------- AI Prompts (runtime editable) --------------------
 type AiPrompts = {
   system: string;
@@ -3892,8 +3909,22 @@ app.post('/api/chat/welcome', async (req, res) => {
         game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
         game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
       ].filter(Boolean).join('\n\n')).trim();
+      
+      // Если включено использование прегенерированных материалов - ищем прегенерированный текст
       let text = offlineText;
-      if (apiKey) {
+      if (game?.usePregenMaterials && gameId && first?.id) {
+        // Пытаемся найти прегенерированный текст для этой локации
+        // Ищем по хешу описания локации
+        const pregenText = findPregenText(gameId, base || loc?.title || '', first.id, undefined, 'narrator');
+        if (pregenText) {
+          text = pregenText;
+          console.log('[WELCOME] ✅ Using pre-generated text for location');
+        } else {
+          // Если прегенерированного текста нет, используем fallback
+          console.warn('[WELCOME] ⚠️ Pre-generated text not found, using fallback');
+        }
+      } else if (apiKey) {
+        // Генерируем в реальном времени только если не включено использование прегенерированных материалов
         try {
           const client = createOpenAIClient(apiKey);
           const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -3967,8 +3998,9 @@ app.post('/api/chat/welcome', async (req, res) => {
             }
           }
           
-          // Если прегенерированного аудио нет, генерируем новое
-          if (!audioData) {
+          // Если включено использование прегенерированных материалов - НЕ генерируем в реальном времени
+          // Если не включено - генерируем в реальном времени, если прегенерированного нет
+          if (!audioData && !game?.usePregenMaterials) {
             const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
             const ttsUrl = `${apiBase}/api/tts`;
             console.log('[WELCOME] 🎤 Generating TTS for welcome message, text length:', text.length);
@@ -4549,13 +4581,45 @@ app.post('/api/chat/reply', async (req, res) => {
       `Действие игрока: ${userText || 'Продолжай.'}`
     ].filter(Boolean).join('\n\n');
 
-    const { text: generatedText } = await generateChatCompletion({
-      systemPrompt: sys,
-      userPrompt: userPrompt,
-      history: baseHistory
-    });
-
-    let text = generatedText;
+    let text: string | null = null;
+    
+    // Если включено использование прегенерированных материалов - ищем прегенерированный текст
+    if (game?.usePregenMaterials && gameId) {
+      let locationId: string | undefined = undefined;
+      try {
+        let sess: any = null;
+        if (lobbyId) {
+          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+        } else {
+          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        }
+        if (sess) {
+          locationId = sess.currentLocationId || undefined;
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to get location for pregen text:', e);
+      }
+      
+      // Ищем прегенерированный текст по действию игрока и контексту
+      const pregenText = findPregenText(gameId, userText || userPrompt, locationId, undefined, 'narrator');
+      if (pregenText) {
+        text = pregenText;
+        console.log('[REPLY] ✅ Using pre-generated text (usePregenMaterials=true)');
+      } else {
+        console.warn('[REPLY] ⚠️ Pre-generated text not found, using fallback (usePregenMaterials=true)');
+      }
+    }
+    
+    // Если не включено использование прегенерированных материалов или текст не найден - генерируем в реальном времени
+    if (!text && (!game?.usePregenMaterials || !gameId)) {
+      const { text: generatedText } = await generateChatCompletion({
+        systemPrompt: sys,
+        userPrompt: userPrompt,
+        history: baseHistory
+      });
+      text = generatedText;
+    }
     if (!text) {
       text = await fallbackBranch();
       return res.json({ message: text, fallback: true });
@@ -4882,8 +4946,9 @@ app.post('/api/chat/reply', async (req, res) => {
         }
       }
       
-      // Если прегенерированного аудио нет, генерируем новое
-      if (!audioData) {
+      // Если включено использование прегенерированных материалов - НЕ генерируем в реальном времени
+      // Если не включено - генерируем в реальном времени, если прегенерированного нет
+      if (!audioData && !game?.usePregenMaterials) {
         const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
         const ttsUrl = `${apiBase}/api/tts`;
         
@@ -6611,6 +6676,14 @@ app.post('/api/tts', async (req, res) => {
         } catch (e) {
           console.warn('[TTS] Failed to read pre-generated audio:', e);
         }
+      }
+      
+      // Если включено использование прегенерированных материалов - НЕ генерируем в реальном времени
+      const prisma = getPrisma();
+      const game = await prisma.game.findUnique({ where: { id: gameId }, select: { usePregenMaterials: true } });
+      if (game?.usePregenMaterials) {
+        console.warn('[TTS] ⚠️ usePregenMaterials=true but pre-generated audio not found, returning error');
+        return res.status(404).json({ error: 'pregen_audio_not_found', message: 'Прегенерированное аудио не найдено' });
       }
     }
     
