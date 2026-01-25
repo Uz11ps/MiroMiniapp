@@ -331,6 +331,123 @@ function parseChoiceOptions(text: string): string[] {
   return choices.filter(Boolean);
 }
 
+// Определяет choiceIndex из userText с помощью AI
+// Использует AI для понимания намерения пользователя и сопоставления с вариантами выбора
+async function detectChoiceIndexWithAI(userText: string, botMessageText?: string): Promise<number | undefined> {
+  if (!userText || typeof userText !== 'string') return undefined;
+  
+  // Сначала пробуем быстрый хардкод для простых случаев (цифры)
+  const normalized = userText.trim().toLowerCase();
+  const directNumberMatch = normalized.match(/^(\d+)[\s\-\.й]*/);
+  if (directNumberMatch) {
+    const num = parseInt(directNumberMatch[1], 10);
+    if (num >= 1 && num <= 10) {
+      return num - 1;
+    }
+  }
+  
+  // Если нет вариантов выбора - возвращаем undefined
+  if (!botMessageText) return undefined;
+  
+  const choices = parseChoiceOptions(botMessageText);
+  if (choices.length === 0) return undefined;
+  
+  try {
+    // Используем AI для определения выбора
+    const systemPrompt = `Ты помощник для определения выбора пользователя в текстовой игре. 
+Пользователь написал ответ, и нужно определить, какой вариант выбора (1-${choices.length}) он имел в виду.
+
+Варианты выбора:
+${choices.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+Ответ пользователя: "${userText}"
+
+Верни ТОЛЬКО номер варианта (1-${choices.length}) или "0" если не можешь определить. Никаких объяснений, только число.`;
+
+    const { text: aiResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt: `Определи, какой вариант выбора имел в виду пользователь в ответе: "${userText}"`,
+      history: []
+    });
+    
+    const choiceNum = parseInt(aiResponse.trim(), 10);
+    if (choiceNum >= 1 && choiceNum <= choices.length) {
+      console.log('[AI-CHOICE] ✅ Detected choiceIndex:', choiceNum - 1, 'from userText:', userText);
+      return choiceNum - 1;
+    }
+  } catch (e) {
+    console.warn('[AI-CHOICE] Failed to detect choice with AI, falling back to simple matching:', e);
+  }
+  
+  // Fallback на простое сопоставление по ключевым словам
+  return detectChoiceIndex(userText, botMessageText);
+}
+
+// Определяет choiceIndex из userText с учетом различных вариантов ответа (fallback, без AI)
+// Поддерживает: цифры ("2", "2.", "2-й"), слова ("второй", "два"), частичные совпадения, копирование текста
+function detectChoiceIndex(userText: string, botMessageText?: string): number | undefined {
+  if (!userText || typeof userText !== 'string') return undefined;
+  
+  const normalized = userText.trim().toLowerCase();
+  
+  // 1. Прямое совпадение с цифрой: "2", "2.", "2-й", "2й", "2-й вариант"
+  const directNumberMatch = normalized.match(/^(\d+)[\s\-\.й]*/);
+  if (directNumberMatch) {
+    const num = parseInt(directNumberMatch[1], 10);
+    if (num >= 1 && num <= 10) {
+      return num - 1; // choiceIndex начинается с 0
+    }
+  }
+  
+  // 2. Слова-цифры: "первый", "второй", "третий", "четвертый", "пятый", "шестой", "седьмой", "восьмой", "девятый", "десятый"
+  const numberWords: Record<string, number> = {
+    'первый': 1, 'первая': 1, 'первое': 1, 'первым': 1, 'первой': 1,
+    'второй': 2, 'вторая': 2, 'второе': 2, 'вторым': 2, 'второй': 2,
+    'третий': 3, 'третья': 3, 'третье': 3, 'третьим': 3, 'третьей': 3,
+    'четвертый': 4, 'четвертая': 4, 'четвертое': 4, 'четвертым': 4, 'четвертой': 4,
+    'пятый': 5, 'пятая': 5, 'пятое': 5, 'пятым': 5, 'пятой': 5,
+    'шестой': 6, 'шестая': 6, 'шестое': 6, 'шестым': 6, 'шестой': 6,
+    'седьмой': 7, 'седьмая': 7, 'седьмое': 7, 'седьмым': 7, 'седьмой': 7,
+    'восьмой': 8, 'восьмая': 8, 'восьмое': 8, 'восьмым': 8, 'восьмой': 8,
+    'девятый': 9, 'девятая': 9, 'девятое': 9, 'девятым': 9, 'девятой': 9,
+    'десятый': 10, 'десятая': 10, 'десятое': 10, 'десятым': 10, 'десятой': 10,
+    'один': 1, 'два': 2, 'три': 3, 'четыре': 4, 'пять': 5,
+    'шесть': 6, 'семь': 7, 'восемь': 8, 'девять': 9, 'десять': 10
+  };
+  
+  for (const [word, num] of Object.entries(numberWords)) {
+    if (normalized.includes(word)) {
+      return num - 1;
+    }
+  }
+  
+  // 3. Поиск по тексту варианта (если пользователь скопировал текст варианта)
+  if (botMessageText) {
+    const choices = parseChoiceOptions(botMessageText);
+    const normalizedUserText = normalized.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    
+    for (let i = 0; i < choices.length; i++) {
+      const choiceText = choices[i].toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+      // Проверяем частичное совпадение (минимум 3 символа совпадают)
+      if (choiceText.length >= 3 && normalizedUserText.length >= 3) {
+        // Проверяем, содержит ли userText ключевые слова из варианта
+        const choiceWords = choiceText.split(/\s+/).filter(w => w.length >= 3);
+        const userWords = normalizedUserText.split(/\s+/).filter(w => w.length >= 3);
+        
+        // Если хотя бы 2 слова совпадают или userText содержит большую часть choiceText
+        const matchingWords = choiceWords.filter(cw => userWords.some(uw => uw.includes(cw) || cw.includes(uw)));
+        if (matchingWords.length >= Math.min(2, choiceWords.length) || 
+            normalizedUserText.includes(choiceText) || 
+            choiceText.includes(normalizedUserText)) {
+          return i;
+        }
+      }
+    }
+  }
+  
+  return undefined;
+}
+
 // Функция для получения пути к предгенерированному аудио файлу
 function getPregenAudioPath(
   gameId: string, 
@@ -5197,24 +5314,97 @@ app.post('/api/chat/reply', async (req, res) => {
           locationIdForPregen = sess.currentLocationId || undefined;
           scenarioGameIdForPregen = sess.scenarioGameId;
           
-          // Определяем depth и choiceIndex из истории
+          // Определяем depth, choiceIndex и parentHash из истории
           if (baseHistory && baseHistory.length > 0) {
             const botMessages = baseHistory.filter(m => m.from === 'bot');
             depthForPregen = botMessages.length;
             
-            const lastUserMessage = [...baseHistory].reverse().find(m => m.from === 'me');
-            if (lastUserMessage && lastUserMessage.text) {
-              const choiceMatch = lastUserMessage.text.trim().match(/^(\d+)$/);
-              if (choiceMatch) {
-                choiceIndexForPregen = parseInt(choiceMatch[1], 10) - 1;
-              }
-              
-              if (botMessages.length > 0) {
-                const lastBotMessage = botMessages[botMessages.length - 1];
-                if (lastBotMessage && lastBotMessage.text) {
-                  parentHashForPregen = createAudioHash(lastBotMessage.text, locationIdForPregen, undefined, 'narrator', depthForPregen - 1);
+            // КРИТИЧЕСКИ ВАЖНО: choiceIndex определяем из ТЕКУЩЕГО userText (ответ пользователя)
+            // А не из истории, так как для первого ответа на welcome сообщение это еще не в истории
+            // Используем AI для определения choiceIndex
+            if (userText) {
+              const lastBotMessage = botMessages.length > 0 ? botMessages[botMessages.length - 1] : null;
+              try {
+                const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
+                if (detectedChoiceIndex !== undefined) {
+                  choiceIndexForPregen = detectedChoiceIndex;
+                  console.log('[REPLY] ✅ Detected choiceIndex from current userText (AI):', choiceIndexForPregen, 'for userText:', userText);
+                }
+              } catch (e) {
+                console.warn('[REPLY] Failed to detect choiceIndex with AI, using fallback:', e);
+                // Fallback на простое определение
+                const fallbackChoiceIndex = detectChoiceIndex(userText, lastBotMessage?.text);
+                if (fallbackChoiceIndex !== undefined) {
+                  choiceIndexForPregen = fallbackChoiceIndex;
                 }
               }
+            }
+            
+            // parentHash - это хеш последнего сообщения бота (welcome сообщения или предыдущего ответа)
+            if (botMessages.length > 0) {
+              const lastBotMessage = botMessages[botMessages.length - 1];
+              if (lastBotMessage && lastBotMessage.text) {
+                // КРИТИЧЕСКИ ВАЖНО: parentHash создается БЕЗ locationId в хеше (для диалогов внутри локации)
+                parentHashForPregen = createAudioHash(lastBotMessage.text, undefined, undefined, 'narrator', depthForPregen - 1);
+                console.log('[REPLY] ✅ Created parentHash from last bot message, depth:', depthForPregen - 1, 'hash:', parentHashForPregen?.slice(0, 8));
+              }
+            }
+          } else {
+            // Если истории нет (первый ответ на welcome), depth=1, choiceIndex из userText
+            depthForPregen = 1;
+            if (userText) {
+              // Получаем welcome сообщение для AI-поиска
+              let welcomeMessageText: string | undefined = undefined;
+              try {
+                const uid = lobbyId ? undefined : await resolveUserIdFromQueryOrBody(req, prisma);
+                const chatSess = lobbyId 
+                  ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } })
+                  : uid ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } } }) : null;
+                if (chatSess?.history) {
+                  const hist = (chatSess.history as any) as Array<{ from: 'bot' | 'me'; text: string }>;
+                  const welcomeMsg = hist.find(m => m.from === 'bot');
+                  if (welcomeMsg?.text) {
+                    welcomeMessageText = welcomeMsg.text;
+                  }
+                }
+              } catch (e) {
+                // Игнорируем ошибки
+              }
+              
+              // Используем AI для определения choiceIndex
+              try {
+                const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, welcomeMessageText);
+                if (detectedChoiceIndex !== undefined) {
+                  choiceIndexForPregen = detectedChoiceIndex;
+                  console.log('[REPLY] ✅ First reply: detected choiceIndex from userText (AI):', choiceIndexForPregen, 'for userText:', userText);
+                }
+              } catch (e) {
+                console.warn('[REPLY] Failed to detect choiceIndex with AI, using fallback:', e);
+                // Fallback на простое определение
+                const fallbackChoiceIndex = detectChoiceIndex(userText, welcomeMessageText);
+                if (fallbackChoiceIndex !== undefined) {
+                  choiceIndexForPregen = fallbackChoiceIndex;
+                }
+              }
+            }
+            // parentHash для первого ответа - это хеш welcome сообщения (depth=0)
+            // Попробуем получить welcome сообщение из chatSession
+            try {
+              const uid = lobbyId ? undefined : await resolveUserIdFromQueryOrBody(req, prisma);
+              const chatSess = lobbyId 
+                ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } })
+                : uid ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } } }) : null;
+              if (chatSess?.history) {
+                const hist = (chatSess.history as any) as Array<{ from: 'bot' | 'me'; text: string }>;
+                const welcomeMsg = hist.find(m => m.from === 'bot');
+                if (welcomeMsg?.text) {
+                  // КРИТИЧЕСКИ ВАЖНО: parentHash создается БЕЗ locationId в хеше (для диалогов внутри локации)
+                  parentHashForPregen = createAudioHash(welcomeMsg.text, undefined, undefined, 'narrator', 0);
+                  console.log('[REPLY] ✅ First reply: created parentHash from welcome message, hash:', parentHashForPregen?.slice(0, 8));
+                }
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to get welcome message for parentHash:', e);
             }
           }
         } else {
@@ -5241,12 +5431,52 @@ app.post('/api/chat/reply', async (req, res) => {
       if (hasMaterials) {
         // Ищем по userText (действие игрока)
         let foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
+        
+        // Если не нашли и choiceIndex не определен, пробуем найти по всем возможным choiceIndex (0-9)
+        // Это нужно для случаев, когда пользователь написал "второй", "два" и т.д., но choiceIndex еще не определен
+        if (!foundText && choiceIndexForPregen === undefined && userText) {
+          // Пробуем определить choiceIndex с помощью AI
+          const lastBotMessage = baseHistory ? baseHistory.filter(m => m.from === 'bot').pop() : null;
+          try {
+            const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
+            if (detectedChoiceIndex !== undefined) {
+              foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, detectedChoiceIndex, parentHashForPregen);
+              if (foundText) {
+                choiceIndexForPregen = detectedChoiceIndex;
+                console.log('[REPLY] ✅ Found pre-generated text with AI choiceIndex:', detectedChoiceIndex);
+              }
+            }
+          } catch (e) {
+            // Fallback на простое определение
+            const fallbackChoiceIndex = detectChoiceIndex(userText, lastBotMessage?.text);
+            if (fallbackChoiceIndex !== undefined) {
+              foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, fallbackChoiceIndex, parentHashForPregen);
+              if (foundText) {
+                choiceIndexForPregen = fallbackChoiceIndex;
+              }
+            }
+          }
+          
+          // Если все еще не нашли, пробуем поиск по всем возможным choiceIndex (0-9)
+          if (!foundText) {
+            for (let ci = 0; ci < 10; ci++) {
+              foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, ci, parentHashForPregen);
+              if (foundText) {
+                choiceIndexForPregen = ci;
+                console.log('[REPLY] ✅ Found pre-generated text with choiceIndex:', ci);
+                break;
+              }
+            }
+          }
+        }
+        
+        // Если все еще не нашли, пробуем без параметров depth/choiceIndex/parentHash
         if (!foundText) {
           foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator');
         }
+        
         if (foundText) {
           pregenTextFound = foundText;
-          console.log('[REPLY] ✅ Found pre-generated text BEFORE generation');
           console.log('[REPLY] ✅ Found pre-generated text BEFORE generation');
         }
       }
@@ -5619,7 +5849,7 @@ app.post('/api/chat/reply', async (req, res) => {
     
     // Определяем переменные для TTS ДО блока try, чтобы они были доступны везде
     const depth = depthForPregen;
-    const choiceIndex = choiceIndexForPregen;
+    let choiceIndex = choiceIndexForPregen; // Используем let, так как может быть обновлен при семантическом поиске
     const parentHash = parentHashForPregen;
     const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
     const characterId = undefined; // Для narrator всегда undefined
@@ -5648,6 +5878,51 @@ app.post('/api/chat/reply', async (req, res) => {
           // Пробуем найти с учетом depth и choiceIndex, но БЕЗ locationId в хеше (для диалогов внутри локации)
           let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
           let pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          
+          // Если не нашли и choiceIndex не определен, пробуем определить его с помощью AI и найти по всем возможным choiceIndex
+          if ((!foundPregenText || !pregenPath) && choiceIndex === undefined && userText) {
+            const lastBotMessage = baseHistory ? baseHistory.filter(m => m.from === 'bot').pop() : null;
+            try {
+              const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
+              if (detectedChoiceIndex !== undefined) {
+                foundPregenText = foundPregenText || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, detectedChoiceIndex, parentHash);
+                pregenPath = pregenPath || findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, detectedChoiceIndex, parentHash);
+                if (foundPregenText || pregenPath) {
+                  console.log('[REPLY] ✅ Found pre-generated content with AI choiceIndex:', detectedChoiceIndex);
+                  // Обновляем choiceIndex для дальнейшего использования
+                  choiceIndex = detectedChoiceIndex;
+                }
+              }
+            } catch (e) {
+              // Fallback на простое определение
+              const fallbackChoiceIndex = detectChoiceIndex(userText, lastBotMessage?.text);
+              if (fallbackChoiceIndex !== undefined) {
+                foundPregenText = foundPregenText || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, fallbackChoiceIndex, parentHash);
+                pregenPath = pregenPath || findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, fallbackChoiceIndex, parentHash);
+                if (foundPregenText || pregenPath) {
+                  choiceIndex = fallbackChoiceIndex;
+                }
+              }
+            }
+            
+            // Если все еще не нашли, пробуем поиск по всем возможным choiceIndex (0-9)
+            if (!foundPregenText || !pregenPath) {
+              for (let ci = 0; ci < 10; ci++) {
+                if (!foundPregenText) {
+                  foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
+                }
+                if (!pregenPath) {
+                  pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
+                }
+                if (foundPregenText && pregenPath) {
+                  console.log('[REPLY] ✅ Found pre-generated content with choiceIndex:', ci);
+                  // Обновляем choiceIndex для дальнейшего использования
+                  choiceIndex = ci;
+                  break;
+                }
+              }
+            }
+          }
           
           // Если не нашли БЕЗ locationId, пробуем С locationId (для обратной совместимости)
           if (!foundPregenText || !pregenPath) {
