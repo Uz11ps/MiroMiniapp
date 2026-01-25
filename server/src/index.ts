@@ -5075,88 +5075,11 @@ app.post('/api/chat/reply', async (req, res) => {
       return cachedGameSession;
     };
     
-    // СНАЧАЛА пытаемся смэпить ввод игрока к кнопке/триггеру и сменить сцену (если есть активная сессия)
+    // КРИТИЧЕСКИ ВАЖНО: НЕ используем прямой поиск по userText!
+    // ВСЕГДА используем choiceIndex, определенный AI
+    // Если AI не смог определить - есть fallback система для уточнения
     let forcedGameOver = false;
-    if (gameId) {
-      try {
-        const sess = await getGameSession();
-        if (sess?.currentLocationId) {
-          const curLocId = sess.currentLocationId;
-          const exits = await prisma.locationExit.findMany({ where: { locationId: curLocId } });
-          const low = userText.toLowerCase().trim();
-          console.log(`[REPLY] 🔍 Matching exit: userText="${userText}", low="${low}", exits count=${exits.length}`);
-          let chosen: any = null;
-          // цифрой 1..N по порядку кнопок
-          // КРИТИЧЕСКИ ВАЖНО: Ищем ТОЛЬКО если userText - это чистая цифра (1-9) или начинается с цифры
-          const btns = exits.filter((e: any) => e.type === 'BUTTON');
-          console.log(`[REPLY] 🔍 Available buttons:`, btns.map((b: any, i: number) => `${i + 1}. "${b.buttonText}" (id=${b.id})`));
-          // Ищем чистое число в начале строки (1-9) или число с точкой/скобкой (1., 1), 1))
-          const numMatch = low.match(/^(\d+)/);
-          if (numMatch && btns.length) {
-            const num = parseInt(numMatch[1], 10);
-            if (num >= 1 && num <= btns.length) {
-              const idx = num - 1; // 1-based to 0-based
-              chosen = btns[idx] || null;
-              console.log(`[REPLY] 🔍 Matched by number: "${num}" -> index ${idx} -> button "${chosen?.buttonText || 'null'}"`);
-            }
-          }
-          // текст кнопки
-          if (!chosen && btns.length && low) {
-            chosen = btns.find((b: any) => {
-              const btnText = (b.buttonText || '').toLowerCase();
-              const matches = btnText && low.includes(btnText);
-              if (matches) {
-                console.log(`[REPLY] 🔍 Matched by buttonText: "${b.buttonText}" (id=${b.id})`);
-              }
-              return matches;
-            }) || null;
-          }
-          // триггер
-          if (!chosen && low) {
-            chosen = exits.find((e: any) => {
-              const triggerText = (e.triggerText || '').toLowerCase();
-              if (triggerText) {
-                const variants = triggerText.split(/[,/;]| или /g).map((s: string) => s.trim()).filter(Boolean);
-                const matches = variants.some((v: string) => v && low.includes(v));
-                if (matches) {
-                  console.log(`[REPLY] 🔍 Matched by triggerText: "${e.triggerText}" (id=${e.id})`);
-                }
-                return matches;
-              }
-              return false;
-            }) || null;
-          }
-          if (chosen) {
-            console.log('[REPLY] ✅ Chosen exit:', { id: chosen.id, buttonText: chosen.buttonText, triggerText: chosen.triggerText, isGameOver: chosen.isGameOver, type: chosen.type, targetLocationId: chosen.targetLocationId });
-            // КРИТИЧЕСКИ ВАЖНО: Если у exit есть targetLocationId, то isGameOver ДОЛЖЕН быть false!
-            // Это защита от неправильно помеченных exits в базе данных
-            if (chosen.targetLocationId && (chosen.isGameOver || chosen.type === 'GAMEOVER')) {
-              console.warn(`[REPLY] ⚠️ Exit has targetLocationId but is marked as game over - IGNORING isGameOver flag!`);
-              chosen.isGameOver = false;
-              chosen.type = chosen.type === 'GAMEOVER' ? 'BUTTON' : chosen.type;
-            }
-            if (chosen.isGameOver || chosen.type === 'GAMEOVER') {
-              console.log('[REPLY] ⚠️ Exit marked as game over - setting forcedGameOver');
-              try {
-                const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
-                state.finishedAt = new Date().toISOString();
-                state.finishReason = 'game_over';
-                await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
-                forcedGameOver = true;
-              } catch {}
-            } else if (chosen.targetLocationId) {
-              await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: chosen.targetLocationId } });
-              // Обновляем кэш после изменения локации
-              cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
-            } else {
-              console.warn('[REPLY] ⚠️ Chosen exit has no targetLocationId and is not game over');
-            }
-          } else {
-            console.log('[REPLY] ⚠️ No exit chosen for userText:', userText);
-          }
-        }
-      } catch {}
-    }
+    let chosenExit: any = null; // Exit, выбранный по choiceIndex
     if (forcedGameOver && gameId) {
       const finalText = 'Сценарий завершён. Спасибо за игру!';
       if (lobbyId) {
@@ -5636,6 +5559,52 @@ app.post('/api/chat/reply', async (req, res) => {
           choiceIndexForPregen = detectedChoiceIndex;
           choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
           console.log('[REPLY] ✅ Detected choiceIndex with AI BEFORE pregen search:', choiceIndexForPregen, 'for userText:', userText);
+          
+          // КРИТИЧЕСКИ ВАЖНО: Используем choiceIndex для выбора exit
+          if (gameId) {
+            try {
+              const sess = await getGameSession();
+              if (sess?.currentLocationId) {
+                const curLocId = sess.currentLocationId;
+                const exits = await prisma.locationExit.findMany({ where: { locationId: curLocId } });
+                const btns = exits.filter((e: any) => e.type === 'BUTTON');
+                if (btns.length > 0 && choiceIndexForPregen >= 0 && choiceIndexForPregen < btns.length) {
+                  const chosenExit = btns[choiceIndexForPregen];
+                  console.log(`[REPLY] ✅ Chosen exit by choiceIndex ${choiceIndexForPregen}:`, { 
+                    id: chosenExit.id, 
+                    buttonText: chosenExit.buttonText, 
+                    isGameOver: chosenExit.isGameOver, 
+                    type: chosenExit.type, 
+                    targetLocationId: chosenExit.targetLocationId 
+                  });
+                  
+                  // КРИТИЧЕСКИ ВАЖНО: Если у exit есть targetLocationId, то isGameOver ДОЛЖЕН быть false!
+                  if (chosenExit.targetLocationId && (chosenExit.isGameOver || chosenExit.type === 'GAMEOVER')) {
+                    console.warn(`[REPLY] ⚠️ Exit has targetLocationId but is marked as game over - IGNORING isGameOver flag!`);
+                    chosenExit.isGameOver = false;
+                    chosenExit.type = chosenExit.type === 'GAMEOVER' ? 'BUTTON' : chosenExit.type;
+                  }
+                  
+                  if (chosenExit.isGameOver || chosenExit.type === 'GAMEOVER') {
+                    console.log('[REPLY] ⚠️ Exit marked as game over - setting forcedGameOver');
+                    try {
+                      const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+                      state.finishedAt = new Date().toISOString();
+                      state.finishReason = 'game_over';
+                      await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+                      forcedGameOver = true;
+                    } catch {}
+                  } else if (chosenExit.targetLocationId) {
+                    await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: chosenExit.targetLocationId } });
+                    // Обновляем кэш после изменения локации
+                    cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to choose exit by choiceIndex:', e);
+            }
+          }
         } else {
           // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
           console.log('[REPLY] ⚠️ AI returned undefined - no choices found in bot message, continuing without choiceIndex');
@@ -6382,7 +6351,7 @@ app.post('/api/chat/reply', async (req, res) => {
       if (isTimeout) {
         console.error('[REPLY] ❌ TTS generation TIMED OUT - NOT sending response to client');
       } else {
-        console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
       }
       // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался (включая таймаут), НЕ отправляем ответ
       // Пользователь должен получить ответ ТОЛЬКО после завершения TTS
@@ -6419,12 +6388,12 @@ app.post('/api/chat/reply', async (req, res) => {
       }
       
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-      // Конвертируем аудио в base64 для отправки клиенту
-      response.audio = {
+        // Конвертируем аудио в base64 для отправки клиенту
+        response.audio = {
         data: audioData.buffer.toString('base64'),
         contentType: audioData.contentType || 'audio/wav',
-        format: 'base64'
-      };
+          format: 'base64'
+        };
       console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
       return res.json(response);
     } else {
@@ -6454,12 +6423,12 @@ app.post('/api/chat/reply', async (req, res) => {
       }
       
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-      // Конвертируем аудио в base64 для отправки клиенту
-      response.audio = {
+        // Конвертируем аудио в base64 для отправки клиенту
+        response.audio = {
         data: audioData.buffer.toString('base64'),
         contentType: audioData.contentType || 'audio/wav',
-        format: 'base64'
-      };
+          format: 'base64'
+        };
       console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
       return res.json(response);
     }
@@ -9074,8 +9043,8 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               if (contentType.includes('audio')) {
                 const audioBuffer = Buffer.from(await response.arrayBuffer());
                 console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
-                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-                res.setHeader('Content-Length', String(audioBuffer.length));
+              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+              res.setHeader('Content-Length', String(audioBuffer.length));
                 // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
                 (async () => {
                   try {
@@ -9085,7 +9054,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     console.warn('[GEMINI-TTS] Failed to save audio in background:', e);
                   }
                 })();
-                return res.send(audioBuffer);
+              return res.send(audioBuffer);
               }
               
               // Проверяем JSON ответ с аудио в inlineData
@@ -9188,7 +9157,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                 }
             } else {
                 console.warn(`[GEMINI-TTS] ${modelName} response structure:`, JSON.stringify(json).slice(0, 1000));
-                console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
+              console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
             }
           } else {
               const errorText = await response.text().catch(() => '');
@@ -9227,7 +9196,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
             if (isTimeout) {
               console.warn(`[GEMINI-TTS] ${modelName} request timed out (text may be too long or proxy slow), trying next model...`);
             } else {
-              console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
+            console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
             }
           }
         }
