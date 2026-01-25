@@ -543,17 +543,16 @@ function findPregenAudio(
     );
   }
   
-  // Добавляем остальные пути для обратной совместимости
+  // КРИТИЧЕСКИ ВАЖНО: НЕ добавляем fallback-поиск без параметров depth/choiceIndex/parentHash
+  // Это может привести к загрузке контента из другой части игры (другой depth или другой выбор)
+  // Добавляем только пути с точными параметрами для обратной совместимости
   possiblePaths.push(
     // Основной путь (старый формат с locationId в хеше - для обратной совместимости)
-    getPregenAudioPath(gameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash),
-    // Старый формат (для обратной совместимости - без depth/choiceIndex/parentHash)
-    getPregenAudioPath(gameId, text, locationId, characterId, messageType),
-    // Старый формат welcome (для обратной совместимости)
-    locationId ? path.join(PRAGEN_DIR, gameId, locationId, `welcome_${createAudioHash(text, locationId, characterId, messageType).slice(0, 12)}.wav`) : null,
-    // Общий формат (без локации)
-    path.join(PRAGEN_DIR, gameId, `msg_${createAudioHash(text, locationId, characterId, messageType)}.wav`),
+    getPregenAudioPath(gameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash)
   );
+  
+  // КРИТИЧЕСКИ ВАЖНО: Fallback-поиск без параметров depth/choiceIndex/parentHash УБРАН
+  // Это предотвращает загрузку контента из другой части игры
   
   const filteredPaths = possiblePaths.filter(Boolean) as string[];
   
@@ -5351,7 +5350,7 @@ app.post('/api/chat/reply', async (req, res) => {
     // КРИТИЧЕСКИ ВАЖНО: Определяем choiceIndex ДО создания userPrompt, чтобы передать его в промпт
     // Это нужно, чтобы AI знал, какой вариант выбрал пользователь, даже если прегенерированного контента нет
     let detectedChoiceIndexForPrompt: number | undefined = undefined;
-    
+
     const userPrompt = [
       'Контекст игры:\n' + context.filter(Boolean).join('\n\n'),
       sc ? 'Контекст сцены:\n' + sc : '',
@@ -6060,31 +6059,9 @@ app.post('/api/chat/reply', async (req, res) => {
             }
           }
           
-          // Если не нашли с параметрами, пробуем без них (для обратной совместимости)
-          // Только если choiceIndex не определен - ищем по userText
-          if (!foundPregenText || !pregenPath) {
-            if (choiceIndex === undefined) {
-              if (!foundPregenText) {
-                foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator');
-              }
-              if (!pregenPath) {
-                pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator');
-              }
-            }
-          }
-          
-          // Последняя попытка - с locationId, но без параметров depth/choiceIndex
-          // Только если choiceIndex не определен - ищем по userText
-          if (!foundPregenText || !pregenPath) {
-            if (choiceIndex === undefined) {
-              if (!foundPregenText) {
-                foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
-              }
-              if (!pregenPath) {
-                pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
-              }
-            }
-          }
+          // КРИТИЧЕСКИ ВАЖНО: НЕ используем fallback-поиск без параметров depth/choiceIndex/parentHash
+          // Это может привести к загрузке контента из другой части игры (другой depth или другой выбор)
+          // Ищем только по точным параметрам, чтобы гарантировать правильность загружаемого контента
           
           // КРИТИЧЕСКИ ВАЖНО: Проверяем наличие ОБОИХ файлов
           // Если нашли аудио, проверяем наличие текста рядом с ним
