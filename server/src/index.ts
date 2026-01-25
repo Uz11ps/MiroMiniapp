@@ -4311,6 +4311,11 @@ app.post('/api/chat/welcome', async (req, res) => {
       const game = await prisma.game.findUnique({ where: { id: gameId } });
       const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
       const base = loc?.description || '';
+      
+      // КРИТИЧЕСКИ ВАЖНО: Создаем фиксированный ключ для welcome message на основе locationId
+      // Welcome message имеет depth=0, choiceIndex=undefined, parentHash=undefined
+      // Используем фиксированный ключ вместо текста, чтобы хеш был одинаковым для одной локации
+      const welcomeKey = `welcome_${first.id}_d0`; // welcome + locationId + depth=0
       const offlineText = ([
         `Сцена: ${loc?.title || 'Локация'}`,
         base,
@@ -4759,66 +4764,42 @@ app.post('/api/chat/welcome', async (req, res) => {
       sess = await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: first.id } });
     }
     // УБРАНО: Не сбрасываем currentLocationId на first.id если он уже установлен - он должен меняться только при реальном переходе
-    const sc = await buildGptSceneContext(prisma, { gameId, userId: uid, history: [] });
-    const { text: generatedText } = await generateChatCompletion({
-      systemPrompt: sys,
-      userPrompt: 'Контекст сцены:\n' + sc,
-      history: []
-    });
-    let text = generatedText;
-    if (text) {
-      // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
-      text = formatChoiceOptions(text);
-    }
-    if (!text) {
-      // Сформируем атмосферное вступление из данных сцены
-      try {
-        const first = await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
-        const intro = [
-          first?.title ? `Сцена: ${first.title}` : '',
-          first?.description || '',
-          'Тусклый свет дрожит на камне. Мир ждёт вашего шага.',
-        ].filter(Boolean).join('\n\n');
-        text = intro || 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.';
-      } catch {
-        text = 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.';
-      }
-    }
-    text = (text || '').trim();
+    
+    // КРИТИЧЕСКИ ВАЖНО: Создаем фиксированный ключ для welcome message на основе locationId
+    // Welcome message имеет depth=0, choiceIndex=undefined, parentHash=undefined
+    // Используем фиксированный ключ вместо текста, чтобы хеш был одинаковым для одной локации
+    const welcomeKey = `welcome_${first.id}_d0`; // welcome + locationId + depth=0
     
     // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ для первого сообщения (SOLO режим)
     // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
     let audioData: { buffer: Buffer; contentType: string } | null = null;
-    if (text) {
+    let text: string | null = null;
+    
+    if (gameId && first?.id) {
+      let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
       try {
-        // Сначала проверяем прегенерированное аудио
-        // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
-        if (gameId && first?.id) {
-          let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
-          try {
-            const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-            if (gsess?.scenarioGameId) {
-              scenarioGameIdForPregen = gsess.scenarioGameId;
-            }
-          } catch (e) {
-            console.warn('[WELCOME] Failed to get scenarioGameId (SOLO), using gameId:', e);
-          }
-          
-          // Поиск прегенерированного аудио (логи убраны)
-          // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
-          // КРИТИЧЕСКИ ВАЖНО: Сначала ищем БЕЗ locationId в хеше (для диалогов внутри локации)
-          let pregenPath = findPregenAudio(scenarioGameIdForPregen, text, undefined, undefined, 'narrator', 0);
-          
-          // Если не нашли БЕЗ locationId, пробуем С locationId (для обратной совместимости)
-          if (!pregenPath) {
-            pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
-          }
-          
-          // КРИТИЧЕСКИ ВАЖНО: НЕ ищем "любой файл" по локации, так как это может привести к загрузке середины игры
-          // Ищем только файлы с depth=0, choiceIndex=undefined, parentHash=undefined (welcome сообщения)
-          // Если не нашли по точному тексту - не используем файлы из середины игры
-          
-          if (pregenPath) {
+        const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        if (gsess?.scenarioGameId) {
+          scenarioGameIdForPregen = gsess.scenarioGameId;
+        }
+      } catch (e) {
+        console.warn('[WELCOME] Failed to get scenarioGameId (SOLO), using gameId:', e);
+      }
+      
+      // КРИТИЧЕСКИ ВАЖНО: Ищем прегенерированный текст и аудио по фиксированному ключу welcomeKey
+      // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
+      let pregenPath = findPregenAudio(scenarioGameIdForPregen, welcomeKey, undefined, undefined, 'narrator', 0);
+      
+      // Если не нашли БЕЗ locationId, пробуем С locationId (для обратной совместимости)
+      if (!pregenPath) {
+        pregenPath = findPregenAudio(scenarioGameIdForPregen, welcomeKey, first.id, undefined, 'narrator', 0);
+      }
+      
+      // КРИТИЧЕСКИ ВАЖНО: НЕ ищем "любой файл" по локации, так как это может привести к загрузке середины игры
+      // Ищем только файлы с depth=0, choiceIndex=undefined, parentHash=undefined (welcome сообщения)
+      // Если не нашли по точному тексту - не используем файлы из середины игры
+      
+      if (pregenPath) {
             try {
               console.log('[WELCOME] ✅ Using pre-generated audio from (SOLO):', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
@@ -4885,11 +4866,27 @@ app.post('/api/chat/welcome', async (req, res) => {
           } else {
             console.log(`[WELCOME] ⚠️ Pre-generated audio not found (SOLO) for scenarioGameId=${scenarioGameIdForPregen}, locationId=${first.id}`);
           }
-        }
-        
-        // Если прегенерированного аудио нет, генерируем новое
-        if (!audioData) {
-          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          
+          // Если прегенерированного текста нет - генерируем через AI
+          if (!text) {
+            const sc = await buildGptSceneContext(prisma, { gameId, userId: uid, history: [] });
+            const { text: generatedText } = await generateChatCompletion({
+              systemPrompt: sys,
+              userPrompt: 'Контекст сцены:\n' + sc,
+              history: []
+            });
+            text = generatedText;
+            if (text) {
+              // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+              text = formatChoiceOptions(text);
+            }
+            text = (text || '').trim();
+          }
+          
+          // Если прегенерированного аудио нет, генерируем новое
+          if (!audioData && text) {
+            try {
+              const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
           const ttsUrl = `${apiBase}/api/tts`;
           console.log('[WELCOME] 🎤 Generating TTS for welcome message (SOLO), text length:', text.length);
           
@@ -4922,12 +4919,12 @@ app.post('/api/chat/welcome', async (req, res) => {
             }
             
             // Сохраняем сгенерированное аудио для будущего использования, но только если аудио валидное
-            // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии
-            if (audioData && sess?.scenarioGameId && first?.id) {
+            // КРИТИЧЕСКИ ВАЖНО: Используем welcomeKey вместо text для создания хеша
+            if (audioData && sess?.scenarioGameId && first?.id && text) {
               try {
                 // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
-                // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации
-                const hashWithoutLoc = createAudioHash(text, undefined, undefined, 'narrator', 0);
+                // КРИТИЧЕСКИ ВАЖНО: Сохраняем по фиксированному ключу welcomeKey, чтобы хеш был одинаковым для одной локации
+                const hashWithoutLoc = createAudioHash(welcomeKey, undefined, undefined, 'narrator', 0);
                 const subDir = first.id || 'general';
                 const audioPath = path.join(PRAGEN_DIR, sess.scenarioGameId, subDir, `narrator_${hashWithoutLoc}.wav`);
                 const audioDir = path.dirname(audioPath);
@@ -4944,20 +4941,23 @@ app.post('/api/chat/welcome', async (req, res) => {
                 console.warn('[WELCOME] Failed to save generated audio (SOLO):', e);
               }
             }
-          } else {
-            console.warn('[WELCOME] TTS generation failed (SOLO):', ttsResponse.status);
+            } else {
+              console.warn('[WELCOME] TTS generation failed (SOLO):', ttsResponse.status);
+            }
+            } catch (ttsErr: any) {
+              console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
+              // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
+              // Ответ все равно отправляется, но без аудио (после завершения попытки генерации)
+            }
           }
         }
-      } catch (ttsErr: any) {
-        console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
-        // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
-        // Ответ все равно отправляется, но без аудио (после завершения попытки генерации)
-      }
-    }
     
     // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS (успешного или с ошибкой)
     // Не сохраняем "технические ошибки" в историю
-    const shouldSaveWelcomeSolo = !text || !text.trim().startsWith('Техническая ошибка');
+    if (!text) {
+      text = 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.';
+    }
+    const shouldSaveWelcomeSolo = text && !text.trim().startsWith('Техническая ошибка');
     if (shouldSaveWelcomeSolo) {
       await prisma.chatSession.upsert({
         where: { userId_gameId: { userId: uid, gameId } },
@@ -4967,7 +4967,7 @@ app.post('/api/chat/welcome', async (req, res) => {
     }
     
     // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-    const response: any = { message: text, fallback: !Boolean(client) };
+    const response: any = { message: text || '', fallback: !Boolean(client) };
     if (audioData) {
       response.audio = {
         data: audioData.buffer.toString('base64'),
@@ -5471,23 +5471,18 @@ app.post('/api/chat/reply', async (req, res) => {
               }
             }
             // parentHash для первого ответа - это хеш welcome сообщения (depth=0)
-            // Попробуем получить welcome сообщение из chatSession
+            // КРИТИЧЕСКИ ВАЖНО: Используем welcomeKey вместо текста, чтобы parentHash был одинаковым для одной локации
             try {
-              const uid = lobbyId ? undefined : await resolveUserIdFromQueryOrBody(req, prisma);
-              const chatSess = lobbyId 
-                ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } })
-                : uid ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } } }) : null;
-              if (chatSess?.history) {
-                const hist = (chatSess.history as any) as Array<{ from: 'bot' | 'me'; text: string }>;
-                const welcomeMsg = hist.find(m => m.from === 'bot');
-                if (welcomeMsg?.text) {
-                  // КРИТИЧЕСКИ ВАЖНО: parentHash создается БЕЗ locationId в хеше (для диалогов внутри локации)
-                  parentHashForPregen = createAudioHash(welcomeMsg.text, undefined, undefined, 'narrator', 0);
-                  console.log('[REPLY] ✅ First reply: created parentHash from welcome message, hash:', parentHashForPregen?.slice(0, 8));
-                }
+              // Получаем первую локацию для создания welcomeKey
+              const first = await prisma.location.findFirst({ where: { gameId: gameId || 'unknown' }, orderBy: { order: 'asc' } });
+              if (first?.id) {
+                const welcomeKey = `welcome_${first.id}_d0`; // welcome + locationId + depth=0
+                // КРИТИЧЕСКИ ВАЖНО: parentHash создается БЕЗ locationId в хеше (для диалогов внутри локации)
+                parentHashForPregen = createAudioHash(welcomeKey, undefined, undefined, 'narrator', 0);
+                console.log('[REPLY] ✅ First reply: created parentHash from welcomeKey, hash:', parentHashForPregen?.slice(0, 8));
               }
             } catch (e) {
-              console.warn('[REPLY] Failed to get welcome message for parentHash:', e);
+              console.warn('[REPLY] Failed to get first location for parentHash:', e);
             }
           }
         } else {
