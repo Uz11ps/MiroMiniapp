@@ -5598,6 +5598,9 @@ app.post('/api/chat/reply', async (req, res) => {
                     await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: chosenExit.targetLocationId } });
                     // Обновляем кэш после изменения локации
                     cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
+                    // КРИТИЧЕСКИ ВАЖНО: Обновляем locationIdForPregen для правильного сохранения прегенерированных материалов
+                    locationIdForPregen = chosenExit.targetLocationId;
+                    console.log(`[REPLY] ✅ Updated locationIdForPregen to ${locationIdForPregen} after exit selection`);
                   }
                 }
               }
