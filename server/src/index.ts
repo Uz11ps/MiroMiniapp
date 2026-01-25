@@ -4608,7 +4608,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                     // Используем предгенерированное аудио
                     console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
                     const audioBuffer = fs.readFileSync(pregenPath);
-                    const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+                    const MIN_AUDIO_SIZE = 256 * 256;
                     if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
                       console.warn(`[WELCOME] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
                       // Удаляем невалидные файлы
@@ -4718,9 +4718,12 @@ app.post('/api/chat/welcome', async (req, res) => {
           }
         } catch (ttsErr: any) {
           console.warn('[WELCOME] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
+          // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
+          // Ответ все равно отправляется, но без аудио (после завершения попытки генерации)
         }
       }
       
+      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS (успешного или с ошибкой)
       // Не сохраняем "технические ошибки" в историю
       const shouldSaveWelcome = !text || !text.trim().startsWith('Техническая ошибка');
       if (shouldSaveWelcome) {
@@ -4732,6 +4735,7 @@ app.post('/api/chat/welcome', async (req, res) => {
       }
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
+      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
       const response: any = { message: text || '', fallback: !Boolean(apiKey) };
       if (audioData) {
         response.audio = {
@@ -4982,9 +4986,12 @@ app.post('/api/chat/welcome', async (req, res) => {
         }
       } catch (ttsErr: any) {
         console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
+        // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
+        // Ответ все равно отправляется, но без аудио (после завершения попытки генерации)
       }
     }
     
+    // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS (успешного или с ошибкой)
     // Не сохраняем "технические ошибки" в историю
     const shouldSaveWelcomeSolo = !text || !text.trim().startsWith('Техническая ошибка');
     if (shouldSaveWelcomeSolo) {
@@ -4995,6 +5002,7 @@ app.post('/api/chat/welcome', async (req, res) => {
       });
     }
     
+    // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
     const response: any = { message: text, fallback: !Boolean(client) };
     if (audioData) {
       response.audio = {
@@ -5652,9 +5660,15 @@ app.post('/api/chat/reply', async (req, res) => {
         console.log('[REPLY] ⚠️ Generated NEW text (pre-generated not found)');
       }
     }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Fallback текст тоже должен пройти через блок TTS
     if (!text) {
       text = await fallbackBranch();
-      return res.json({ message: text, fallback: true });
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Если текст все еще пустой после fallback, отправляем ответ без TTS
+    if (!text) {
+      return res.json({ message: 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.', fallback: true });
     }
 
     // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
@@ -7960,6 +7974,12 @@ app.post('/api/tts', async (req, res) => {
     if (!text.trim()) {
       console.warn('[TTS] Empty text received');
       return res.status(400).json({ error: 'text_required' });
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Не генерируем TTS для системных сообщений об ошибке распознавания
+    if (text.trim() === 'Не распознали ваш ответ, выберите вариант корректно!') {
+      console.log('[TTS] Skipping TTS generation for clarification message');
+      return res.status(200).json({ error: 'tts_not_needed', message: 'This message should not be voiced' });
     }
     
     // ПРОВЕРКА ПРЕГЕНЕРИРОВАННОГО АУДИО ДЛЯ ВСЕХ СООБЩЕНИЙ
