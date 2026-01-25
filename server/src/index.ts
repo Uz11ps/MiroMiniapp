@@ -4348,17 +4348,24 @@ app.post('/api/chat/welcome', async (req, res) => {
             foundText = findPregenText(scenarioGameIdForPregen, base || loc?.title || '', first.id, undefined, 'narrator', 0);
           }
           if (!foundText) {
-            // Пробуем найти любой narrator файл с depth=0 для этой локации
+            // КРИТИЧЕСКИ ВАЖНО: Ищем только файлы с depth=0, choiceIndex=undefined, parentHash=undefined (welcome сообщения)
+            // НЕ ищем любые файлы, так как это может привести к загрузке середины игры вместо начала
             try {
               const locationDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen, first.id);
               if (fs.existsSync(locationDir)) {
                 const files = fs.readdirSync(locationDir);
+                // Вычисляем ожидаемый хеш для welcome сообщения (depth=0, choiceIndex=undefined, parentHash=undefined)
+                const expectedHash = createAudioHash(base || loc?.title || '', undefined, undefined, 'narrator', 0);
                 for (const file of files) {
                   if (file.endsWith('.txt') && file.startsWith('narrator_')) {
-                    const txtPath = path.join(locationDir, file);
-                    foundText = fs.readFileSync(txtPath, 'utf-8');
-                    console.log(`[WELCOME] ✅ Found pre-generated text by location: ${file}`);
-                    break;
+                    // Проверяем, что хеш в имени файла соответствует welcome сообщению
+                    const fileHash = file.replace('narrator_', '').replace('.txt', '');
+                    if (fileHash === expectedHash) {
+                      const txtPath = path.join(locationDir, file);
+                      foundText = fs.readFileSync(txtPath, 'utf-8');
+                      console.log(`[WELCOME] ✅ Found pre-generated text by location (verified depth=0): ${file}`);
+                      break;
+                    }
                   }
                 }
               }
@@ -4504,34 +4511,9 @@ app.post('/api/chat/welcome', async (req, res) => {
                 }
               }
               
-              // Если не нашли по тексту, ищем по локации (для welcome сообщений текст может быть разным)
-              if (!pregenPath && first.id) {
-                try {
-                  const locationDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen, first.id);
-                  if (fs.existsSync(locationDir)) {
-                    const files = fs.readdirSync(locationDir);
-                    // Ищем любой файл narrator_* с depth=0 (для welcome)
-                    for (const file of files) {
-                      if (file.endsWith('.wav') || file.endsWith('.wav')) {
-                        const txtFile = file.replace(/\.wav$/, '.txt');
-                        const txtPath = path.join(locationDir, txtFile);
-                        if (fs.existsSync(txtPath)) {
-                          // Проверяем, что это narrator файл
-                          if (file.startsWith('narrator_')) {
-                            // Используем первый найденный файл для этой локации (welcome сообщение)
-                            pregenPath = path.join(locationDir, file);
-                            foundPregenText = fs.readFileSync(txtPath, 'utf-8');
-                            console.log(`[WELCOME] ✅ Found pre-generated audio by location: ${file}`);
-                            break;
-                          }
-                        }
-                      }
-                    }
-                  }
-                } catch (e) {
-                  // Игнорируем ошибки при поиске по локации
-                }
-              }
+              // КРИТИЧЕСКИ ВАЖНО: НЕ ищем "любой файл" по локации, так как это может привести к загрузке середины игры
+              // Ищем только файлы с точным соответствием тексту и параметрам welcome сообщения (depth=0, choiceIndex=undefined, parentHash=undefined)
+              // Если не нашли по точному тексту - не используем файлы из середины игры
               
               // КРИТИЧЕСКИ ВАЖНО: Проверяем наличие ОБОИХ файлов
               // Если нашли аудио, проверяем наличие текста рядом с ним
@@ -4833,26 +4815,9 @@ app.post('/api/chat/welcome', async (req, res) => {
             pregenPath = findPregenAudio(scenarioGameIdForPregen, text, first.id, undefined, 'narrator', 0);
           }
           
-          // Если не нашли по тексту, ищем по локации (для welcome сообщений текст может быть разным)
-          if (!pregenPath && first.id) {
-            try {
-              const locationDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen, first.id);
-              if (fs.existsSync(locationDir)) {
-                const files = fs.readdirSync(locationDir);
-                // Ищем любой файл narrator_* с depth=0 (для welcome)
-                for (const file of files) {
-                  if (file.endsWith('.wav') && file.startsWith('narrator_')) {
-                    // Используем первый найденный файл для этой локации (welcome сообщение)
-                    pregenPath = path.join(locationDir, file);
-                    console.log(`[WELCOME] Found pre-generated audio by location (SOLO): ${file}`);
-                    break;
-                  }
-                }
-              }
-            } catch (e) {
-              // Игнорируем ошибки при поиске по локации
-            }
-          }
+          // КРИТИЧЕСКИ ВАЖНО: НЕ ищем "любой файл" по локации, так как это может привести к загрузке середины игры
+          // Ищем только файлы с depth=0, choiceIndex=undefined, parentHash=undefined (welcome сообщения)
+          // Если не нашли по точному тексту - не используем файлы из середины игры
           
           if (pregenPath) {
             try {
