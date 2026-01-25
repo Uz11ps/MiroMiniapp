@@ -6075,9 +6075,13 @@ app.post('/api/chat/reply', async (req, res) => {
             searchBy: choiceIndex !== undefined ? 'choiceIndex' : 'userText'
           });
           // КРИТИЧЕСКИ ВАЖНО: Сначала ищем БЕЗ locationId в хеше (для диалогов внутри локации)
-          // Но функция findPregenAudio уже ищет в папке locationId, так что это покрывает оба случая
-          let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
-          let pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, ищем в папке 'general' (как при сохранении)
+          const searchSubDir = choiceIndex !== undefined ? 'general' : undefined;
+          const searchHash = createAudioHash(searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          console.log(`[REPLY] 🔍 Searching pregen: searchText="${searchText.slice(0, 50) || '(empty)'}", hash=${searchHash.slice(0, 8)}, subDir=${searchSubDir || locationId || 'general'}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+          
+          let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, searchText, searchSubDir, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, searchSubDir, characterId, 'narrator', depth, choiceIndex, parentHash);
           console.log('[REPLY] Pregen search result (without locationId in hash):', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
           
           // КРИТИЧЕСКИ ВАЖНО: Также ищем С locationId в папке (функция findPregenAudio уже это делает, но для гарантии делаем явный поиск)
@@ -6309,7 +6313,7 @@ app.post('/api/chat/reply', async (req, res) => {
               try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
               fs.writeFileSync(textPath, text, 'utf-8'); // Сохраняем ответ бота в файл
               
-              console.log(`[REPLY] 💾 Saved generated audio and text for userText="${userText.slice(0, 50)}...", locationId=${locationId || 'none'}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+              console.log(`[REPLY] 💾 Saved generated audio and text: saveText="${saveText.slice(0, 50) || '(empty)'}", hash=${hashWithoutLoc.slice(0, 8)}, subDir=${subDir}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}, locationId=${locationId || 'none'}`);
             } catch (e) {
               console.warn('[REPLY] Failed to save generated audio:', e);
             }
@@ -8359,9 +8363,14 @@ app.post('/api/tts', async (req, res) => {
         // Для welcome сообщений (когда нет locationId или это первое сообщение) используем depth=0
         // Если depth не передан, но есть locationId и это narrator - вероятно это welcome, используем depth=0
         const finalDepth = depth !== undefined ? depth : (locationId && finalIsNarrator !== false ? 0 : undefined);
+        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то text НЕ используется для сохранения!
+        // AI уже подставил индекс выбора, поэтому сохраняем только по choiceIndex, depth, parentHash
+        // ТОЧНО ТАК ЖЕ КАК В /api/chat/reply
+        const saveText = choiceIndex !== undefined ? '' : text;
         // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации (если есть)
-        const hashWithoutLoc = createAudioHash(text, undefined, characterId, messageType, finalDepth, choiceIndex, parentHash);
-        const subDir = locationId || 'general';
+        const hashWithoutLoc = createAudioHash(saveText, undefined, characterId, messageType, finalDepth, choiceIndex, parentHash);
+        // Если choiceIndex определен - сохраняем в 'general', иначе в папку локации (ТОЧНО ТАК ЖЕ КАК В /api/chat/reply)
+        const subDir = choiceIndex !== undefined ? 'general' : (locationId || 'general');
         const audioPath = path.join(PRAGEN_DIR, scenarioGameId, subDir, `${messageType}_${hashWithoutLoc}.wav`);
         const audioDir = path.dirname(audioPath);
         try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
@@ -8372,7 +8381,7 @@ app.post('/api/tts', async (req, res) => {
         try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
         fs.writeFileSync(textPath, text, 'utf-8');
         
-        console.log(`[TTS] 💾 Saved generated audio and text for scenarioGameId=${scenarioGameId}, locationId=${locationId || 'none'}, depth=${finalDepth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+        console.log(`[TTS] 💾 Saved generated audio and text: saveText="${saveText.slice(0, 50) || '(empty)'}", hash=${hashWithoutLoc.slice(0, 8)}, subDir=${subDir}, scenarioGameId=${scenarioGameId}, locationId=${locationId || 'none'}, depth=${finalDepth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
       } catch (e) {
         console.warn('[TTS] Failed to save generated audio:', e);
       }
