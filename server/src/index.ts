@@ -9006,11 +9006,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               if (contentType.includes('audio')) {
                 const audioBuffer = Buffer.from(await response.arrayBuffer());
                 console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
-                // Сохраняем сгенерированное аудио
+                // Сохраняем сгенерированное аудио - ТОЧНО ТАК ЖЕ КАК ДЛЯ GOOGLE TTS
                 saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
-              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-              res.setHeader('Content-Length', String(audioBuffer.length));
-              return res.send(audioBuffer);
+                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                res.setHeader('Content-Length', String(audioBuffer.length));
+                return res.send(audioBuffer);
               }
               
               // Проверяем JSON ответ с аудио в inlineData
@@ -9084,15 +9084,12 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     }
                     
                     console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes, Content-Type: ${contentType}`);
-                    // Сохраняем сгенерированное аудио
+                    // Сохраняем сгенерированное аудио - ТОЧНО ТАК ЖЕ КАК ДЛЯ GOOGLE TTS
                     saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
                     res.setHeader('Content-Type', contentType);
                     res.setHeader('Content-Length', String(audioBuffer.length));
-                    console.log(`[GEMINI-TTS] 🚀 Sending audio response to client (${audioBuffer.length} bytes)`);
                     audioFound = true;
-                    const sendResult = res.send(audioBuffer);
-                    console.log(`[GEMINI-TTS] ✅ Audio response sent successfully, returning from function`);
-                    return sendResult;
+                    return res.send(audioBuffer);
                   }
                   
                   // Проверяем, может быть текст вместо аудио (модель не поддерживает TTS)
