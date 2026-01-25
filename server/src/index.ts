@@ -5179,6 +5179,15 @@ app.post('/api/chat/reply', async (req, res) => {
     // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
     if (scenarioGameIdForPregen) {
       const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
+      console.log('[REPLY] Searching for pre-generated content:', {
+        scenarioGameId: scenarioGameIdForPregen,
+        locationId: locationIdForPregen,
+        userText: userText?.slice(0, 50),
+        depth: depthForPregen,
+        choiceIndex: choiceIndexForPregen,
+        parentHash: parentHashForPregen?.slice(0, 8),
+        hasMaterials
+      });
       if (hasMaterials) {
         // Ищем по userText (действие игрока)
         let foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
@@ -5187,6 +5196,7 @@ app.post('/api/chat/reply', async (req, res) => {
         }
         if (foundText) {
           pregenTextFound = foundText;
+          console.log('[REPLY] ✅ Found pre-generated text BEFORE generation');
           console.log('[REPLY] ✅ Found pre-generated text BEFORE generation');
         }
       }
@@ -5553,8 +5563,16 @@ app.post('/api/chat/reply', async (req, res) => {
 
     // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ - генерируем аудио перед отправкой текста
     // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
+    // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем ответ до завершения TTS
     console.log('[REPLY] 🎤 Generating TTS for text length:', text.length);
     let audioData: { buffer: Buffer; contentType: string } | null = null;
+    
+    // Определяем переменные для TTS ДО блока try, чтобы они были доступны везде
+    const depth = depthForPregen;
+    const choiceIndex = choiceIndexForPregen;
+    const parentHash = parentHashForPregen;
+    const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
+    const characterId = undefined; // Для narrator всегда undefined
     
     try {
       // КРИТИЧЕСКИ ВАЖНО: Используем уже определенные переменные из верхнего блока поиска текста!
@@ -5563,12 +5581,6 @@ app.post('/api/chat/reply', async (req, res) => {
       let pregenAudioData: { buffer: Buffer; contentType: string } | null = null;
       
       if (scenarioGameIdForPregen) {
-        // Используем уже определенные переменные
-        const depth = depthForPregen;
-        const choiceIndex = choiceIndexForPregen;
-        const parentHash = parentHashForPregen;
-        const locationId = locationIdForPregen;
-        const characterId = undefined; // Для narrator всегда undefined
         
         // Поиск прегенерированных материалов (логи убраны)
         
@@ -5698,6 +5710,7 @@ app.post('/api/chat/reply', async (req, res) => {
         const ttsUrl = `${apiBase}/api/tts`;
         
         console.log('[REPLY] Calling TTS endpoint for generation...');
+        console.log('[REPLY] TTS params: locationId=', locationId, 'characterId=', characterId, 'depth=', depth, 'choiceIndex=', choiceIndex);
         const ttsStartTime = Date.now();
         const ttsResponse = await undiciFetch(ttsUrl, {
           method: 'POST',
@@ -5707,8 +5720,8 @@ app.post('/api/chat/reply', async (req, res) => {
           body: JSON.stringify({
             text,
             gameId: gameId || undefined,
-            locationId,
-            characterId,
+            locationId: locationId || undefined, // Явно указываем undefined, если locationId не определен
+            characterId: characterId || undefined,
             format: 'wav',
             isNarrator: true,
             depth: depth !== undefined ? depth : undefined,
@@ -5754,16 +5767,18 @@ app.post('/api/chat/reply', async (req, res) => {
       }
       
       // Сохраняем аудио в переменную для возврата клиенту
-      // КРИТИЧЕСКИ ВАЖНО: ответ отправляется ТОЛЬКО после завершения TTS
-      (req as any).preGeneratedAudio = audioData;
+      audioData = audioData; // Уже установлено выше
       console.log('[REPLY] ✅ TTS ready, proceeding to send response to client');
     } catch (ttsErr: any) {
       console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
-      // НЕ блокируем отправку текста, если TTS не сгенерировался - клиент может запросить позже
-      (req as any).preGeneratedAudio = null;
+      // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, НЕ отправляем ответ
+      // Пользователь должен получить ответ ТОЛЬКО после завершения TTS
+      audioData = null;
     }
 
-    console.log('[REPLY] About to send response to client, hasAudio:', !!(req as any).preGeneratedAudio);
+    // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем ответ, если TTS не завершился успешно
+    // Ждем завершения TTS (успешного или с ошибкой) перед отправкой ответа
+    console.log('[REPLY] TTS completed, hasAudio:', !!audioData);
 
     if (lobbyId) {
       const sess = await prisma.chatSession.upsert({
@@ -5783,16 +5798,16 @@ app.post('/api/chat/reply', async (req, res) => {
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
       // Возвращаем текст с аудио - ВСЕГДА вместе
+      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-      if ((req as any).preGeneratedAudio) {
-        const audio = (req as any).preGeneratedAudio;
+      if (audioData) {
         // Конвертируем аудио в base64 для отправки клиенту
         response.audio = {
-          data: audio.buffer.toString('base64'),
-          contentType: audio.contentType || 'audio/wav',
+          data: audioData.buffer.toString('base64'),
+          contentType: audioData.contentType || 'audio/wav',
           format: 'base64'
         };
-        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audio.buffer.byteLength, 'bytes)');
+        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
       } else {
         console.warn('[REPLY] ⚠️ No audio generated - response will be sent without audio');
       }
@@ -5816,16 +5831,16 @@ app.post('/api/chat/reply', async (req, res) => {
       }
       
       // Возвращаем текст с аудио - ВСЕГДА вместе
+      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-      if ((req as any).preGeneratedAudio) {
-        const audio = (req as any).preGeneratedAudio;
+      if (audioData) {
         // Конвертируем аудио в base64 для отправки клиенту
         response.audio = {
-          data: audio.buffer.toString('base64'),
-          contentType: audio.contentType || 'audio/wav',
+          data: audioData.buffer.toString('base64'),
+          contentType: audioData.contentType || 'audio/wav',
           format: 'base64'
         };
-        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audio.buffer.byteLength, 'bytes)');
+        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
       } else {
         console.warn('[REPLY] ⚠️ No audio generated - response will be sent without audio');
       }
