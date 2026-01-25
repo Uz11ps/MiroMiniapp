@@ -952,20 +952,20 @@ const GameChat: React.FC = () => {
           body: JSON.stringify(body) 
         });
         
-        if (!r.ok) {
-          setIsGenerating(false);
-          const err = await r.json().catch(() => ({} as any));
-          if (r.status === 403 && (err?.error === 'not_your_turn')) {
-            alert('Сейчас ход другого игрока.');
-            if (!lobbyId) setMessages((m) => m.slice(0, -1));
-            return;
-          }
-          const errText = typeof err === 'string' ? err : (err?.error || 'Ошибка AI');
-          if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: `Ошибка AI: ${errText}` }]);
+      if (!r.ok) {
+        setIsGenerating(false);
+        const err = await r.json().catch(() => ({} as any));
+        if (r.status === 403 && (err?.error === 'not_your_turn')) {
+          alert('Сейчас ход другого игрока.');
+          if (!lobbyId) setMessages((m) => m.slice(0, -1));
           return;
         }
+        const errText = typeof err === 'string' ? err : (err?.error || 'Ошибка AI');
+        if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: `Ошибка AI: ${errText}` }]);
+        return;
+      }
         
-        const data = await r.json();
+      const data = await r.json();
         fullText = data.message || '';
         audioData = data.audio;
         requestDice = data.requestDice;
@@ -1014,24 +1014,24 @@ const GameChat: React.FC = () => {
         } catch {}
       } else {
         const txt = String(fullText);
-        setMessages((m) => {
-          const next = [...m, { from: 'bot' as const, text: txt }];
+          setMessages((m) => {
+            const next = [...m, { from: 'bot' as const, text: txt }];
           return next;
         });
         
         // Используем прегенерированное аудио, если есть
-        if (preGeneratedAudio?.data) {
-          console.log('[CLIENT] Using pre-generated audio from server response');
-          const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
-          const audioUrl = URL.createObjectURL(audioBlob);
-          speakWithAudio(audioUrl, txt).catch((err) => {
-            console.error('[CLIENT] speakWithAudio failed:', err);
-          });
-        } else {
-          console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
-          speak(txt);
-        }
-        try { applyBgFromText(txt); } catch {}
+            if (preGeneratedAudio?.data) {
+              console.log('[CLIENT] Using pre-generated audio from server response');
+              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
+              const audioUrl = URL.createObjectURL(audioBlob);
+              speakWithAudio(audioUrl, txt).catch((err) => {
+                console.error('[CLIENT] speakWithAudio failed:', err);
+              });
+            } else {
+              console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
+              speak(txt);
+            }
+            try { applyBgFromText(txt); } catch {}
         // saveChatHistory будет вызван автоматически через useEffect при изменении messages
       }
 
@@ -1675,9 +1675,9 @@ const Layout: React.FC = () => {
   
   return (
     <>
-      <div className="screen">
-        <Outlet />
-      </div>
+    <div className="screen">
+      <Outlet />
+    </div>
       {/* Навигация рендерится ВНЕ .screen, чтобы не перекрывалась и всегда была видна на всех страницах */}
       {!hideBottom ? <BottomNav /> : null}
     </>
@@ -2550,7 +2550,7 @@ export const App: React.FC = () => {
     // Обновляем только если значение действительно изменилось
     setActiveLobbyId((prev) => {
       if (prev === next) return prev;
-      try { if (next) window.localStorage.setItem('mira_active_lobby_id', next); } catch {}
+    try { if (next) window.localStorage.setItem('mira_active_lobby_id', next); } catch {}
       return next;
     });
   }, [location.pathname, location.search]);
@@ -2564,15 +2564,15 @@ export const App: React.FC = () => {
     lobbyInitializedRef.current = true;
     
     (async () => {
-      try {
-        const saved = window.localStorage.getItem('mira_active_lobby_id') || '';
-        if (saved) {
-          const my = await getMyLobbies().catch(() => []);
-          const exists = Array.isArray(my) && my.some((l) => l.id === saved);
-          if (exists) setActiveLobbyId(saved);
-          else window.localStorage.removeItem('mira_active_lobby_id');
-        }
-      } catch {}
+        try {
+          const saved = window.localStorage.getItem('mira_active_lobby_id') || '';
+          if (saved) {
+            const my = await getMyLobbies().catch(() => []);
+            const exists = Array.isArray(my) && my.some((l) => l.id === saved);
+            if (exists) setActiveLobbyId(saved);
+            else window.localStorage.removeItem('mira_active_lobby_id');
+          }
+        } catch {}
     })();
   }, [activeLobbyId]);
   
