@@ -5084,24 +5084,57 @@ app.post('/api/chat/reply', async (req, res) => {
           const curLocId = sess.currentLocationId;
           const exits = await prisma.locationExit.findMany({ where: { locationId: curLocId } });
           const low = userText.toLowerCase().trim();
+          console.log(`[REPLY] 🔍 Matching exit: userText="${userText}", low="${low}", exits count=${exits.length}`);
           let chosen: any = null;
           // цифрой 1..N по порядку кнопок
+          // КРИТИЧЕСКИ ВАЖНО: Ищем ТОЛЬКО если userText - это чистая цифра (1-9) или начинается с цифры
           const btns = exits.filter((e: any) => e.type === 'BUTTON');
-          const num = low.match(/^([1-9])$/);
-          if (num && btns.length) {
-            const idx = Math.min(btns.length, Math.max(1, parseInt(num[1], 10))) - 1;
-            chosen = btns[idx] || null;
+          console.log(`[REPLY] 🔍 Available buttons:`, btns.map((b: any, i: number) => `${i + 1}. "${b.buttonText}" (id=${b.id})`));
+          // Ищем чистое число в начале строки (1-9) или число с точкой/скобкой (1., 1), 1))
+          const numMatch = low.match(/^(\d+)/);
+          if (numMatch && btns.length) {
+            const num = parseInt(numMatch[1], 10);
+            if (num >= 1 && num <= btns.length) {
+              const idx = num - 1; // 1-based to 0-based
+              chosen = btns[idx] || null;
+              console.log(`[REPLY] 🔍 Matched by number: "${num}" -> index ${idx} -> button "${chosen?.buttonText || 'null'}"`);
+            }
           }
           // текст кнопки
           if (!chosen && btns.length && low) {
-            chosen = btns.find((b: any) => (b.buttonText || '').toLowerCase() && low.includes((b.buttonText || '').toLowerCase())) || null;
+            chosen = btns.find((b: any) => {
+              const btnText = (b.buttonText || '').toLowerCase();
+              const matches = btnText && low.includes(btnText);
+              if (matches) {
+                console.log(`[REPLY] 🔍 Matched by buttonText: "${b.buttonText}" (id=${b.id})`);
+              }
+              return matches;
+            }) || null;
           }
           // триггер
           if (!chosen && low) {
-            chosen = exits.find((e: any) => (e.triggerText || '').toLowerCase() && low.includes((e.triggerText || '').toLowerCase())) || null;
+            chosen = exits.find((e: any) => {
+              const triggerText = (e.triggerText || '').toLowerCase();
+              if (triggerText) {
+                const variants = triggerText.split(/[,/;]| или /g).map((s: string) => s.trim()).filter(Boolean);
+                const matches = variants.some((v: string) => v && low.includes(v));
+                if (matches) {
+                  console.log(`[REPLY] 🔍 Matched by triggerText: "${e.triggerText}" (id=${e.id})`);
+                }
+                return matches;
+              }
+              return false;
+            }) || null;
           }
           if (chosen) {
             console.log('[REPLY] ✅ Chosen exit:', { id: chosen.id, buttonText: chosen.buttonText, triggerText: chosen.triggerText, isGameOver: chosen.isGameOver, type: chosen.type, targetLocationId: chosen.targetLocationId });
+            // КРИТИЧЕСКИ ВАЖНО: Если у exit есть targetLocationId, то isGameOver ДОЛЖЕН быть false!
+            // Это защита от неправильно помеченных exits в базе данных
+            if (chosen.targetLocationId && (chosen.isGameOver || chosen.type === 'GAMEOVER')) {
+              console.warn(`[REPLY] ⚠️ Exit has targetLocationId but is marked as game over - IGNORING isGameOver flag!`);
+              chosen.isGameOver = false;
+              chosen.type = chosen.type === 'GAMEOVER' ? 'BUTTON' : chosen.type;
+            }
             if (chosen.isGameOver || chosen.type === 'GAMEOVER') {
               console.log('[REPLY] ⚠️ Exit marked as game over - setting forcedGameOver');
               try {
