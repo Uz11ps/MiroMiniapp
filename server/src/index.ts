@@ -4828,6 +4828,28 @@ app.post('/api/chat/welcome', async (req, res) => {
                   if (pregenText && pregenText.trim()) {
                     text = pregenText.trim();
                     console.log('[WELCOME] ✅ Pre-generated text loaded (SOLO) from:', textPath);
+                    
+                    // Проверяем, есть ли варианты выбора в прегенерированном тексте
+                    const choices = parseChoiceOptions(text);
+                    if (choices.length === 0 && first?.id) {
+                      // Если вариантов нет, добавляем их из кнопок локации
+                      const exits = await prisma.locationExit.findMany({ where: { locationId: first.id } });
+                      if (exits.length > 0) {
+                        const choiceLines = exits
+                          .map((exit, idx) => {
+                            const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+                            return `${idx + 1}. ${choiceText}`;
+                          })
+                          .join('\n');
+                        // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+                        if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+                          text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+                          text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+                        } else {
+                          text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+                        }
+                      }
+                    }
                   } else {
                     console.warn('[WELCOME] ⚠️ Pre-generated text file is empty (SOLO), deleting incomplete files');
                     try {
@@ -4879,6 +4901,28 @@ app.post('/api/chat/welcome', async (req, res) => {
             if (text) {
               // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
               text = formatChoiceOptions(text);
+              
+              // Проверяем, есть ли варианты выбора в тексте
+              const choices = parseChoiceOptions(text);
+              if (choices.length === 0 && first?.id) {
+                // Если вариантов нет, добавляем их из кнопок локации
+                const exits = await prisma.locationExit.findMany({ where: { locationId: first.id } });
+                if (exits.length > 0) {
+                  const choiceLines = exits
+                    .map((exit, idx) => {
+                      const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+                      return `${idx + 1}. ${choiceText}`;
+                    })
+                    .join('\n');
+                  // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+                  if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+                    text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+                    text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+                  } else {
+                    text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+                  }
+                }
+              }
             }
             text = (text || '').trim();
           }
