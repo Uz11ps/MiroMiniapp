@@ -2385,7 +2385,10 @@ ${shape}
      * Это фразы, которые игрок может сказать для перехода
      * Примеры: "открыть дверь", "спуститься вниз", "осмотреть алтарь", "активировать руны", "вернуться назад", "вернуться к Болвару", "пойти налево", "пойти направо", "активировать механизм на полке"
      * Генерируй 2-3 варианта фраз через запятую
-   - isGameOver: true только если это конец игры
+     * КРИТИЧЕСКИ ВАЖНО: triggerText должен быть КОНКРЕТНЫМ и ОДНОЗНАЧНЫМ, чтобы игрок мог легко выбрать нужный вариант
+   - isGameOver: true ТОЛЬКО если это РЕАЛЬНЫЙ конец игры (победа, поражение, смерть), БЕЗ targetLocationId
+     * КРИТИЧЕСКИ ВАЖНО: Если у exit есть toKey (targetLocationId), то isGameOver ДОЛЖЕН быть false!
+     * isGameOver: true только для финальных exits БЕЗ toKey, которые завершают игру
 
 8. УСЛОВИЯ ФИНАЛА:
    - winCondition, loseCondition, deathCondition
@@ -2720,6 +2723,9 @@ ${loc.description}
           const fromId = keyToId.get(String(e.fromKey || ''));
           const toId = e.toKey ? keyToId.get(String(e.toKey)) : null;
           if (!fromId) continue;
+          // КРИТИЧЕСКИ ВАЖНО: Если у exit есть targetLocationId (переход в другую локацию), то isGameOver ДОЛЖЕН быть false
+          // isGameOver: true только для финальных exits БЕЗ targetLocationId (завершение игры)
+          const isGameOver = toId ? false : Boolean(e.isGameOver);
           await prisma.locationExit.create({
             data: {
               locationId: fromId,
@@ -2727,7 +2733,7 @@ ${loc.description}
               buttonText: e.buttonText || null,
               triggerText: e.triggerText || null,
               targetLocationId: toId || null,
-              isGameOver: Boolean(e.isGameOver),
+              isGameOver,
             },
           });
           createdExits++;
@@ -3129,6 +3135,9 @@ app.post('/api/admin/scenario/import', async (req, res) => {
       const fromId = keyToId.get(String(e.fromKey || ''));
       const toId = e.toKey ? keyToId.get(String(e.toKey)) : null;
       if (!fromId) continue;
+      // КРИТИЧЕСКИ ВАЖНО: Если у exit есть targetLocationId (переход в другую локацию), то isGameOver ДОЛЖЕН быть false
+      // isGameOver: true только для финальных exits БЕЗ targetLocationId (завершение игры)
+      const isGameOver = toId ? false : Boolean(e.isGameOver);
       await prisma.locationExit.create({
         data: {
           locationId: fromId,
@@ -3136,7 +3145,7 @@ app.post('/api/admin/scenario/import', async (req, res) => {
           buttonText: e.buttonText || null,
           triggerText: e.triggerText || null,
           targetLocationId: toId || null,
-          isGameOver: Boolean(e.isGameOver),
+          isGameOver,
         },
       });
       createdExits++;
