@@ -10632,7 +10632,69 @@ app.post('/api/chat/dice', async (req, res) => {
       update: { history: history as any },
       create: { userId: uid, gameId, history: history as any },
     });
-    return res.json({ ok: true, messages: [fmt, narr.text] });
+    
+    // КРИТИЧЕСКИ ВАЖНО: Генерируем TTS для текста после броска кубиков
+    let audioData: { buffer: Buffer; contentType: string } | null = null;
+    if (narr.text) {
+      try {
+        // Получаем locationId из сессии игры
+        let locationId: string | undefined = undefined;
+        try {
+          const gameSess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+          locationId = gameSess?.currentLocationId || undefined;
+        } catch (e) {
+          console.warn('[DICE] Failed to get locationId:', e);
+        }
+        
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts`;
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: narr.text,
+            gameId,
+            locationId,
+            format: 'wav',
+            isNarrator: true,
+            depth: undefined,
+            choiceIndex: undefined,
+            parentHash: undefined
+          }),
+          signal: AbortSignal.timeout(60000)
+        });
+        
+        if (ttsResponse.ok) {
+          const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+          if (audioBuffer.byteLength >= MIN_AUDIO_SIZE) {
+            audioData = { buffer: audioBuffer, contentType };
+            console.log('[DICE] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+          } else {
+            console.warn('[DICE] ⚠️ Generated audio too small:', audioBuffer.byteLength, 'bytes');
+          }
+        } else {
+          console.warn('[DICE] TTS generation failed:', ttsResponse.status);
+        }
+      } catch (ttsErr) {
+        console.warn('[DICE] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
+    const response: any = { ok: true, messages: [fmt, narr.text] };
+    if (audioData) {
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType || 'audio/wav',
+        format: 'base64'
+      };
+      console.log('[DICE] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+    } else {
+      console.warn('[DICE] ⚠️ No audio generated - response will be sent without audio');
+    }
+    return res.json(response);
   } catch {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
   }
