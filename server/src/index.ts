@@ -8995,7 +8995,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                 'X-Goog-Api-Key': geminiApiKey
               },
             body: JSON.stringify(requestBody),
-              signal: AbortSignal.timeout(30000) // 30 секунд для длинных текстов
+              signal: AbortSignal.timeout(120000) // 120 секунд (2 минуты) для длинных текстов и прокси
             });
             
             if (response.ok) {
@@ -9133,7 +9133,12 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               console.log(`[GEMINI-TTS] ${modelName} not found, trying next model...`);
               continue;
             }
-            console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
+            const isTimeout = e?.name === 'TimeoutError' || e?.message?.includes('timeout') || e?.message?.includes('aborted');
+            if (isTimeout) {
+              console.warn(`[GEMINI-TTS] ${modelName} request timed out (text may be too long or proxy slow), trying next model...`);
+            } else {
+              console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
+            }
           }
         }
       }
