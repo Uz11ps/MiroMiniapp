@@ -5595,13 +5595,18 @@ app.post('/api/chat/reply', async (req, res) => {
                       forcedGameOver = true;
                     } catch {}
                   } else if (chosenExit.targetLocationId) {
+                    console.log(`[REPLY] 🔄 Updating currentLocationId from ${sess.currentLocationId} to ${chosenExit.targetLocationId}`);
                     await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: chosenExit.targetLocationId } });
                     // Обновляем кэш после изменения локации
                     cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
                     // КРИТИЧЕСКИ ВАЖНО: Обновляем locationIdForPregen для правильного сохранения прегенерированных материалов
                     locationIdForPregen = chosenExit.targetLocationId;
-                    console.log(`[REPLY] ✅ Updated locationIdForPregen to ${locationIdForPregen} after exit selection`);
+                    console.log(`[REPLY] ✅ Updated locationIdForPregen from ${sess.currentLocationId} to ${locationIdForPregen} after exit selection`);
+                  } else {
+                    console.warn(`[REPLY] ⚠️ Chosen exit has no targetLocationId, locationIdForPregen remains: ${locationIdForPregen}`);
                   }
+                } else {
+                  console.warn(`[REPLY] ⚠️ Cannot choose exit: btns.length=${btns.length}, choiceIndexForPregen=${choiceIndexForPregen}`);
                 }
               }
             } catch (e) {
@@ -5680,14 +5685,19 @@ app.post('/api/chat/reply', async (req, res) => {
     } else {
       // Если включено использование прегенерированных материалов - ищем прегенерированный текст (старая логика для обратной совместимости)
     if (game?.usePregenMaterials && gameId) {
-      let locationId: string | undefined = undefined;
-      try {
-        const sess = await getGameSession();
-        if (sess) {
-          locationId = sess.currentLocationId || undefined;
+      // КРИТИЧЕСКИ ВАЖНО: Используем locationIdForPregen, который уже обновлен после выбора exit
+      // Не перезаписываем его из sess.currentLocationId, так как это может быть старое значение
+      let locationId: string | undefined = locationIdForPregen;
+      if (!locationId) {
+        // Fallback: если locationIdForPregen не определен, получаем из сессии
+        try {
+          const sess = await getGameSession();
+          if (sess) {
+            locationId = sess.currentLocationId || undefined;
+          }
+        } catch (e) {
+          console.warn('[REPLY] Failed to get location for pregen text:', e);
         }
-      } catch (e) {
-        console.warn('[REPLY] Failed to get location for pregen text:', e);
       }
       
       // Ищем прегенерированный текст по действию игрока и контексту
