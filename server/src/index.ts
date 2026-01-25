@@ -496,12 +496,48 @@ function findPregenAudio(
   parentHash?: string
 ): string | null {
   // КРИТИЧЕСКИ ВАЖНО: Сначала ищем БЕЗ locationId в хеше (для диалогов внутри локации)
-  // Но в папке локации (если locationId указан)
   const hashWithoutLoc = createAudioHash(text, undefined, characterId, messageType, depth, choiceIndex, parentHash);
-  const subDir = locationId || 'general';
-  const possiblePaths = [
-    // Новый формат: БЕЗ locationId в хеше, но в папке локации (ПРИОРИТЕТ!)
-    path.join(PRAGEN_DIR, gameId, subDir, `${messageType}_${hashWithoutLoc}.wav`),
+  
+  // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, сначала ищем в 'general', потом в папке локации
+  const possiblePaths: string[] = [];
+  
+  if (choiceIndex !== undefined) {
+    // При определенном choiceIndex сначала ищем в 'general' (ПРИОРИТЕТ!)
+    possiblePaths.push(
+      path.join(PRAGEN_DIR, gameId, 'general', `${messageType}_${hashWithoutLoc}.wav`)
+    );
+    // Потом в папке локации (для обратной совместимости)
+    if (locationId) {
+      possiblePaths.push(
+        path.join(PRAGEN_DIR, gameId, locationId, `${messageType}_${hashWithoutLoc}.wav`)
+      );
+    }
+    // КРИТИЧЕСКИ ВАЖНО: Ищем во ВСЕХ папках локаций, так как locationId может меняться между запросами
+    try {
+      const gameDir = path.join(PRAGEN_DIR, gameId);
+      if (fs.existsSync(gameDir)) {
+        const subDirs = fs.readdirSync(gameDir, { withFileTypes: true })
+          .filter(dirent => dirent.isDirectory() && dirent.name !== 'general')
+          .map(dirent => dirent.name);
+        for (const subDir of subDirs) {
+          possiblePaths.push(
+            path.join(gameDir, subDir, `${messageType}_${hashWithoutLoc}.wav`)
+          );
+        }
+      }
+    } catch (e) {
+      // Игнорируем ошибки при чтении директории
+    }
+  } else {
+    // Если choiceIndex не определен, ищем в папке локации
+    const subDir = locationId || 'general';
+    possiblePaths.push(
+      path.join(PRAGEN_DIR, gameId, subDir, `${messageType}_${hashWithoutLoc}.wav`)
+    );
+  }
+  
+  // Добавляем остальные пути для обратной совместимости
+  possiblePaths.push(
     // Основной путь (старый формат с locationId в хеше - для обратной совместимости)
     getPregenAudioPath(gameId, text, locationId, characterId, messageType, depth, choiceIndex, parentHash),
     // Старый формат (для обратной совместимости - без depth/choiceIndex/parentHash)
@@ -510,9 +546,11 @@ function findPregenAudio(
     locationId ? path.join(PRAGEN_DIR, gameId, locationId, `welcome_${createAudioHash(text, locationId, characterId, messageType).slice(0, 12)}.wav`) : null,
     // Общий формат (без локации)
     path.join(PRAGEN_DIR, gameId, `msg_${createAudioHash(text, locationId, characterId, messageType)}.wav`),
-  ].filter(Boolean) as string[];
+  );
   
-  for (const audioPath of possiblePaths) {
+  const filteredPaths = possiblePaths.filter(Boolean) as string[];
+  
+  for (const audioPath of filteredPaths) {
     try {
       if (fs.existsSync(audioPath)) {
         return audioPath;
@@ -4259,10 +4297,10 @@ app.post('/api/chat/welcome', async (req, res) => {
       if (!first) return res.status(404).json({ message: 'Сценарий без локаций.', fallback: true });
       let gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
       if (!gsess) {
+        // КРИТИЧЕСКИ ВАЖНО: Создаем сессию только если её нет, НЕ сбрасываем currentLocationId если сессия уже существует
         gsess = await prisma.gameSession.create({ data: { scenarioGameId: gameId, lobbyId, userId: null, currentLocationId: first.id, state: {} as any } });
-      } else if (gsess.currentLocationId !== first.id) {
-        gsess = await prisma.gameSession.update({ where: { id: gsess.id }, data: { currentLocationId: first.id, state: {} as any } });
       }
+      // УБРАНО: Не сбрасываем currentLocationId на first.id - он должен меняться только при реальном переходе через locationExit
       const loc = await prisma.location.findUnique({ where: { id: first.id } });
       const game = await prisma.game.findUnique({ where: { id: gameId } });
       const chars = await prisma.character.findMany({ where: { gameId }, take: 6 });
@@ -4722,10 +4760,13 @@ app.post('/api/chat/welcome', async (req, res) => {
     if (!first) return res.status(404).json({ message: 'no_locations', fallback: true });
     let sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
     if (!sess) {
+      // КРИТИЧЕСКИ ВАЖНО: Создаем сессию только если её нет, НЕ сбрасываем currentLocationId если сессия уже существует
       sess = await prisma.gameSession.create({ data: { scenarioGameId: gameId, userId: uid, currentLocationId: first.id, state: {} as any } });
     } else if (!sess.currentLocationId) {
+      // Только если currentLocationId вообще не установлен (null/undefined) - устанавливаем на первую локацию
       sess = await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: first.id } });
     }
+    // УБРАНО: Не сбрасываем currentLocationId на first.id если он уже установлен - он должен меняться только при реальном переходе
     const sc = await buildGptSceneContext(prisma, { gameId, userId: uid, history: [] });
     const { text: generatedText } = await generateChatCompletion({
       systemPrompt: sys,
@@ -5949,11 +5990,11 @@ app.post('/api/chat/reply', async (req, res) => {
           // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации locationId не обязателен в хеше!
           // Пробуем найти с учетом depth и choiceIndex, но БЕЗ locationId в хеше (для диалогов внутри локации)
           console.log('[REPLY] Searching pregen audio with params:', {
-            searchText: choiceIndex !== undefined ? '(using choiceIndex only)' : userText?.slice(0, 50),
             depth,
-            choiceIndex,
-            parentHash: parentHash?.slice(0, 8),
-            locationId: locationId || 'none'
+            choiceIndex: choiceIndex !== undefined ? choiceIndex : 'none',
+            parentHash: parentHash?.slice(0, 8) || 'none',
+            locationId: locationId || 'none',
+            searchBy: choiceIndex !== undefined ? 'choiceIndex' : 'userText'
           });
           let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
           let pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
@@ -6180,12 +6221,11 @@ app.post('/api/chat/reply', async (req, res) => {
               const saveText = choiceIndex !== undefined ? '' : (userText || '');
               
               // Сохраняем аудио по choiceIndex (если определен) или по userText (если choiceIndex не определен)
-              // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации сохраняем БЕЗ locationId в хеше!
-              // Но используем locationId для папки (если есть), чтобы файлы были организованы по локациям
+              // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, сохраняем в папку 'general', чтобы файлы находились независимо от locationId!
               // Хеш создается БЕЗ locationId (undefined), чтобы диалоги внутри локации находились независимо от locationId
-              // Сохраняем в папке локации, но с хешем БЕЗ locationId
               const hashWithoutLoc = createAudioHash(saveText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
-              const subDir = locationId || 'general';
+              // Если choiceIndex определен - сохраняем в 'general', иначе в папку локации
+              const subDir = choiceIndex !== undefined ? 'general' : (locationId || 'general');
               const audioPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.wav`);
               const audioDir = path.dirname(audioPath);
               try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
@@ -6521,13 +6561,9 @@ app.post('/api/engine/session/start', async (req, res) => {
         data: { scenarioGameId: gameId, lobbyId: lobbyId || null, userId: uid || null, currentLocationId: first.id, state: {} as any },
       });
     } else {
-      const preserve = req.body?.preserve === true;
-      if (!preserve && sess.currentLocationId !== first.id) {
-        sess = await prisma.gameSession.update({
-          where: { id: sess.id },
-          data: { currentLocationId: first.id, state: {} as any },
-        });
-      }
+      // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем currentLocationId - он должен сохраняться между запросами
+      // currentLocationId меняется только при реальном переходе через locationExit (в /api/chat/reply)
+      // УБРАНО: Сброс currentLocationId на first.id - это ломало сохранение прогресса игрока
     }
     return res.json({ id: sess.id, currentLocationId: sess.currentLocationId });
   } catch (e) {
