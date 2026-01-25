@@ -8574,13 +8574,6 @@ app.post('/api/tts', async (req, res) => {
             }
           };
           
-          console.log('[GOOGLE-TTS] Sending request to Google TTS, chunk length:', chunkText.length, 'chars');
-          console.log('[GOOGLE-TTS] Request body preview:', JSON.stringify({
-            input: requestBody.input,
-            voice: requestBody.voice,
-            audioConfig: requestBody.audioConfig
-          }).slice(0, 500));
-          
           const googleResponse = await undiciFetch(googleTtsUrl, {
             method: 'POST',
             headers: {
@@ -8590,44 +8583,26 @@ app.post('/api/tts', async (req, res) => {
             signal: AbortSignal.timeout(20000)
           });
           
-          console.log('[GOOGLE-TTS] Response status:', googleResponse.status, googleResponse.statusText);
-          
           if (googleResponse.ok) {
             const googleData = await googleResponse.json() as any;
-            console.log('[GOOGLE-TTS] Response structure:', {
-              hasAudioContent: !!googleData.audioContent,
-              audioContentLength: googleData.audioContent?.length || 0,
-              audioContentPreview: googleData.audioContent?.slice(0, 100) || 'none',
-              error: googleData.error || null,
-              keys: Object.keys(googleData)
-            });
             
             if (googleData.audioContent) {
               try {
                 const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
-                console.log('[GOOGLE-TTS] Decoded audio buffer size:', audioBuffer.length, 'bytes');
                 
-                // КРИТИЧЕСКИ ВАЖНО: Проверяем размер аудио - если меньше 1 МБ, это явно ошибка
-                // Все ответы достаточно большие и массивные, поэтому аудио должно быть минимум 1 МБ
-                const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
-                if (audioBuffer.length < MIN_AUDIO_SIZE) {
-                  console.error('[GOOGLE-TTS] ⚠️ Audio buffer too small:', audioBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes). This is likely an error!');
-                  console.error('[GOOGLE-TTS] Raw audioContent (first 200 chars):', googleData.audioContent.slice(0, 200));
-                  console.error('[GOOGLE-TTS] Full response (first 1000 chars):', JSON.stringify(googleData).slice(0, 1000));
-                  return null;
-                }
+                // Для отдельных чанков НЕ проверяем минимальный размер - проверяем только финальное объединенное аудио
+                // Короткие чанки (например, последний из нескольких) могут быть меньше 1 МБ, это нормально
                 return audioBuffer;
               } catch (decodeErr) {
                 console.error('[GOOGLE-TTS] ⚠️ Failed to decode base64 audioContent:', decodeErr);
-                console.error('[GOOGLE-TTS] audioContent preview:', googleData.audioContent?.slice(0, 200));
                 return null;
               }
             } else {
-              console.error('[GOOGLE-TTS] ⚠️ No audioContent in response. Full response:', JSON.stringify(googleData).slice(0, 1000));
+              console.error('[GOOGLE-TTS] ⚠️ No audioContent in response');
             }
           } else {
             const errorText = await googleResponse.text().catch(() => '');
-            console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 500));
+            console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 200));
           }
           return null;
         };
@@ -8677,6 +8652,15 @@ app.post('/api/tts', async (req, res) => {
           
           // Объединяем все части
           const combinedBuffer = Buffer.concat(audioBuffers);
+          
+          // КРИТИЧЕСКИ ВАЖНО: Проверяем размер ТОЛЬКО для финального объединенного аудио
+          // Для отдельных чанков не проверяем, так как короткие чанки могут быть меньше 1 МБ
+          const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+          if (combinedBuffer.length < MIN_AUDIO_SIZE) {
+            console.error('[GOOGLE-TTS] ❌ Combined audio too small:', combinedBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes)');
+            return null;
+          }
+          
           console.log('[GOOGLE-TTS] ✅ Successfully generated and combined audio, total size:', combinedBuffer.length, 'bytes');
           return combinedBuffer;
         }
