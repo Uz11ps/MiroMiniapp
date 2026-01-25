@@ -286,11 +286,11 @@ input, textarea, .bubble {
 }
 
 .bottom-nav {
-  position: fixed !important;
-  left: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  z-index: 10; /* Поверх контента, но ниже модальных окон (было 50, уменьшили) */
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
   background: rgba(10, 20, 40, 0.9);
   backdrop-filter: blur(8px);
   display: grid;
@@ -299,11 +299,9 @@ input, textarea, .bubble {
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
   border-top-left-radius: 16px;
   border-top-right-radius: 16px;
-  /* Гарантируем, что панель всегда внизу */
-  margin: 0 !important;
-  transform: none !important;
-  /* Панель должна быть поверх контента, но контент должен скроллиться ПОД ней */
-  pointer-events: auto; /* Разрешаем клики по навигации */
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .bottom-item {
