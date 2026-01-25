@@ -6270,7 +6270,7 @@ app.post('/api/chat/reply', async (req, res) => {
             choiceIndex: choiceIndex !== undefined ? choiceIndex : undefined,
             parentHash: parentHash || undefined
           }),
-          signal: AbortSignal.timeout(60000) // 60 секунд таймаут (нужно время для SSML генерации)
+          signal: AbortSignal.timeout(150000) // 150 секунд таймаут (Gemini TTS может занимать до 120 секунд)
         });
         
         if (ttsResponse.ok) {
@@ -6328,8 +6328,13 @@ app.post('/api/chat/reply', async (req, res) => {
       audioData = audioData; // Уже установлено выше
       console.log('[REPLY] ✅ TTS ready, proceeding to send response to client');
     } catch (ttsErr: any) {
-      console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
-      // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, НЕ отправляем ответ
+      const isTimeout = ttsErr?.name === 'TimeoutError' || ttsErr?.message?.includes('timeout') || ttsErr?.message?.includes('aborted');
+      if (isTimeout) {
+        console.error('[REPLY] ❌ TTS generation TIMED OUT - NOT sending response to client');
+      } else {
+        console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      }
+      // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался (включая таймаут), НЕ отправляем ответ
       // Пользователь должен получить ответ ТОЛЬКО после завершения TTS
       audioData = null;
     }
@@ -6357,18 +6362,20 @@ app.post('/api/chat/reply', async (req, res) => {
       
       // Возвращаем текст с аудио - ВСЕГДА вместе
       // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-      if (audioData) {
-        // Конвертируем аудио в base64 для отправки клиенту
-        response.audio = {
-          data: audioData.buffer.toString('base64'),
-          contentType: audioData.contentType || 'audio/wav',
-          format: 'base64'
-        };
-        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
-      } else {
-        console.warn('[REPLY] ⚠️ No audio generated - response will be sent without audio');
+      // КРИТИЧЕСКИ ВАЖНО: Если audioData === null (таймаут или ошибка), НЕ отправляем ответ!
+      if (!audioData) {
+        console.error('[REPLY] ❌ TTS failed or timed out - NOT sending response to client');
+        return res.status(504).json({ error: 'tts_timeout', message: 'TTS generation timed out or failed' });
       }
+      
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
+      // Конвертируем аудио в base64 для отправки клиенту
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType || 'audio/wav',
+        format: 'base64'
+      };
+      console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
       return res.json(response);
     } else {
       const uid = await resolveUserIdFromQueryOrBody(req, prisma);
@@ -6390,18 +6397,20 @@ app.post('/api/chat/reply', async (req, res) => {
       
       // Возвращаем текст с аудио - ВСЕГДА вместе
       // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-      if (audioData) {
-        // Конвертируем аудио в base64 для отправки клиенту
-        response.audio = {
-          data: audioData.buffer.toString('base64'),
-          contentType: audioData.contentType || 'audio/wav',
-          format: 'base64'
-        };
-        console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
-      } else {
-        console.warn('[REPLY] ⚠️ No audio generated - response will be sent without audio');
+      // КРИТИЧЕСКИ ВАЖНО: Если audioData === null (таймаут или ошибка), НЕ отправляем ответ!
+      if (!audioData) {
+        console.error('[REPLY] ❌ TTS failed or timed out - NOT sending response to client');
+        return res.status(504).json({ error: 'tts_timeout', message: 'TTS generation timed out or failed' });
       }
+      
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
+      // Конвертируем аудио в base64 для отправки клиенту
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType || 'audio/wav',
+        format: 'base64'
+      };
+      console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
       return res.json(response);
     }
   } catch (e) {
@@ -9015,10 +9024,17 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               if (contentType.includes('audio')) {
                 const audioBuffer = Buffer.from(await response.arrayBuffer());
                 console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
-                // Сохраняем сгенерированное аудио - ТОЧНО ТАК ЖЕ КАК ДЛЯ GOOGLE TTS
-                saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
                 res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
                 res.setHeader('Content-Length', String(audioBuffer.length));
+                // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
+                (async () => {
+                  try {
+                    console.log(`[GEMINI-TTS] 💾 Saving audio and text via saveGeneratedAudio (text length=${text.length}, scenarioGameId=${scenarioGameIdForPregen || 'none'})`);
+                    saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
+                  } catch (e) {
+                    console.warn('[GEMINI-TTS] Failed to save audio in background:', e);
+                  }
+                })();
                 return res.send(audioBuffer);
               }
               
@@ -9094,10 +9110,19 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     
                     console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes, Content-Type: ${contentType}`);
                     // Сохраняем сгенерированное аудио - ТОЧНО ТАК ЖЕ КАК ДЛЯ GOOGLE TTS
-                    saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
+                    // Функция saveGeneratedAudio сохраняет И текст, И аудио
                     res.setHeader('Content-Type', contentType);
                     res.setHeader('Content-Length', String(audioBuffer.length));
                     audioFound = true;
+                    // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
+                    (async () => {
+                      try {
+                        console.log(`[GEMINI-TTS] 💾 Saving audio and text via saveGeneratedAudio (text length=${text.length}, scenarioGameId=${scenarioGameIdForPregen || 'none'})`);
+                        saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
+                      } catch (e) {
+                        console.warn('[GEMINI-TTS] Failed to save audio in background:', e);
+                      }
+                    })();
                     return res.send(audioBuffer);
                   }
                   
@@ -9169,10 +9194,16 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
     const googleAudio = await generateGoogleTTS();
     if (googleAudio) {
       console.log('[TTS] ✅ Returning Google TTS fallback audio to client, size:', googleAudio.length, 'bytes');
-      // Сохраняем сгенерированное аудио
-      saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
       res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
       res.setHeader('Content-Length', googleAudio.length.toString());
+      // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
+      (async () => {
+        try {
+          saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
+        } catch (e) {
+          console.warn('[TTS] Failed to save audio in background:', e);
+        }
+      })();
       return res.send(googleAudio);
     } else {
       console.error('[TTS] ❌ Google TTS fallback also returned null/undefined!');
