@@ -6022,9 +6022,25 @@ app.post('/api/chat/reply', async (req, res) => {
             locationId: locationId || 'none',
             searchBy: choiceIndex !== undefined ? 'choiceIndex' : 'userText'
           });
+          // КРИТИЧЕСКИ ВАЖНО: Сначала ищем БЕЗ locationId в хеше (для диалогов внутри локации)
+          // Но функция findPregenAudio уже ищет в папке locationId, так что это покрывает оба случая
           let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
           let pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
-          console.log('[REPLY] Pregen search result:', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
+          console.log('[REPLY] Pregen search result (without locationId in hash):', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
+          
+          // КРИТИЧЕСКИ ВАЖНО: Также ищем С locationId в папке (функция findPregenAudio уже это делает, но для гарантии делаем явный поиск)
+          // Это нужно, чтобы найти файлы, сохраненные в папке locationId с правильными параметрами
+          if ((!foundPregenText || !pregenPath) && locationId) {
+            if (!foundPregenText) {
+              foundPregenText = findPregenText(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+            }
+            if (!pregenPath) {
+              pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+            }
+            if (foundPregenText || pregenPath) {
+              console.log('[REPLY] Pregen search result (with locationId in folder):', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
+            }
+          }
           
           // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен AI, НЕ ищем по другим choiceIndex - это игнорирует выбор пользователя!
           // Fallback поиск только если choiceIndex НЕ был определен AI
@@ -6040,22 +6056,21 @@ app.post('/api/chat/reply', async (req, res) => {
               if (!pregenPath) {
                 pregenPath = findPregenAudio(scenarioGameIdForPregen, '', undefined, characterId, 'narrator', depth, ci, parentHash);
               }
+              // Также ищем в папке locationId для этого choiceIndex
+              if ((!foundPregenText || !pregenPath) && locationId) {
+                if (!foundPregenText) {
+                  foundPregenText = findPregenText(scenarioGameIdForPregen, '', locationId, characterId, 'narrator', depth, ci, parentHash);
+                }
+                if (!pregenPath) {
+                  pregenPath = findPregenAudio(scenarioGameIdForPregen, '', locationId, characterId, 'narrator', depth, ci, parentHash);
+                }
+              }
               if (foundPregenText && pregenPath) {
                 console.log('[REPLY] ✅ Found pre-generated content with different choiceIndex:', ci);
                 // Обновляем choiceIndex для дальнейшего использования
                 choiceIndex = ci;
                 break;
               }
-            }
-          }
-          
-          // Если не нашли БЕЗ locationId, пробуем С locationId (для обратной совместимости)
-          if (!foundPregenText || !pregenPath) {
-            if (!foundPregenText) {
-              foundPregenText = findPregenText(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
-            }
-            if (!pregenPath) {
-              pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
             }
           }
           
