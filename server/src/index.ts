@@ -9030,6 +9030,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               
               if (json?.candidates?.[0]?.content?.parts) {
                 console.log(`[GEMINI-TTS] ${modelName} found ${json.candidates[0].content.parts.length} parts`);
+                let audioFound = false;
                 for (let i = 0; i < json.candidates[0].content.parts.length; i++) {
                   const part = json.candidates[0].content.parts[i];
                   console.log(`[GEMINI-TTS] ${modelName} part ${i} keys:`, Object.keys(part));
@@ -9087,7 +9088,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
                     res.setHeader('Content-Type', contentType);
                     res.setHeader('Content-Length', String(audioBuffer.length));
-                    return res.send(audioBuffer);
+                    console.log(`[GEMINI-TTS] 🚀 Sending audio response to client (${audioBuffer.length} bytes)`);
+                    audioFound = true;
+                    const sendResult = res.send(audioBuffer);
+                    console.log(`[GEMINI-TTS] ✅ Audio response sent successfully, returning from function`);
+                    return sendResult;
                   }
                   
                   // Проверяем, может быть текст вместо аудио (модель не поддерживает TTS)
@@ -9095,11 +9100,15 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                     console.warn(`[GEMINI-TTS] ${modelName} returned text instead of audio. Text preview:`, part.text.slice(0, 200));
                   }
                 }
+                
+                // Если аудио не найдено в частях, логируем предупреждение
+                if (!audioFound) {
+                  console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in parts`);
+                }
             } else {
                 console.warn(`[GEMINI-TTS] ${modelName} response structure:`, JSON.stringify(json).slice(0, 1000));
+                console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
             }
-              
-              console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
           } else {
               const errorText = await response.text().catch(() => '');
               
