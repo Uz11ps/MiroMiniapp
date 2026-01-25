@@ -5608,3 +5608,5282 @@ app.post('/api/chat/reply', async (req, res) => {
     // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
     if (scenarioGameIdForPregen) {
       const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
+      console.log(`[REPLY] 🔍 Pregen materials check: hasMaterials=${hasMaterials}, scenarioGameId=${scenarioGameIdForPregen}`);
+      if (hasMaterials) {
+        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для поиска!
+        // AI уже подставил индекс выбора, поэтому ищем только по choiceIndex, depth, parentHash
+        // Если choiceIndex определен (независимо от того, через AI или нет), то searchText всегда пустая строка
+        const searchText = choiceIndexForPregen !== undefined ? '' : (userText || '');
+        
+        console.log('[REPLY] Searching for pre-generated content:', {
+          scenarioGameId: scenarioGameIdForPregen,
+          locationId: locationIdForPregen,
+          searchText: searchText ? searchText.slice(0, 50) : '(empty - using choiceIndex)',
+          userText: userText?.slice(0, 50),
+          depth: depthForPregen,
+          choiceIndex: choiceIndexForPregen,
+          parentHash: parentHashForPregen?.slice(0, 8),
+          hasMaterials,
+          choiceIndexFromAI
+        });
+        
+        // Ищем по choiceIndex (если определен) или по userText (если choiceIndex не определен)
+        let foundText = findPregenText(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
+        
+        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен AI, НЕ ищем по другим choiceIndex - это игнорирует выбор пользователя!
+        // Fallback поиск только если choiceIndex НЕ был определен AI (например, определен через fallback или не определен вообще)
+        if (!foundText && choiceIndexForPregen !== undefined && !choiceIndexFromAI) {
+          // Пробуем поиск по всем возможным choiceIndex (0-9) как fallback
+          // Это нужно на случай, если файлы сохранены с другим choiceIndex, но ТОЛЬКО если choiceIndex не был определен AI
+          for (let ci = 0; ci < 10; ci++) {
+            // Пропускаем уже проверенный choiceIndex
+            if (ci === choiceIndexForPregen) continue;
+            foundText = findPregenText(scenarioGameIdForPregen, '', locationIdForPregen, undefined, 'narrator', depthForPregen, ci, parentHashForPregen);
+            if (foundText) {
+              choiceIndexForPregen = ci;
+              console.log('[REPLY] ✅ Found pre-generated text with different choiceIndex:', ci);
+              break;
+            }
+          }
+        }
+        
+        // Если все еще не нашли, пробуем без параметров depth/choiceIndex/parentHash
+        if (!foundText) {
+          foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator');
+        }
+        
+        if (foundText) {
+          pregenTextFound = foundText;
+          console.log('[REPLY] ✅ Found pre-generated text BEFORE generation');
+        }
+      }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Используем найденный прегенерированный текст, если он был найден
+    if (pregenTextFound) {
+      text = pregenTextFound;
+      console.log('[REPLY] ✅ Using pre-generated text from file (BEFORE generation)');
+    } else {
+      // Если включено использование прегенерированных материалов - ищем прегенерированный текст (старая логика для обратной совместимости)
+    if (game?.usePregenMaterials && gameId) {
+      let locationId: string | undefined = undefined;
+      try {
+        const sess = await getGameSession();
+        if (sess) {
+          locationId = sess.currentLocationId || undefined;
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to get location for pregen text:', e);
+      }
+      
+      // Ищем прегенерированный текст по действию игрока и контексту
+      const pregenText = findPregenText(gameId, userText || userPrompt, locationId, undefined, 'narrator');
+      if (pregenText) {
+        text = pregenText;
+        console.log('[REPLY] ✅ Using pre-generated text (usePregenMaterials=true)');
+      } else {
+        console.warn('[REPLY] ⚠️ Pre-generated text not found, using fallback (usePregenMaterials=true)');
+      }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Если текст не найден - ВСЕГДА генерируем в реальном времени, независимо от наличия прегенерированных материалов
+    // Прегенерированные материалы - это оптимизация, но не требование!
+    if (!text) {
+      // КРИТИЧЕСКИ ВАЖНО: Если AI определил choiceIndex, добавляем информацию о выбранном варианте в промпт
+      let enhancedUserPrompt = userPrompt;
+      if (choiceIndexForPregen !== undefined && baseHistory && baseHistory.length > 0) {
+        const botMessages = baseHistory.filter(m => m.from === 'bot');
+        const lastBotMessage = botMessages.length > 0 ? botMessages[botMessages.length - 1] : null;
+        if (lastBotMessage?.text) {
+          const choices = parseChoiceOptions(lastBotMessage.text);
+          if (choices.length > 0 && choiceIndexForPregen >= 0 && choiceIndexForPregen < choices.length) {
+            const selectedChoice = choices[choiceIndexForPregen];
+            enhancedUserPrompt = userPrompt + `\n\nКРИТИЧЕСКИ ВАЖНО: Пользователь выбрал вариант ${choiceIndexForPregen + 1}: "${selectedChoice}". Генерируй ответ на основе ЭТОГО выбора, а не на основе исходного текста пользователя.`;
+            console.log(`[REPLY] 🎯 Enhanced prompt with selected choice: ${choiceIndexForPregen + 1} - "${selectedChoice}"`);
+          }
+        }
+      }
+      
+      const { text: generatedText } = await generateChatCompletion({
+        systemPrompt: sys,
+        userPrompt: enhancedUserPrompt,
+        history: baseHistory
+      });
+      text = generatedText;
+        console.log('[REPLY] ⚠️ Generated NEW text (pre-generated not found)');
+    }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Fallback текст тоже должен пройти через блок TTS
+    if (!text) {
+      text = await fallbackBranch();
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Если текст все еще пустой после fallback, отправляем ответ без TTS
+    if (!text) {
+      return res.json({ message: 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.', fallback: true });
+    }
+
+    // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+    // ВАЖНО: Применяем форматирование только если текст был сгенерирован, а не взят из файла
+    // Если текст из файла - он уже должен быть отформатирован
+    if (!pregenTextFound) {
+    text = formatChoiceOptions(text);
+    } else {
+      // Для прегенерированного текста проверяем, нужно ли форматирование
+      const hasChoices = text.includes('**') || text.includes('*');
+      if (hasChoices) {
+        text = formatChoiceOptions(text);
+      }
+    }
+    
+    // Проверяем, есть ли варианты выбора в тексте
+    const choices = parseChoiceOptions(text);
+    if (choices.length === 0 && gameId) {
+      // Если вариантов нет, добавляем их из кнопок текущей локации
+      let locationId: string | undefined = undefined;
+      try {
+        const sess = await getGameSession();
+        if (sess) {
+          locationId = sess.currentLocationId || undefined;
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to get location for adding choices:', e);
+      }
+      
+      if (locationId) {
+        const exits = await prisma.locationExit.findMany({ where: { locationId } });
+        if (exits.length > 0) {
+          const choiceLines = exits
+            .map((exit, idx) => {
+              const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+              return `${idx + 1}. ${choiceText}`;
+            })
+            .join('\n');
+          // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+          if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+            text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+            text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+          } else {
+            text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+          }
+        }
+      }
+    }
+
+    // Парсинг тега броска от ИИ
+    let aiRequestDice: any = null;
+    const diceTagRegex = /\[\[ROLL:\s*(.*?),\s*DC:\s*(\d+)\]\]/i;
+    const match = text.match(diceTagRegex);
+    if (match) {
+      const kindRaw = match[1].trim();
+      const dc = parseInt(match[2], 10);
+      const kindNorm = normalizeRollKind(kindRaw);
+      aiRequestDice = { expr: 'd20', dc, context: `Проверка: ${kindRaw}`, kind: kindNorm, skill: kindRaw };
+      text = text.replace(diceTagRegex, '').trim();
+    }
+
+    // Парсинг изменений состояния персонажей из ответа ИИ
+    if (gameId && playable.length) {
+      try {
+        const sess = await getGameSession();
+        
+        if (sess) {
+          const state = (sess.state as any) || {};
+          if (!state.characters) state.characters = {};
+          
+          // ПРИМЕНЯЕМ ЭФФЕКТЫ СОСТОЯНИЙ В НАЧАЛЕ ХОДА
+          for (const char of playable) {
+            const charState = state.characters[char.id] || { hp: char.hp, maxHp: char.maxHp };
+            const baseChar = char;
+            
+            // Обновляем длительность состояний
+            const { removed } = updateConditionDurations(charState);
+            if (removed.length > 0) {
+              console.log(`[CONDITIONS] Removed expired conditions for ${char.name}:`, removed);
+            }
+            
+            // Применяем эффекты состояний
+            const { hpChange, statChanges, messages } = applyConditionEffects(charState, baseChar);
+            
+            if (hpChange !== 0) {
+              charState.hp = Math.max(0, Math.min(charState.maxHp || baseChar.maxHp, (charState.hp || baseChar.hp) + hpChange));
+              console.log(`[CONDITIONS] ${char.name} HP changed by ${hpChange} due to conditions. New HP: ${charState.hp}/${charState.maxHp || baseChar.maxHp}`);
+            }
+            
+            if (Object.keys(statChanges).length > 0) {
+              if (!charState.statModifiers) charState.statModifiers = {};
+              for (const [stat, change] of Object.entries(statChanges)) {
+                charState.statModifiers[stat] = (charState.statModifiers[stat] || 0) + change;
+              }
+            }
+            
+            state.characters[char.id] = charState;
+          }
+          
+          // Парсим изменения HP из текста ИИ
+          // Форматы: "Персонаж теряет 5 HP", "HP уменьшается на 3", "Персонаж получает урон 10"
+          // "Персонаж восстанавливает 5 HP", "HP увеличивается на 3", "Лечение: +5 HP"
+          const hpChangeRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*(?:теряет|получает|восстанавливает|теряет|получил|восстановил|получила|восстановила)\s*(?:урон|урон|HP|хит|хитов)?\s*(\d+)\s*(?:HP|хит|хитов|урона|урона)|HP\s*(?:уменьшается|увеличивается|изменяется)\s*(?:на|до)\s*([+-]?\d+)|(?:Урон|Лечение|Восстановление):\s*([+-]?\d+)\s*HP)/gi;
+          const hpMatches = text.matchAll(hpChangeRegex);
+          
+          for (const hpMatch of hpMatches) {
+            const charName = hpMatch[1]?.trim();
+            const damage = hpMatch[2] ? parseInt(hpMatch[2], 10) : (hpMatch[3] ? parseInt(hpMatch[3], 10) : (hpMatch[4] ? parseInt(hpMatch[4], 10) : 0));
+            
+            if (charName && damage) {
+              // Находим персонажа по имени
+              const char = playable.find((p: any) => 
+                p.name.toLowerCase().includes(charName.toLowerCase()) || 
+                charName.toLowerCase().includes(p.name.toLowerCase())
+              );
+              
+              if (char) {
+                const charState = state.characters[char.id] || { hp: char.hp, maxHp: char.maxHp };
+                const isHeal = hpMatch[0].toLowerCase().includes('восстанов') || hpMatch[0].toLowerCase().includes('лечение') || damage < 0;
+                const isDamage = hpMatch[0].toLowerCase().includes('теряет') || hpMatch[0].toLowerCase().includes('урон') || damage > 0;
+                
+                if (isHeal) {
+                  charState.hp = Math.min(charState.maxHp || char.maxHp, (charState.hp || char.hp) + Math.abs(damage));
+                } else if (isDamage) {
+                  charState.hp = Math.max(0, (charState.hp || char.hp) - Math.abs(damage));
+                }
+                
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Парсим изменения характеристик (временные эффекты)
+          // Формат: "STR уменьшается на 2", "DEX +1", "CON -1"
+          const statChangeRegex = /(STR|DEX|CON|INT|WIS|CHA|Сила|Ловкость|Телосложение|Интеллект|Мудрость|Харизма)\s*(?:уменьшается|увеличивается|изменяется|становится)\s*(?:на|до)?\s*([+-]?\d+)/gi;
+          const statMatches = text.matchAll(statChangeRegex);
+          
+          for (const statMatch of statMatches) {
+            const statName = statMatch[1];
+            const change = parseInt(statMatch[2], 10);
+            
+            if (statName && !isNaN(change)) {
+              // Маппинг русских названий на английские
+              const statMap: Record<string, string> = {
+                'Сила': 'str', 'STR': 'str',
+                'Ловкость': 'dex', 'DEX': 'dex',
+                'Телосложение': 'con', 'CON': 'con',
+                'Интеллект': 'int', 'INT': 'int',
+                'Мудрость': 'wis', 'WIS': 'wis',
+                'Харизма': 'cha', 'CHA': 'cha'
+              };
+              
+              const statKey = statMap[statName] || statName.toLowerCase();
+              
+              // Применяем изменение ко всем персонажам (или можно указать конкретного)
+              for (const char of playable) {
+                const charState = state.characters[char.id] || {};
+                if (!charState.statModifiers) charState.statModifiers = {};
+                charState.statModifiers[statKey] = (charState.statModifiers[statKey] || 0) + change;
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Парсим состояния (отравление, паралич и т.д.)
+          // Формат: "Персонаж отравлен", "Применяется эффект: Паралич"
+          // ВАЖНО: НЕ применяем состояния из описаний окружения (например, "отравленный воздух", "парализующий газ")
+          
+          // Функция проверки, является ли это описанием окружения/предмета, а не состоянием персонажа
+          const isEnvironmentDescription = (condition: string, beforeMatch: string, fullMatch: string, afterMatch: string, charName: string | null): boolean => {
+            const conditionLower = condition.toLowerCase();
+            
+            // Слова, которые могут указывать на описание окружения/предмета
+            const environmentKeywords = [
+              'воздух', 'вода', 'газ', 'туман', 'облако', 'облака', 'вещество', 'вещества',
+              'среда', 'среды', 'атмосфера', 'атмосферы', 'окружение', 'окружения',
+              'область', 'области', 'зона', 'зоны', 'место', 'места', 'помещение', 'помещения',
+              'комната', 'комнаты', 'зал', 'залы', 'коридор', 'коридоры', 'туннель', 'туннели',
+              'пещера', 'пещеры', 'подземелье', 'подземелья', 'оружие', 'оружия', 'стрела', 'стрелы',
+              'клинок', 'клинки', 'лезвие', 'лезвия', 'яд', 'яды', 'токсин', 'токсины', 'магия',
+              'заклинание', 'заклинания', 'эффект', 'эффекты', 'поле', 'поля', 'барьер', 'барьеры',
+              'ловушка', 'ловушки', 'проклятие', 'проклятия', 'аура', 'ауры'
+            ];
+            
+            // Паттерны для прилагательных (отравленный, парализующий, оглушающий и т.д.)
+            const adjectivePatterns: Record<string, string[]> = {
+              'отравлен': ['отравленн(?:ый|ая|ое|ые)', 'отравляющ(?:ий|ая|ее|ие)'],
+              'парализован': ['парализованн(?:ый|ая|ое|ые)', 'парализующ(?:ий|ая|ее|ие)'],
+              'оглушен': ['оглушенн(?:ый|ая|ое|ые)', 'оглушающ(?:ий|ая|ее|ие)'],
+              'ослеплен': ['ослепленн(?:ый|ая|ое|ые)', 'ослепляющ(?:ий|ая|ее|ие)'],
+              'очарован': ['очарованн(?:ый|ая|ое|ые)', 'очаровывающ(?:ий|ая|ее|ие)'],
+              'испуган': ['испуганн(?:ый|ая|ое|ые)', 'пугающ(?:ий|ая|ее|ие)'],
+              'невидим': ['невидим(?:ый|ая|ое|ые)', 'невидимо'],
+              'болезнь': ['болезненн(?:ый|ая|ое|ые)', 'заболевш(?:ий|ая|ее|ие)'],
+              'усталость': ['устал(?:ый|ая|ое|ые)', 'утомленн(?:ый|ая|ое|ые)'],
+              'истощение': ['истощенн(?:ый|ая|ое|ые)', 'истощающ(?:ий|ая|ее|ие)']
+            };
+            
+            const patterns = adjectivePatterns[conditionLower] || [];
+            const context = (beforeMatch + fullMatch + afterMatch).toLowerCase();
+            
+            // Проверяем, есть ли прилагательное + слово окружения
+            for (const pattern of patterns) {
+              for (const keyword of environmentKeywords) {
+                const regex = new RegExp(`${pattern}\\s+${keyword}`, 'i');
+                if (regex.test(context)) {
+                  return true;
+                }
+              }
+            }
+            
+            // Проверяем, что после условия идет слово окружения (например, "отравлен воздух")
+            for (const keyword of environmentKeywords) {
+              const regex = new RegExp(`${conditionLower}\\s+${keyword}`, 'i');
+              if (regex.test(context)) {
+                return true;
+              }
+            }
+            
+            return false;
+          };
+          
+          const conditionRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*(?:получает|подвергается|подвержен|подвержена|становится|становятся|получил|получила|получили)\s*(?:эффекту|состоянию)?:?\s*)?(отравлен|парализован|оглушен|ослеплен|очарован|испуган|невидим|невидима|болезнь|болезни|усталость|усталости|истощение|истощения)/gi;
+          const conditionMatches = text.matchAll(conditionRegex);
+          
+          for (const condMatch of conditionMatches) {
+            const charName = condMatch[1]?.trim() || null;
+            const condition = condMatch[2]?.toLowerCase();
+            const fullMatch = condMatch[0];
+            const matchIndex = condMatch.index || 0;
+            
+            // Проверяем контекст - если это описание окружения, пропускаем
+            const beforeMatch = text.substring(Math.max(0, matchIndex - 50), matchIndex).toLowerCase();
+            const afterMatch = text.substring(matchIndex + fullMatch.length, Math.min(text.length, matchIndex + fullMatch.length + 30)).toLowerCase();
+            
+            // Проверяем, является ли это описанием окружения/предмета
+            if (isEnvironmentDescription(condition, beforeMatch, fullMatch, afterMatch, charName) && !charName) {
+              console.log(`[CONDITIONS] Skipping condition "${condition}" - appears to be environment/object description, not character condition`);
+              continue;
+            }
+            
+            if (condition) {
+              const chars = charName ? 
+                playable.filter((p: any) => 
+                  p.name.toLowerCase().includes(charName.toLowerCase()) || 
+                  charName.toLowerCase().includes(p.name.toLowerCase())
+                ) : playable;
+              
+              // Если нет имени персонажа, применяем только если есть явные глаголы применения состояния
+              const hasActionVerb = /(?:получает|подвергается|подвержен|подвержена|становится|становятся|получил|получила|получили)/i.test(beforeMatch);
+              
+              // Также проверяем, что это не просто упоминание в описании (например, "в комнате отравленный воздух")
+              const isJustMention = !charName && !hasActionVerb && !/(?:персонаж|игрок|герой|член|участник|член группы)/i.test(beforeMatch);
+              
+              if (isJustMention) {
+                console.log(`[CONDITIONS] Skipping condition "${condition}" - appears to be just a mention in description, not application to character`);
+                continue;
+              }
+              
+              for (const char of chars) {
+                const charState = state.characters[char.id] || {};
+                if (!charState.conditions) charState.conditions = [];
+                if (!charState.conditions.includes(condition)) {
+                  charState.conditions.push(condition);
+                  // Инициализируем данные состояния
+                  const effect = CONDITION_EFFECTS[condition];
+                  if (effect && effect.duration !== undefined) {
+                    if (!charState.conditionData) charState.conditionData = {};
+                    charState.conditionData[condition] = { duration: effect.duration };
+                  }
+                  console.log(`[CONDITIONS] Applied condition "${condition}" to ${char.name}`);
+                }
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Парсим снятие состояний (лечение, отдых)
+          // Формат: "Состояние снято", "Отравление излечено", "Лечение снимает паралич"
+          const removeConditionRegex = /(?:([А-Яа-яЁёA-Za-z\s]{2,30})\s*)?(?:излечен|излечена|вылечен|вылечена|снят|снята|снято|восстановлен|восстановлена|отдых|отдыхает|лечение|лечится)\s*(?:от|от)?\s*(отравлен|парализован|оглушен|ослеплен|очарован|испуган|невидим|невидима|болезнь|болезни|усталость|усталости|истощение|истощения|состояни[яе])/gi;
+          const removeMatches = text.matchAll(removeConditionRegex);
+          
+          for (const removeMatch of removeMatches) {
+            const charName = removeMatch[1]?.trim();
+            const condition = removeMatch[2]?.toLowerCase();
+            
+            if (condition && condition !== 'состояни' && condition !== 'состояние') {
+              const chars = charName ? 
+                playable.filter((p: any) => 
+                  p.name.toLowerCase().includes(charName.toLowerCase()) || 
+                  charName.toLowerCase().includes(p.name.toLowerCase())
+                ) : playable;
+              
+              for (const char of chars) {
+                const charState = state.characters[char.id] || {};
+                if (charState.conditions && charState.conditions.includes(condition)) {
+                  charState.conditions = charState.conditions.filter((c: string) => c !== condition);
+                  if (charState.conditionData && charState.conditionData[condition]) {
+                    delete charState.conditionData[condition];
+                  }
+                  console.log(`[CONDITIONS] Removed condition "${condition}" from ${char.name}`);
+                }
+                state.characters[char.id] = charState;
+              }
+            }
+          }
+          
+          // Сохраняем обновленное состояние
+          await prisma.gameSession.update({
+            where: { id: sess.id },
+            data: { state }
+          });
+        }
+      } catch (e) {
+        console.error('[REPLY] Failed to parse character state changes:', e);
+      }
+    }
+
+    // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ - генерируем аудио перед отправкой текста
+    // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
+    // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем ответ до завершения TTS
+    console.log('[REPLY] 🎤 Generating TTS for text length:', text.length);
+    let audioData: { buffer: Buffer; contentType: string } | null = null;
+    
+    // Определяем переменные для TTS ДО блока try, чтобы они были доступны везде
+    const depth = depthForPregen;
+    let choiceIndex = choiceIndexForPregen; // Используем let, так как может быть обновлен при семантическом поиске
+    const parentHash = parentHashForPregen;
+    const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
+    const characterId = undefined; // Для narrator всегда undefined
+    const choiceIndexFromAIFlag = choiceIndexFromAI; // Копируем флаг для использования в блоке TTS
+    
+    try {
+      // КРИТИЧЕСКИ ВАЖНО: Используем уже определенные переменные из верхнего блока поиска текста!
+      // scenarioGameIdForPregen, locationIdForPregen, depthForPregen, choiceIndexForPregen, parentHashForPregen уже определены выше
+      // pregenTextFound тоже уже определен выше
+      let pregenAudioData: { buffer: Buffer; contentType: string } | null = null;
+      
+      if (scenarioGameIdForPregen) {
+        
+        // Поиск прегенерированных материалов (логи убраны)
+        
+        // Проверяем наличие прегенерованных материалов для scenarioGameId
+        const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
+        
+        if (hasMaterials) {
+          // Если материалы есть - ищем по точному хэшу (каждое сообщение имеет свой хэш)
+          // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для поиска!
+          // AI уже подставил индекс выбора, поэтому ищем только по choiceIndex, depth, parentHash
+          const searchText = choiceIndex !== undefined ? '' : (userText || '');
+        
+          // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации locationId не обязателен в хеше!
+          // Пробуем найти с учетом depth и choiceIndex, но БЕЗ locationId в хеше (для диалогов внутри локации)
+          console.log('[REPLY] Searching pregen audio with params:', {
+            depth,
+            choiceIndex: choiceIndex !== undefined ? choiceIndex : 'none',
+            parentHash: parentHash?.slice(0, 8) || 'none',
+            locationId: locationId || 'none',
+            searchBy: choiceIndex !== undefined ? 'choiceIndex' : 'userText'
+          });
+          // КРИТИЧЕСКИ ВАЖНО: Сначала ищем БЕЗ locationId в хеше (для диалогов внутри локации)
+          // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, ищем в папке 'general' (как при сохранении)
+          const searchSubDir = choiceIndex !== undefined ? 'general' : undefined;
+          const searchHash = createAudioHash(searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          console.log(`[REPLY] 🔍 Searching pregen: searchText="${searchText.slice(0, 50) || '(empty)'}", hash=${searchHash.slice(0, 8)}, subDir=${searchSubDir || locationId || 'general'}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+          
+          let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, searchText, searchSubDir, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, searchSubDir, characterId, 'narrator', depth, choiceIndex, parentHash);
+          console.log('[REPLY] Pregen search result (without locationId in hash):', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
+          
+          // КРИТИЧЕСКИ ВАЖНО: Также ищем С locationId в папке (функция findPregenAudio уже это делает, но для гарантии делаем явный поиск)
+          // Это нужно, чтобы найти файлы, сохраненные в папке locationId с правильными параметрами
+          if ((!foundPregenText || !pregenPath) && locationId) {
+            if (!foundPregenText) {
+              foundPregenText = findPregenText(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+            }
+            if (!pregenPath) {
+              pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+            }
+            if (foundPregenText || pregenPath) {
+              console.log('[REPLY] Pregen search result (with locationId in folder):', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
+            }
+          }
+          
+          // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен AI, НЕ ищем по другим choiceIndex - это игнорирует выбор пользователя!
+          // Fallback поиск только если choiceIndex НЕ был определен AI
+          if ((!foundPregenText || !pregenPath) && !choiceIndexFromAIFlag) {
+            // Пробуем поиск по всем возможным choiceIndex (0-9) как fallback
+            // Это нужно на случай, если файлы сохранены с другим choiceIndex, но ТОЛЬКО если choiceIndex не был определен AI
+            for (let ci = 0; ci < 10; ci++) {
+              // Пропускаем уже проверенный choiceIndex
+              if (ci === choiceIndex) continue;
+              if (!foundPregenText) {
+                foundPregenText = findPregenText(scenarioGameIdForPregen, '', undefined, characterId, 'narrator', depth, ci, parentHash);
+              }
+              if (!pregenPath) {
+                pregenPath = findPregenAudio(scenarioGameIdForPregen, '', undefined, characterId, 'narrator', depth, ci, parentHash);
+              }
+              // Также ищем в папке locationId для этого choiceIndex
+              if ((!foundPregenText || !pregenPath) && locationId) {
+                if (!foundPregenText) {
+                  foundPregenText = findPregenText(scenarioGameIdForPregen, '', locationId, characterId, 'narrator', depth, ci, parentHash);
+                }
+                if (!pregenPath) {
+                  pregenPath = findPregenAudio(scenarioGameIdForPregen, '', locationId, characterId, 'narrator', depth, ci, parentHash);
+                }
+              }
+              if (foundPregenText && pregenPath) {
+                console.log('[REPLY] ✅ Found pre-generated content with different choiceIndex:', ci);
+                // Обновляем choiceIndex для дальнейшего использования
+                choiceIndex = ci;
+                break;
+              }
+            }
+          }
+          
+          // КРИТИЧЕСКИ ВАЖНО: НЕ используем fallback-поиск без параметров depth/choiceIndex/parentHash
+          // Это может привести к загрузке контента из другой части игры (другой depth или другой выбор)
+          // Ищем только по точным параметрам, чтобы гарантировать правильность загружаемого контента
+          
+          // КРИТИЧЕСКИ ВАЖНО: Проверяем наличие ОБОИХ файлов
+          // Если нашли аудио, проверяем наличие текста рядом с ним
+          if (pregenPath && !foundPregenText) {
+            try {
+              const textPath = pregenPath.replace(/\.wav$/, '.txt');
+              if (fs.existsSync(textPath)) {
+                foundPregenText = fs.readFileSync(textPath, 'utf-8');
+                console.log('[REPLY] ✅ Loaded pre-generated text from file:', textPath);
+              } else {
+                // Если текста нет - удаляем аудио и генерируем заново
+                console.warn('[REPLY] ⚠️ Found audio but no text file, deleting incomplete files and regenerating');
+                try {
+                  fs.unlinkSync(pregenPath);
+                  console.log('[REPLY] 🗑️ Deleted incomplete audio file:', pregenPath);
+                } catch (e) {
+                  console.warn('[REPLY] Failed to delete incomplete audio:', e);
+                }
+                pregenPath = null;
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to check text file:', e);
+              pregenPath = null;
+            }
+          }
+          
+          // Если нашли текст, проверяем наличие аудио рядом с ним
+          if (foundPregenText && !pregenPath) {
+            try {
+              const searchTextForPath = choiceIndex !== undefined ? '' : (userText || '');
+              const textPath = getPregenTextPath(scenarioGameIdForPregen, searchTextForPath, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+              if (fs.existsSync(textPath)) {
+                const audioPath = textPath.replace(/\.txt$/, '.wav');
+                if (fs.existsSync(audioPath)) {
+                  pregenPath = audioPath;
+                } else {
+                  // Если аудио нет - удаляем текст и генерируем заново
+                  console.warn('[REPLY] ⚠️ Found text but no audio file, deleting incomplete files and regenerating');
+                  try {
+                    fs.unlinkSync(textPath);
+                    console.log('[REPLY] 🗑️ Deleted incomplete text file:', textPath);
+                  } catch (e) {
+                    console.warn('[REPLY] Failed to delete incomplete text:', e);
+                  }
+                  foundPregenText = null;
+                }
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to check audio file:', e);
+              foundPregenText = null;
+            }
+          }
+          
+          if (foundPregenText && pregenPath) {
+            try {
+              // Проверяем, что оба файла действительно существуют
+              if (!fs.existsSync(pregenPath) || !fs.existsSync(pregenPath.replace(/\.wav$/, '.txt'))) {
+                console.warn('[REPLY] ⚠️ Files do not exist, deleting and regenerating');
+                try {
+                  if (fs.existsSync(pregenPath)) fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch {}
+                foundPregenText = null;
+                pregenPath = null;
+              } else {
+              // Используем предгенерированный текст (если он был найден)
+              if (foundPregenText && foundPregenText !== text) {
+                text = foundPregenText;
+                console.log('[REPLY] ✅ Using pre-generated text from file');
+              }
+              
+              // Используем предгенерированное аудио
+              console.log('[REPLY] ✅ Found pre-generated audio from:', pregenPath);
+              const audioBuffer = fs.readFileSync(pregenPath);
+              const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+              if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+                console.warn(`[REPLY] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
+                // Удаляем невалидные файлы
+                try {
+                  fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch (e) {
+                  console.warn('[REPLY] Failed to delete invalid pre-generated files:', e);
+                }
+                foundPregenText = null;
+                pregenPath = null;
+              } else {
+                pregenAudioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+              console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+              }
+              }
+            } catch (e) {
+              console.warn('[REPLY] Failed to read pre-generated materials:', e);
+              foundPregenText = null;
+              pregenPath = null;
+            }
+          } else {
+            const searchTextForHash = choiceIndex !== undefined ? '' : (userText || '');
+            console.log(`[REPLY] ⚠️ Pre-generated materials not found or incomplete for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(searchTextForHash, locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
+          }
+        }
+        // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
+      }
+      
+      // КРИТИЧЕСКИ ВАЖНО: Используем найденное прегенерированное аудио, если оно было найдено
+      if (pregenAudioData) {
+        audioData = pregenAudioData;
+        console.log('[REPLY] ✅ Using pre-generated audio from file');
+      }
+      
+      // Если прегенерированного аудио нет - генерируем в реальном времени
+      // Если флаг usePregenMaterials включен - сохраняем сгенерированное навсегда
+      if (!audioData) {
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts`;
+        
+        console.log('[REPLY] Calling TTS endpoint for generation...');
+        console.log('[REPLY] TTS params: locationId=', locationId, 'characterId=', characterId, 'depth=', depth, 'choiceIndex=', choiceIndex);
+        const ttsStartTime = Date.now();
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text,
+            gameId: gameId || undefined,
+            locationId: locationId || undefined, // Явно указываем undefined, если locationId не определен
+            characterId: characterId || undefined,
+            format: 'wav',
+            isNarrator: true,
+            depth: depth !== undefined ? depth : undefined,
+            choiceIndex: choiceIndex !== undefined ? choiceIndex : undefined,
+            parentHash: parentHash || undefined
+          }),
+          signal: AbortSignal.timeout(150000) // 150 секунд таймаут (Gemini TTS может занимать до 120 секунд)
+        });
+        
+        if (ttsResponse.ok) {
+          const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+          const ttsDuration = Date.now() - ttsStartTime;
+          if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+            console.error(`[REPLY] ❌ Generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
+            audioData = null;
+          } else {
+            audioData = { buffer: audioBuffer, contentType };
+          console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
+          }
+          
+          // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов, но только если аудио валидное
+          // ВАЖНО: Сохраняем по userText (действие игрока), а не по text (ответ бота)
+          // Это нужно, чтобы потом можно было найти ответ бота по действию игрока
+          // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации сохраняем БЕЗ locationId в хеше!
+          // locationId используется только для папки, но НЕ в хеше (чтобы диалоги внутри локации находились)
+          if (audioData && scenarioGameIdForPregen) {
+            try {
+              // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для сохранения!
+              // AI уже подставил индекс выбора, поэтому сохраняем только по choiceIndex, depth, parentHash
+              const saveText = choiceIndex !== undefined ? '' : (userText || '');
+              
+              // Сохраняем аудио по choiceIndex (если определен) или по userText (если choiceIndex не определен)
+              // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, сохраняем в папку 'general', чтобы файлы находились независимо от locationId!
+              // Хеш создается БЕЗ locationId (undefined), чтобы диалоги внутри локации находились независимо от locationId
+              const hashWithoutLoc = createAudioHash(saveText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+              // Если choiceIndex определен - сохраняем в 'general', иначе в папку локации
+              const subDir = choiceIndex !== undefined ? 'general' : (locationId || 'general');
+              const audioPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.wav`);
+              const audioDir = path.dirname(audioPath);
+              try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+              fs.writeFileSync(audioPath, audioData.buffer);
+              
+              // Сохраняем текст ответа бота (не userText!)
+              const textPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.txt`);
+              try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+              fs.writeFileSync(textPath, text, 'utf-8'); // Сохраняем ответ бота в файл
+              
+              console.log(`[REPLY] 💾 Saved generated audio and text: saveText="${saveText.slice(0, 50) || '(empty)'}", hash=${hashWithoutLoc.slice(0, 8)}, subDir=${subDir}, depth=${depth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}, locationId=${locationId || 'none'}`);
+            } catch (e) {
+              console.warn('[REPLY] Failed to save generated audio:', e);
+            }
+          }
+        } else {
+          const errorText = await ttsResponse.text().catch(() => '');
+          console.warn('[REPLY] TTS generation failed:', ttsResponse.status, errorText.slice(0, 200));
+        }
+      }
+      
+      // Сохраняем аудио в переменную для возврата клиенту
+      audioData = audioData; // Уже установлено выше
+      console.log('[REPLY] ✅ TTS ready, proceeding to send response to client');
+    } catch (ttsErr: any) {
+      const isTimeout = ttsErr?.name === 'TimeoutError' || ttsErr?.message?.includes('timeout') || ttsErr?.message?.includes('aborted');
+      if (isTimeout) {
+        console.error('[REPLY] ❌ TTS generation TIMED OUT - NOT sending response to client');
+      } else {
+        console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      }
+      // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался (включая таймаут), НЕ отправляем ответ
+      // Пользователь должен получить ответ ТОЛЬКО после завершения TTS
+      audioData = null;
+    }
+
+    // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем ответ, если TTS не завершился успешно
+    // Ждем завершения TTS (успешного или с ошибкой) перед отправкой ответа
+    console.log('[REPLY] TTS completed, hasAudio:', !!audioData);
+
+    if (lobbyId) {
+      const sess = await prisma.chatSession.upsert({
+        where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } },
+        update: {},
+        create: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown', history: [] as any },
+      });
+      const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+      // Не сохраняем "технические ошибки" и сообщения об ошибке распознавания в историю
+      const shouldSaveBotMessage = !text || (!text.trim().startsWith('Техническая ошибка') && text.trim() !== 'Не распознали ваш ответ, выберите вариант корректно!');
+      const newHist = prev.concat([
+        (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)),
+        ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
+      ]);
+      await prisma.chatSession.update({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
+      advanceTurn(lobbyId);
+      wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+      
+      // Возвращаем текст с аудио - ВСЕГДА вместе
+      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
+      // КРИТИЧЕСКИ ВАЖНО: Если audioData === null (таймаут или ошибка), НЕ отправляем ответ!
+      if (!audioData) {
+        console.error('[REPLY] ❌ TTS failed or timed out - NOT sending response to client');
+        return res.status(504).json({ error: 'tts_timeout', message: 'TTS generation timed out or failed' });
+      }
+      
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
+      // Конвертируем аудио в base64 для отправки клиенту
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType || 'audio/wav',
+        format: 'base64'
+      };
+      console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+      return res.json(response);
+    } else {
+      const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+      if (uid) {
+        const sess = await prisma.chatSession.upsert({
+          where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } },
+          update: {},
+          create: { userId: uid, gameId: gameId || 'unknown', history: [] as any },
+        });
+        const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+        // Не сохраняем "технические ошибки" в историю
+        const shouldSaveBotMessage = !text || !text.trim().startsWith('Техническая ошибка');
+        const newHist = prev.concat([
+          { from: 'me', text: userText } as any,
+          ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
+        ]);
+        await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
+      }
+      
+      // Возвращаем текст с аудио - ВСЕГДА вместе
+      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
+      // КРИТИЧЕСКИ ВАЖНО: Если audioData === null (таймаут или ошибка), НЕ отправляем ответ!
+      if (!audioData) {
+        console.error('[REPLY] ❌ TTS failed or timed out - NOT sending response to client');
+        return res.status(504).json({ error: 'tts_timeout', message: 'TTS generation timed out or failed' });
+      }
+      
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
+      // Конвертируем аудио в base64 для отправки клиенту
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType || 'audio/wav',
+        format: 'base64'
+      };
+      console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+      return res.json(response);
+    }
+  } catch (e) {
+    console.error('Reply handler error:', e);
+    return res.status(200).json({ message: 'Связь с рассказчиком на мгновение прерывается. Но путь остаётся прежним.\n\n1) К реке.\n2) К волчьей тропе.\n3) В деревню.', fallback: true });
+  }
+});
+
+// Потоковый endpoint для генерации текста с параллельной генерацией TTS
+app.post('/api/chat/reply-stream', async (req, res) => {
+  const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
+  const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
+  
+  // Настраиваем SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  
+  const sendSSE = (event: string, data: any) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  
+  try {
+    const prisma = getPrisma();
+    
+    // Получаем игру и настраиваем промпты (упрощенная версия из основного endpoint)
+    const game = gameId ? await prisma.game.findUnique({ where: { id: gameId } }) : null;
+    const sys = game?.systemPrompt || getSysPrompt();
+    
+    // Генерируем текст через Gemini 2.5 Pro (используем generateChatCompletion, который уже использует gemini-2.5-pro)
+    sendSSE('status', { type: 'generating_text' });
+    const { text: generatedText } = await generateChatCompletion({
+      systemPrompt: sys,
+      userPrompt: userText,
+      history: history
+    });
+    const fullText = generatedText || '';
+    sendSSE('text_complete', { text: fullText });
+    
+    // Параллельно запускаем генерацию TTS
+    sendSSE('status', { type: 'generating_audio' });
+    
+    (async () => {
+      try {
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts`;
+        
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: fullText,
+            gameId: gameId || undefined,
+            format: 'wav',
+            isNarrator: true
+          }),
+          signal: AbortSignal.timeout(60000)
+        });
+        
+        if (ttsResponse.ok) {
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          const audioBase64 = audioBuffer.toString('base64');
+          sendSSE('audio_ready', { 
+            audio: audioBase64,
+            contentType: 'audio/wav',
+            format: 'base64'
+          });
+        } else {
+          sendSSE('audio_error', { error: 'TTS generation failed' });
+        }
+      } catch (ttsErr) {
+        sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
+      }
+    })();
+    
+    // Закрываем соединение после небольшой задержки
+    setTimeout(() => {
+      res.end();
+    }, 100);
+    
+  } catch (e) {
+    sendSSE('error', { error: String(e) });
+    res.end();
+  }
+});
+
+function advanceTurn(lobbyId: string) {
+  const t = lobbyTurns.get(lobbyId);
+  if (!t || !t.order.length) return;
+  t.idx = (t.idx + 1) % t.order.length;
+  lobbyTurns.set(lobbyId, t);
+  wsNotifyLobby(lobbyId, { type: 'turn_changed', lobbyId, userId: t.order[t.idx] });
+}
+
+app.get('/api/chat/history', async (req, res) => {
+  const gameId = typeof req.query.gameId === 'string' ? req.query.gameId : undefined;
+  const lobbyId = typeof req.query.lobbyId === 'string' ? req.query.lobbyId : undefined;
+  const userIdQ = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+  const tgId = typeof req.query.tgId === 'string' ? req.query.tgId : undefined;
+  const tgUsername = typeof req.query.tgUsername === 'string' ? req.query.tgUsername : undefined;
+  const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
+  if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+  try {
+    const prisma = getPrisma();
+    if (lobbyId) {
+      const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+      return res.json({ history: (sess?.history as any) || [] });
+    }
+    let uid = userIdQ || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    if (!uid && deviceId) uid = 'device:' + deviceId;
+    if (!uid) return res.json({ history: [] });
+    const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
+    return res.json({ history: (sess?.history as any) || [] });
+  } catch {
+    return res.json({ history: [] });
+  }
+});
+
+app.post('/api/chat/save', async (req, res) => {
+  const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+  const userIdB = typeof req.body?.userId === 'string' ? req.body.userId : undefined;
+  const tgId = typeof req.body?.tgId === 'string' ? req.body.tgId : undefined;
+  const tgUsername = typeof req.body?.tgUsername === 'string' ? req.body.tgUsername : undefined;
+  const deviceId = typeof req.body?.deviceId === 'string' ? req.body.deviceId : undefined;
+  if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+  try {
+    const prisma = getPrisma();
+    if (lobbyId) {
+      const saved = await prisma.chatSession.upsert({
+        where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+        update: { history: history as any },
+        create: { userId: 'lobby:' + lobbyId, gameId, history: history as any },
+      });
+      return res.json({ ok: true, updatedAt: saved.updatedAt });
+    }
+    let uid = userIdB || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    if (!uid && deviceId) uid = 'device:' + deviceId;
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const saved = await prisma.chatSession.upsert({
+      where: { userId_gameId: { userId: uid, gameId } },
+      update: { history: history as any },
+      create: { userId: uid, gameId, history: history as any },
+    });
+    return res.json({ ok: true, updatedAt: saved.updatedAt });
+  } catch (e) {
+    console.error('Chat save failed:', e);
+    return res.status(500).json({ error: 'failed_to_save' });
+  }
+});
+
+app.delete('/api/chat/history', async (req, res) => {
+  const gameId = typeof req.query.gameId === 'string' ? req.query.gameId : undefined;
+  const lobbyId = typeof req.query.lobbyId === 'string' ? req.query.lobbyId : undefined;
+  const userIdQ = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+  const tgId = typeof req.query.tgId === 'string' ? req.query.tgId : undefined;
+  const tgUsername = typeof req.query.tgUsername === 'string' ? req.query.tgUsername : undefined;
+  const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
+  if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+  try {
+    const prisma = getPrisma();
+    if (lobbyId) {
+      await prisma.chatSession.delete({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } }).catch(() => {});
+      return res.status(204).end();
+    }
+    let uid = userIdQ || '';
+    if (!uid && (tgId || tgUsername)) {
+      let u = tgId ? await prisma.user.findFirst({ where: { tgId } }) : null;
+      if (!u && tgUsername) u = await prisma.user.findFirst({ where: { tgUsername } });
+      if (!u && (tgId || tgUsername)) {
+        u = await prisma.user.create({ data: { firstName: 'User', lastName: '', tgId: tgId || undefined, tgUsername: tgUsername || undefined, status: 'active' } });
+      }
+      uid = u?.id || '';
+    }
+    if (!uid && deviceId) uid = 'device:' + deviceId;
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    await prisma.chatSession.delete({ where: { userId_gameId: { userId: uid, gameId } } }).catch(() => {});
+    // Также сбрасываем gameSession как просили (начнём с первой сцены)
+    await prisma.gameSession.deleteMany({ where: { scenarioGameId: gameId, userId: uid } }).catch(() => {});
+    return res.status(204).end();
+  } catch (e) {
+    console.error('Chat reset failed:', e);
+    return res.status(500).json({ error: 'failed_to_reset' });
+  }
+});
+
+app.post('/api/engine/session/start', async (req, res) => {
+  const gameId = String(req.body?.gameId || '');
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  try {
+    if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+    const prisma = getPrisma();
+    let uid: string | null = null;
+    if (!lobbyId) {
+      uid = await resolveUserIdFromQueryOrBody(req, prisma);
+      if (!uid) return res.status(400).json({ error: 'user_required' });
+    }
+    
+    // Проверка наличия игровых персонажей в игре
+    const playableChars = await prisma.character.findMany({ 
+      where: { gameId, isPlayable: true } 
+    });
+    if (playableChars.length === 0) {
+      return res.status(400).json({ error: 'no_playable_characters', message: 'В игре нет игровых персонажей. Игра невозможна без персонажей.' });
+    }
+    
+    const first = await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
+    if (!first) return res.status(404).json({ error: 'no_locations' });
+    let sess = await prisma.gameSession.findFirst({
+      where: { scenarioGameId: gameId, lobbyId: lobbyId || null, userId: uid || null },
+    });
+    if (!sess) {
+      sess = await prisma.gameSession.create({
+        data: { scenarioGameId: gameId, lobbyId: lobbyId || null, userId: uid || null, currentLocationId: first.id, state: {} as any },
+      });
+    } else {
+      // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем currentLocationId - он должен сохраняться между запросами
+      // currentLocationId меняется только при реальном переходе через locationExit (в /api/chat/reply)
+      // УБРАНО: Сброс currentLocationId на first.id - это ломало сохранение прогресса игрока
+    }
+    return res.json({ id: sess.id, currentLocationId: sess.currentLocationId });
+  } catch (e) {
+    return res.status(500).json({ error: 'engine_start_failed' });
+  }
+});
+app.get('/api/engine/session/:id', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const sess = await prisma.gameSession.findUnique({ where: { id: req.params.id } });
+    if (!sess) return res.status(404).json({ error: 'not_found' });
+    const loc = await prisma.location.findUnique({ where: { id: sess.currentLocationId } });
+    const exits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+    return res.json({ id: sess.id, gameId: sess.scenarioGameId, location: loc, exits });
+  } catch (e) {
+    return res.status(500).json({ error: 'engine_get_failed' });
+  }
+});
+app.post('/api/engine/session/:id/describe', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const sess = await prisma.gameSession.findUnique({ where: { id: req.params.id } });
+    if (!sess) return res.status(404).json({ error: 'not_found' });
+    const loc = await prisma.location.findUnique({ where: { id: sess.currentLocationId } });
+    const game = await prisma.game.findUnique({ where: { id: sess.scenarioGameId } });
+    const chars = await prisma.character.findMany({ where: { gameId: sess.scenarioGameId }, take: 6 });
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    const base = loc?.description || '';
+    const offlineText = ([
+      `Сцена: ${loc?.title || 'Локация'}`,
+      base,
+      game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+      game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+      (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
+      (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
+      (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
+    ].filter(Boolean).join('\n\n')).trim();
+    const sys = getSysPrompt();
+    const visual = [
+      loc?.backgroundUrl ? `Фон (изображение): ${loc.backgroundUrl}` : '',
+      loc?.musicUrl ? `Музыка (URL): ${loc.musicUrl}` : '',
+    ].filter(Boolean).join('\n');
+    const rules = [
+      game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
+      game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+      (game as any)?.introduction ? `Введение: ${(game as any).introduction}` : '',
+      (game as any)?.backstory ? `Предыстория: ${(game as any).backstory}` : '',
+      (game as any)?.adventureHooks ? `Зацепки приключения: ${(game as any).adventureHooks}` : '',
+      (game as any)?.author ? `Автор: ${(game as any).author}` : '',
+      game?.ageRating ? `Возрастной рейтинг: ${game.ageRating}` : '',
+      // Используем полные правила для ИИ
+      (game as any)?.worldRulesFull || (game as any)?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.worldRulesFull || (game as any)?.worldRules}` : '',
+      (game as any)?.gameplayRulesFull || (game as any)?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${(game as any)?.gameplayRulesFull || (game as any)?.gameplayRules}` : '',
+      (game as any)?.winCondition ? `Условие победы: ${(game as any).winCondition}` : '',
+      (game as any)?.loseCondition ? `Условие поражения: ${(game as any).loseCondition}` : '',
+      (game as any)?.deathCondition ? `Условие смерти: ${(game as any).deathCondition}` : '',
+    ].filter(Boolean).join('\n');
+    const npcs = chars && chars.length ? (
+      'Персонажи (D&D 5e):\n' + chars.map((c) => {
+        const traits = [c.role, c.class, c.race, c.gender].filter(Boolean).join(', ');
+        const stats = c.isPlayable ? ` (HP: ${c.hp}/${c.maxHp}, AC: ${c.ac}, STR:${c.str}, DEX:${c.dex}, CON:${c.con}, INT:${c.int}, WIS:${c.wis}, CHA:${c.cha})` : '';
+        const extras = [c.persona, c.origin].filter(Boolean).join('. ');
+        return `- ${c.name} (${traits})${stats}. ${extras}`;
+      }).join('\n')
+    ) : '';
+    const user = [
+      `Сцена: ${loc?.title}`,
+      visual,
+      base ? `Описание сцены: ${base}` : '',
+      rules,
+      npcs,
+    ].filter(Boolean).join('\n\n');
+    let text = '';
+    let usedAi = false;
+    try {
+      const { text: generatedText } = await generateChatCompletion({
+        systemPrompt: sys,
+        userPrompt: user,
+        history: []
+      });
+      text = generatedText;
+      if (text) {
+        text = text.trim();
+        // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
+        text = formatChoiceOptions(text);
+        
+        // Проверяем, есть ли варианты выбора в тексте
+        const choices = parseChoiceOptions(text);
+        if (choices.length === 0 && sess.currentLocationId) {
+          // Если вариантов нет, добавляем их из кнопок локации
+          const exits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+          if (exits.length > 0) {
+            const choiceLines = exits
+              .map((exit, idx) => {
+                const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+                return `${idx + 1}. ${choiceText}`;
+              })
+              .join('\n');
+            // Добавляем варианты после текста, если там есть "Что вы делаете?" или подобное
+            if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+              text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+              text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+            } else {
+              text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
+            }
+          }
+        }
+      }
+      usedAi = Boolean(text);
+    } catch (err) {
+      text = offlineText || (base || 'Здесь начинается ваше приключение.');
+    }
+    if (!text) text = offlineText || (base || 'Здесь начинается ваше приключение.');
+    try {
+      const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+      state.lastDescribeAt = new Date().toISOString();
+      state.lastLocationId = sess.currentLocationId;
+      await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+    } catch {}
+    // Возвращаем метаданные о голосе для TTS
+    const locationId = sess.currentLocationId;
+    return res.json({ 
+      text, 
+      fallback: !usedAi,
+      ttsContext: {
+        locationId,
+        isNarrator: true, // Описание локации - это рассказчик
+      }
+    });
+  } catch {
+    return res.status(500).json({ error: 'engine_describe_failed' });
+  }
+});
+app.post('/api/engine/session/:id/act', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const sess = await prisma.gameSession.findUnique({ where: { id: req.params.id } });
+    if (!sess) return res.status(404).json({ error: 'not_found' });
+    const locId = sess.currentLocationId;
+    const exits = await prisma.locationExit.findMany({ where: { locationId: locId } });
+    const loc = await prisma.location.findUnique({ where: { id: locId } });
+    const pickedId = typeof req.body?.exitId === 'string' ? req.body.exitId : undefined;
+    const userText = typeof req.body?.text === 'string' ? req.body.text : '';
+    let chosen: any = pickedId ? exits.find((e: any) => e.id === pickedId) : null;
+    const low = userText.toLowerCase().trim();
+    // Улучшенный матчинг: цифры → кнопки, текст кнопки/варианта, триггеры со сплитом
+    function matchTrigger(user: string, raw: string): boolean {
+      const u = user.toLowerCase();
+      const variants = String(raw || '')
+        .toLowerCase()
+        .split(/[,/;]| или /g)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return variants.some((v) => v && u.includes(v));
+    }
+    function matchButton(user: string, btnText: string): boolean {
+      const u = user.toLowerCase();
+      const b = String(btnText || '').toLowerCase();
+      if (!b) return false;
+      const first = u.split(' ').filter(Boolean)[0] || '';
+      return u.includes(b) || (first && b.includes(first));
+    }
+    if (!chosen && userText) {
+      const btns = exits.filter((e: any) => e.type === 'BUTTON');
+      const num = low.match(/^([1-9])$/);
+      if (num && btns.length) {
+        const idx = Math.min(btns.length, Math.max(1, parseInt(num[1], 10))) - 1;
+        chosen = btns[idx] || null;
+      }
+      if (!chosen && btns.length) {
+        chosen = btns.find((b: any) => matchButton(low, b.buttonText || '')) || null;
+      }
+      if (!chosen) {
+        chosen = exits.find((e: any) => matchTrigger(low, e.triggerText || '')) || null;
+      }
+    }
+    if (!chosen && userText) {
+      if (exits.length) {
+        try {
+          const prompt = [
+            'Ты помощник Директора игры. Тебе дано сообщение игрока и список возможных выходов из сцены.',
+            'Если доступны "Правила Локации" — учитывай их. Твоя задача: выбрать уместный выход (или вернуть none).',
+            'Возвращай строго JSON: {"exitId":"..."} или {"exitId":"none"}.',
+            `Сообщение игрока: "${userText}"`,
+            loc?.rulesPrompt ? `Правила Локации:\n${loc.rulesPrompt}` : '',
+            'Возможные выходы:',
+            ...exits.map((e: any, i: number) => {
+              const label = e.type === 'TRIGGER' ? (e.triggerText || '') : (e.buttonText || '');
+              return `- id=${e.id} [${e.type}] ${label}`;
+            }),
+          ].join('\n');
+          const { text } = await generateChatCompletion({
+            systemPrompt: 'Отвечай только валидным JSON.',
+            userPrompt: prompt,
+            history: []
+          });
+          const content = text || '{}';
+          let parsed: { exitId?: string } = {};
+          try {
+            // Пытаемся извлечь JSON из ответа
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              parsed = JSON.parse(jsonMatch[0]) as { exitId?: string };
+            }
+          } catch (e) {
+            console.error('[ACT] Failed to parse AI response:', e);
+          }
+          const picked = parsed.exitId && parsed.exitId !== 'none' ? exits.find((e: any) => e.id === parsed.exitId) : null;
+          if (picked) chosen = picked;
+        } catch {}
+      }
+    }
+    if (!chosen) return res.status(200).json({ ok: false, reason: 'no_match' });
+    if (chosen.isGameOver || chosen.type === 'GAMEOVER') {
+      try {
+        const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+        state.finishedAt = new Date().toISOString();
+        state.finishReason = 'game_over';
+        await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+      } catch {}
+      return res.json({ ok: true, gameOver: true });
+    }
+    const nextId = chosen.targetLocationId as string | null;
+    if (!nextId) return res.status(200).json({ ok: false, reason: 'no_target' });
+    await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: nextId } });
+    const nextLoc = await prisma.location.findUnique({ where: { id: nextId } });
+    const nextExits = await prisma.locationExit.findMany({ where: { locationId: nextId } });
+    try {
+      const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
+      state.lastAction = userText || '';
+      state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([locId, nextId]))) : [locId, nextId];
+      await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
+    } catch {}
+    return res.json({ ok: true, location: nextLoc, exits: nextExits });
+  } catch (e) {
+    return res.status(500).json({ error: 'engine_act_failed' });
+  }
+});
+
+// Сбросить игру (стереть состояние сессии/историю)
+app.post('/api/engine/reset', async (req, res) => {
+  const gameId = String(req.body?.gameId || '');
+  const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
+  try {
+    if (!gameId) return res.status(400).json({ error: 'gameId_required' });
+    const prisma = getPrisma();
+    if (lobbyId) {
+      await prisma.chatSession.delete({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } }).catch(() => {});
+      const s = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+      if (s) await prisma.gameSession.delete({ where: { id: s.id } }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    await prisma.chatSession.delete({ where: { userId_gameId: { userId: uid, gameId } } }).catch(() => {});
+    const s = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+    if (s) await prisma.gameSession.delete({ where: { id: s.id } }).catch(() => {});
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: 'engine_reset_failed' });
+  }
+});
+
+app.post('/api/chat/transcribe', upload.single('audio'), async (req, res) => {
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    if (!req.file || !req.file.buffer) return res.status(200).json({ text: '', error: 'no_audio' });
+    const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
+    if (yandexKey) {
+      try {
+        const ytext = await transcribeYandex(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/ogg', yandexKey);
+        if (ytext && ytext.trim()) return res.json({ text: ytext });
+      } catch (e) {
+        console.error('Yandex STT failed:', e);
+      }
+    }
+    if (!apiKey) return res.status(200).json({ text: '', error: 'no_api_key' });
+    const client = createOpenAIClient(apiKey);
+    const tryModels = [
+      'whisper-1',
+      process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
+      'gpt-4o-transcribe',
+    ];
+    const file = await toFile(req.file.buffer, req.file.originalname || 'audio', { type: req.file.mimetype || 'audio/webm' });
+    let lastErr: unknown = null;
+    for (const model of tryModels) {
+      try {
+        const r = await client.audio.transcriptions.create({ model, file, language: 'ru', response_format: 'json' as any });
+        const text = (r as any)?.text || '';
+        if (text && String(text).trim()) return res.json({ text });
+      } catch (e) {
+        lastErr = e;
+        console.error('Transcribe attempt failed:', model, e);
+      }
+    }
+    try {
+      const raw = await transcribeViaHttp(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', apiKey);
+      if (raw && raw.trim()) return res.json({ text: raw });
+    } catch {}
+    console.error('Transcribe failed (all models):', lastErr);
+    const detail = (lastErr && typeof lastErr === 'object' ? JSON.stringify(lastErr) : String(lastErr || ''));
+    return res.status(200).json({ text: '', error: 'transcribe_failed', detail });
+  } catch (e) {
+    console.error('Transcribe failed:', e);
+    return res.status(200).json({ text: '', error: 'transcribe_failed' });
+  }
+});
+
+async function transcribeViaHttp(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
+  const proxies = parseProxies();
+  const attempts = proxies.length ? proxies : ['__direct__'];
+  const endpoint = 'https://api.openai.com/v1/audio/transcriptions';
+  let lastErr: unknown = null;
+  for (const p of attempts) {
+    try {
+      const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+      const form = new FormData();
+      form.append('model', 'whisper-1');
+      const file = new File([buffer], filename || 'audio', { type: mime || 'audio/webm' });
+      form.append('file', file);
+      const res = await undiciFetch(endpoint, {
+        method: 'POST',
+        dispatcher,
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form as any,
+      });
+      const data = await res.json() as any;
+      const text = typeof data?.text === 'string' ? data.text : '';
+      if (res.ok && text && text.trim()) return text;
+      lastErr = data || await res.text().catch(() => 'bad_response');
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  console.error('HTTP fallback transcription failed:', lastErr);
+  return '';
+}
+
+async function transcribeYandex(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
+  const form = new FormData();
+  form.append('lang', 'ru-RU');
+  form.append('topic', 'general');
+  const file = new File([buffer], filename || 'audio', { type: mime || 'audio/ogg' });
+  form.append('file', file);
+  const resp = await undiciFetch('https://stt.api.cloud.yandex.net/speech/v1/stt:recognize', {
+    method: 'POST',
+    headers: { Authorization: `Api-Key ${apiKey}` },
+    body: form as any,
+  });
+  const ct = resp.headers.get('content-type') || '';
+  if (!resp.ok) throw new Error(await resp.text().catch(() => 'yandex_stt_failed'));
+  if (ct.includes('application/json')) {
+    const data = await resp.json() as any;
+    const text = (data && (data.result || data.text)) ? String(data.result || data.text) : '';
+    return text;
+  }
+  const raw = await resp.text();
+  const m = /result\s*=\s*(.*)/i.exec(raw);
+  return m ? m[1] : raw;
+}
+
+// Функция для создания хеша строки (для стабильного выбора голоса)
+function simpleHash(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash);
+}
+
+// Расширенный тип персонажа для анализа
+type CharacterForAnalysis = {
+  id: string;
+  name: string;
+  gender: string | null;
+  race?: string | null;
+  class?: string | null;
+  level?: number | null;
+  persona?: string | null;
+  origin?: string | null;
+  description?: string | null;
+  abilities?: string | null;
+  role?: string | null;
+  cha?: number | null; // Харизма для влияния на голос
+  int?: number | null; // Интеллект для влияния на речь
+  wis?: number | null; // Мудрость для влияния на интонацию
+};
+
+// Функция разбиения текста на сегменты (рассказчик и реплики)
+async function parseTextIntoSegments(params: {
+  text: string;
+  gameId?: string;
+  availableCharacters?: Array<CharacterForAnalysis>;
+}): Promise<Array<{
+  text: string;
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}>> {
+  const { text, gameId, availableCharacters = [] } = params;
+  
+  // Если текст очень короткий или нет явных признаков реплик, возвращаем как один сегмент рассказчика
+  const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»') || text.includes('„') || text.includes('"');
+  const hasNamePattern = /^([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)[:"]/.test(text);
+  
+  if (text.length < 100 || (!hasQuotes && !hasNamePattern)) {
+    // Если текст короткий или нет явных реплик, возвращаем как один сегмент рассказчика
+    const quickEmotion = detectEmotion(text);
+    return [{
+      text: text.trim(),
+      isNarrator: true,
+      emotion: quickEmotion.emotion,
+      intensity: quickEmotion.intensity
+    }];
+  }
+  
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY || 
+                   process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    if (!apiKey) {
+      // Fallback: простое разбиение по кавычкам
+      return parseTextIntoSegmentsSimple(text, availableCharacters);
+    }
+    
+    // Формируем детальный список доступных персонажей для контекста
+    const charactersList = availableCharacters.length > 0
+      ? availableCharacters.map(c => {
+          const parts: string[] = [];
+          parts.push(`Имя: ${c.name}`);
+          if (c.gender) parts.push(`Пол: ${c.gender}`);
+          if (c.race) parts.push(`Раса: ${c.race}`);
+          if (c.class) parts.push(`Класс: ${c.class}${c.level ? ` (${c.level} уровень)` : ''}`);
+          if (c.role) parts.push(`Роль: ${c.role}`);
+          if (c.persona) parts.push(`Характер: ${c.persona}`);
+          if (c.origin) parts.push(`Происхождение: ${c.origin}`);
+          if (c.description) parts.push(`Описание: ${c.description}`);
+          if (c.abilities) parts.push(`Способности: ${c.abilities}`);
+          if (c.cha !== null && c.cha !== undefined) parts.push(`Харизма: ${c.cha}`);
+          if (c.int !== null && c.int !== undefined) parts.push(`Интеллект: ${c.int}`);
+          if (c.wis !== null && c.wis !== undefined) parts.push(`Мудрость: ${c.wis}`);
+          return `- ${parts.join(', ')}`;
+        }).join('\n')
+      : 'Персонажи не указаны';
+    
+    const systemPrompt = `Ты анализируешь текст из настольной ролевой игры D&D 5e и разбиваешь его на сегменты с ПОЛНЫМ пониманием семантического смысла.
+
+КРИТИЧЕСКИ ВАЖНО - Ты должен понимать СЕМАНТИКУ текста:
+- Понимай контекст каждого предложения и абзаца
+- Определяй главную мысль и подтекст
+- Распознавай эмоциональную окраску каждого фрагмента
+- Понимай логические связи между частями текста
+- Определяй, где заканчивается одна мысль и начинается другая
+- Распознавай персонажей по ИМЕНАМ, описаниям, характеристикам и манере речи
+
+Текст может содержать:
+1. Текст рассказчика (мастера) - описания действий, окружения, событий
+2. Реплики персонажей - прямая речь в кавычках или после указания имени
+
+ВАЖНО: Учитывай характеристики персонажей из D&D 5e:
+- Класс персонажа влияет на манеру речи (маг говорит интеллигентно, воин - прямо, друид - мудро, плут - хитро)
+- Раса влияет на акцент и особенности речи
+- Харизма (CHA) влияет на убедительность и красноречие
+- Интеллект (INT) влияет на сложность речи и словарный запас
+- Мудрость (WIS) влияет на интонацию и размеренность речи
+- Persona (характер) описывает манеру общения персонажа
+- Способности и магия могут влиять на голос (например, заклинания могут изменять голос)
+
+Твоя задача:
+1. Разбить текст на сегменты (части) с пониманием СЕМАНТИЧЕСКОЙ структуры
+2. Для каждого сегмента определить:
+   - Является ли он текстом рассказчика или репликой персонажа
+   - Если это реплика - какой персонаж говорит:
+     * КРИТИЧЕСКИ ВАЖНО: Используй ИМЕНА ПЕРСОНАЖЕЙ из текста (например, "БАЛДУР", "Балдур", "балдур" - все варианты)
+     * Если в тексте упоминается имя персонажа (в любом регистре), это ОБЯЗАТЕЛЬНО его реплика
+     * Используй характеристики для точного определения (класс, раса, персона)
+     * Учитывай описание персонажа и его способности
+   - Эмоцию в сегменте (учитывай класс и характер персонажа, а также СЕМАНТИЧЕСКИЙ СМЫСЛ текста)
+   - Пол говорящего персонажа (если это реплика) - используй информацию о персонаже из списка
+   - Учитывай класс, расу, persona и способности персонажа при определении
+   - Понимай СЕМАНТИЧЕСКИЙ КОНТЕКСТ - разбивай по смысловым блокам, а не механически
+
+Доступные персонажи:
+${charactersList}
+
+Верни ТОЛЬКО JSON в следующем формате (без дополнительного текста, только JSON):
+{
+  "segments": [
+    {
+      "text": "текст сегмента",
+      "isNarrator": true/false,
+      "characterName": "имя персонажа или null",
+      "gender": "мужской/женский/null",
+      "emotion": "neutral/joy/sadness/fear/anger/surprise",
+      "intensity": 0.0-1.0
+    }
+  ]
+}
+
+Правила разбиения:
+- Разбивай текст ТОЛЬКО когда есть реплики персонажей - выделяй реплики отдельными сегментами
+- Если весь текст - это рассказчик (нет реплик), верни ОДИН сегмент с isNarrator: true
+- НЕ разбивай текст рассказчика на мелкие части - объединяй весь текст рассказчика в один сегмент
+- Разбивай только когда есть явные реплики персонажей (в кавычках или после имени)
+- КРИТИЧЕСКИ ВАЖНО: Распознавай персонажей по имени точно - если в тексте упоминается имя персонажа (например, "БАЛДУР говорит:", "Балдур:", "балдур сказал"), это ОБЯЗАТЕЛЬНО реплика этого персонажа
+- Имена персонажей могут быть в любом регистре - учитывай это при сопоставлении
+- Сохраняй порядок сегментов как в оригинальном тексте
+- Не теряй текст - каждый символ должен быть в каком-то сегменте
+- Учитывай характеристики персонажей при определении, кто говорит
+- Минимизируй количество сегментов - объединяй текст рассказчика`;
+
+    const userPrompt = `Разбей следующий текст на сегменты и проанализируй каждый:
+
+"${text}"
+
+Верни JSON с сегментами.`;
+
+    const { text: aiResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt,
+      history: []
+    });
+    
+    if (aiResponse) {
+      // Пытаемся извлечь JSON из ответа
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          if (parsed.segments && Array.isArray(parsed.segments)) {
+            // Обрабатываем сегменты и находим characterId для каждого
+            const segments = parsed.segments.map((seg: any) => {
+              let foundCharacterId: string | undefined;
+              if (seg.characterName && availableCharacters.length > 0) {
+                // Улучшенное распознавание персонажей по имени (например, БАЛДУР)
+                const searchName = seg.characterName.toLowerCase().trim();
+                const found = availableCharacters.find(c => {
+                  const charName = c.name.toLowerCase().trim();
+                  // Точное совпадение или частичное (БАЛДУР найдет "Балдур", "БАЛДУР" и т.д.)
+                  return charName === searchName || 
+                         charName.includes(searchName) || 
+                         searchName.includes(charName) ||
+                         // Также проверяем без учета регистра и пробелов
+                         charName.replace(/\s+/g, '') === searchName.replace(/\s+/g, '');
+                });
+                if (found) {
+                  foundCharacterId = found.id;
+                  seg.gender = found.gender || seg.gender;
+                }
+              }
+              
+              return {
+                text: seg.text || '',
+                isNarrator: seg.isNarrator !== false,
+                characterId: foundCharacterId,
+                characterName: seg.characterName || undefined,
+                gender: seg.gender || null,
+                emotion: seg.emotion || 'neutral',
+                intensity: Math.max(0, Math.min(1, seg.intensity || 0))
+              };
+            }).filter((seg: any) => seg.text.trim().length > 0);
+            
+            // Проверяем, что все сегменты покрывают весь текст (приблизительно)
+            const totalSegmentsLength = segments.reduce((sum: number, seg: any) => sum + seg.text.length, 0);
+            if (totalSegmentsLength >= text.length * 0.8) { // Допускаем небольшую потерю
+              return segments;
+            }
+          }
+        } catch (e) {
+          console.error('[TTS-SEGMENTS] Failed to parse AI response:', e);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[TTS-SEGMENTS] AI parsing failed:', e);
+  }
+  
+  // Fallback на простое разбиение
+  return parseTextIntoSegmentsSimple(text, availableCharacters);
+}
+
+// Простое разбиение текста на сегменты (fallback)
+function parseTextIntoSegmentsSimple(
+  text: string, 
+  availableCharacters: Array<CharacterForAnalysis>
+): Array<{
+  text: string;
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}> {
+  const segments: Array<{
+    text: string;
+    isNarrator: boolean;
+    characterId?: string;
+    characterName?: string;
+    gender?: string | null;
+    emotion: string;
+    intensity: number;
+  }> = [];
+  
+  // Разбиваем по кавычкам и паттернам "Имя: текст"
+  const quotePattern = /(["«»„"])([^"«»„"]+)\1/g;
+  const namePattern = /([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)\s*(?:говорит|сказал|сказала|произнес|произнесла|воскликнул|воскликнула|шепчет|кричит):\s*([^.!?]+[.!?])/gi;
+  
+  let lastIndex = 0;
+  const matches: Array<{ start: number; end: number; text: string; isQuote: boolean; characterName?: string }> = [];
+  
+  // Находим все реплики в кавычках
+  let match;
+  while ((match = quotePattern.exec(text)) !== null) {
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: match[2],
+      isQuote: true
+    });
+  }
+  
+  // Находим все реплики с именами
+  while ((match = namePattern.exec(text)) !== null) {
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      text: match[2],
+      isQuote: false,
+      characterName: match[1]
+    });
+  }
+  
+  // Сортируем по позиции
+  matches.sort((a, b) => a.start - b.start);
+  
+  // Создаем сегменты
+  for (const m of matches) {
+    // Текст перед репликой (рассказчик)
+    if (m.start > lastIndex) {
+      const narratorText = text.slice(lastIndex, m.start).trim();
+      if (narratorText) {
+        const emotion = detectEmotion(narratorText);
+        segments.push({
+          text: narratorText,
+          isNarrator: true,
+          emotion: emotion.emotion,
+          intensity: emotion.intensity
+        });
+      }
+    }
+    
+    // Реплика персонажа
+    const emotion = detectEmotion(m.text);
+    let characterId: string | undefined;
+    let gender: string | null = null;
+    
+    if (m.characterName) {
+      const found = availableCharacters.find(c => 
+        c.name.toLowerCase().includes(m.characterName!.toLowerCase()) ||
+        m.characterName!.toLowerCase().includes(c.name.toLowerCase())
+      );
+      if (found) {
+        characterId = found.id;
+        gender = found.gender;
+      }
+    }
+    
+    segments.push({
+      text: m.text.trim(),
+      isNarrator: false,
+      characterId,
+      characterName: m.characterName,
+      gender,
+      emotion: emotion.emotion,
+      intensity: emotion.intensity
+    });
+    
+    lastIndex = m.end;
+  }
+  
+  // Текст после последней реплики (рассказчик)
+  if (lastIndex < text.length) {
+    const narratorText = text.slice(lastIndex).trim();
+    if (narratorText) {
+      const emotion = detectEmotion(narratorText);
+      segments.push({
+        text: narratorText,
+        isNarrator: true,
+        emotion: emotion.emotion,
+        intensity: emotion.intensity
+      });
+    }
+  }
+  
+  // Если не нашли реплик, возвращаем весь текст как один сегмент рассказчика
+  if (segments.length === 0) {
+    const emotion = detectEmotion(text);
+    segments.push({
+      text: text.trim(),
+      isNarrator: true,
+      emotion: emotion.emotion,
+      intensity: emotion.intensity
+    });
+  }
+  
+  return segments;
+}
+
+// Функция динамического анализа текста через LLM для определения контекста речи
+async function analyzeSpeechContext(params: {
+  text: string;
+  gameId?: string;
+  availableCharacters?: Array<{ id: string; name: string; gender: string | null }>;
+}): Promise<{
+  isNarrator: boolean;
+  characterId?: string;
+  characterName?: string;
+  gender?: string | null;
+  emotion: string;
+  intensity: number;
+}> {
+  const { text, gameId, availableCharacters = [] } = params;
+  
+  // Если текст очень короткий, используем быстрое определение без LLM
+  if (text.length < 20) {
+    const quickEmotion = detectEmotion(text);
+    return {
+      isNarrator: true,
+      emotion: quickEmotion.emotion,
+      intensity: quickEmotion.intensity
+    };
+  }
+  
+  try {
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY || 
+                   process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    if (!apiKey) {
+      // Fallback на паттерн-бейзированное определение
+      const quickEmotion = detectEmotion(text);
+      return {
+        isNarrator: !text.includes('"') && !text.includes('«') && !text.includes('»'),
+        emotion: quickEmotion.emotion,
+        intensity: quickEmotion.intensity
+      };
+    }
+    
+    // Формируем список доступных персонажей для контекста
+    const charactersList = availableCharacters.length > 0
+      ? availableCharacters.map(c => `- ${c.name}${c.gender ? ` (${c.gender})` : ''}`).join('\n')
+      : 'Персонажи не указаны';
+    
+    const systemPrompt = `Ты анализируешь текст из настольной ролевой игры D&D 5e для определения контекста речи с ПОЛНЫМ пониманием СЕМАНТИЧЕСКОГО СМЫСЛА.
+
+КРИТИЧЕСКИ ВАЖНО - Ты должен понимать СЕМАНТИКУ:
+- Понимай контекст и подтекст текста
+- Определяй главную мысль и эмоциональную окраску
+- Распознавай иронию, сарказм, метафоры
+- Понимай логические связи и структуру текста
+- Распознавай персонажей по ИМЕНАМ, описаниям, характеристикам и манере речи
+
+Твоя задача:
+1. Определить, является ли текст репликой персонажа или текстом рассказчика (мастера) - на основе СЕМАНТИКИ, а не только формальных признаков
+2. Если это реплика персонажа - определить, какой персонаж говорит:
+   - ИСПОЛЬЗУЙ ИМЕНА ПЕРСОНАЖЕЙ из текста (например, "БАЛДУР", "Балдур", "балдур" - все варианты)
+   - Используй СЕМАНТИЧЕСКИЙ анализ - кто по смыслу может так говорить
+   - Учитывай описание персонажа, его класс, расу, персону при определении
+   - Если в тексте упоминается имя персонажа (в любом регистре), это ОБЯЗАТЕЛЬНО его реплика
+3. Определить эмоцию в тексте с учетом СЕМАНТИЧЕСКОГО СМЫСЛА (не только поверхностных признаков)
+4. Определить пол говорящего персонажа (если это реплика) - используй информацию о персонаже из списка
+
+Доступные персонажи:
+${charactersList}
+
+Верни ТОЛЬКО JSON в следующем формате (без дополнительного текста, только JSON):
+{
+  "isNarrator": true/false,
+  "characterName": "имя персонажа или null",
+  "gender": "мужской/женский/null",
+  "emotion": "neutral/joy/sadness/fear/anger/surprise",
+  "intensity": 0.0-1.0
+}
+
+Правила определения:
+- Реплики персонажей обычно в кавычках или начинаются с имени персонажа, НО анализируй СЕМАНТИКУ
+- Текст рассказчика описывает действия, окружение, события - понимай это по СМЫСЛУ
+- КРИТИЧЕСКИ ВАЖНО: Если в тексте упоминается имя персонажа (например, "БАЛДУР говорит:", "Балдур:", "балдур сказал"), это ОБЯЗАТЕЛЬНО реплика этого персонажа
+- Имена персонажей могут быть в любом регистре - учитывай это при сопоставлении
+- Если персонаж не найден в списке, но текст явно реплика по СЕМАНТИКЕ - используй characterName из текста
+- Эмоция должна отражать ГЛУБОКИЙ ТОН и НАСТРОЕНИЕ текста, учитывая СЕМАНТИЧЕСКИЙ СМЫСЛ
+- Анализируй не только слова, но и ПОДТЕКСТ и КОНТЕКСТ
+- Учитывай характеристики персонажа (класс, раса, персона) при определении, кто говорит`;
+
+    const userPrompt = `Проанализируй следующий текст:
+
+"${text}"
+
+Определи контекст речи и верни JSON.`;
+
+    const { text: aiResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt,
+      history: []
+    });
+    
+    if (aiResponse) {
+      // Пытаемся извлечь JSON из ответа
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          // Находим characterId по имени, если персонаж найден
+          let foundCharacterId: string | undefined;
+          if (parsed.characterName && availableCharacters.length > 0) {
+            const found = availableCharacters.find(c => 
+              c.name.toLowerCase().includes(parsed.characterName.toLowerCase()) ||
+              parsed.characterName.toLowerCase().includes(c.name.toLowerCase())
+            );
+            if (found) {
+              foundCharacterId = found.id;
+              parsed.gender = found.gender || parsed.gender;
+            }
+          }
+          
+          return {
+            isNarrator: parsed.isNarrator !== false, // По умолчанию рассказчик
+            characterId: foundCharacterId,
+            characterName: parsed.characterName || undefined,
+            gender: parsed.gender || null,
+            emotion: parsed.emotion || 'neutral',
+            intensity: Math.max(0, Math.min(1, parsed.intensity || 0))
+          };
+        } catch (e) {
+          console.error('[TTS-ANALYSIS] Failed to parse AI response:', e);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[TTS-ANALYSIS] AI analysis failed:', e);
+  }
+  
+  // Fallback на паттерн-бейзированное определение
+  const quickEmotion = detectEmotion(text);
+  const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
+  const hasNamePattern = /^([А-ЯЁA-Z][а-яёa-z]+(?:\s+[А-ЯЁA-Z][а-яёa-z]+)?)[:"]/.test(text);
+  
+  return {
+    isNarrator: !hasQuotes && !hasNamePattern,
+    emotion: quickEmotion.emotion,
+    intensity: quickEmotion.intensity
+  };
+}
+
+// Функция парсинга эмоций из текста (fallback)
+// Функция глубокого семантического анализа текста
+async function analyzeTextSemantics(text: string): Promise<{
+  mainTheme: string;
+  emotionalTone: string;
+  keyWords: string[];
+  sentenceTypes: Array<'question' | 'exclamation' | 'statement' | 'command'>;
+  semanticStructure: Array<{ text: string; importance: 'high' | 'medium' | 'low'; emotion: string }>;
+} | null> {
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (!geminiKey) {
+      return null;
+    }
+    
+    const systemPrompt = `Ты эксперт по лингвистике и семантическому анализу текста. Твоя задача - провести глубокий семантический анализ текста.
+
+Проанализируй:
+1. Главную тему и подтекст текста
+2. Эмоциональную окраску (радость, печаль, страх, гнев, удивление, нейтральность)
+3. Ключевые слова и фразы, несущие основной смысл
+4. Типы предложений (вопрос, восклицание, утверждение, команда)
+5. Семантическую структуру - разбей текст на смысловые блоки с указанием важности и эмоции каждого
+
+Верни ТОЛЬКО JSON в следующем формате:
+{
+  "mainTheme": "главная тема текста",
+  "emotionalTone": "основная эмоциональная окраска",
+  "keyWords": ["ключевое слово 1", "ключевое слово 2"],
+  "sentenceTypes": ["question", "exclamation", "statement"],
+  "semanticStructure": [
+    {
+      "text": "фрагмент текста",
+      "importance": "high/medium/low",
+      "emotion": "эмоция фрагмента"
+    }
+  ]
+}`;
+
+    const userPrompt = `Проведи глубокий семантический анализ следующего текста:
+
+"${text}"
+
+Верни JSON с анализом.`;
+
+    const { text: analysisResponse } = await generateChatCompletion({
+      systemPrompt,
+      userPrompt,
+      history: []
+    });
+    
+    if (analysisResponse) {
+      const jsonMatch = analysisResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          return JSON.parse(jsonMatch[0]);
+        } catch (e) {
+          console.error('[TTS-SEMANTICS] Failed to parse semantic analysis:', e);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[TTS-SEMANTICS] Semantic analysis failed:', e);
+  }
+  
+  return null;
+}
+
+// Функция генерации SSML с интонациями через Gemini
+async function generateSSMLWithIntonation(params: {
+  text: string;
+  isNarrator: boolean;
+  characterName?: string;
+  characterClass?: string | null;
+  characterRace?: string | null;
+  characterPersona?: string | null;
+  characterCha?: number | null;
+  characterInt?: number | null;
+  characterWis?: number | null;
+  emotion?: string;
+  intensity?: number;
+  basePitch?: number;
+  baseRate?: number;
+}): Promise<string | null> {
+  const { 
+    text, 
+    isNarrator, 
+    characterName,
+    characterClass,
+    characterRace,
+    characterPersona,
+    characterCha,
+    characterInt,
+    characterWis,
+    emotion = 'neutral',
+    intensity = 0.5,
+    basePitch = 0,
+    baseRate = 1.0
+  } = params;
+  
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (!geminiKey) {
+      console.warn('[TTS-SSML] Gemini API key not found, falling back to standard SSML');
+      return null; // Fallback на обычный SSML
+    }
+    
+    // Генерация SSML через Gemini (логи убраны для уменьшения шума)
+    
+    const characterInfo: string[] = [];
+    if (characterName) characterInfo.push(`Имя: ${characterName}`);
+    if (characterClass) characterInfo.push(`Класс: ${characterClass}`);
+    if (characterRace) characterInfo.push(`Раса: ${characterRace}`);
+    if (characterPersona) characterInfo.push(`Характер: ${characterPersona}`);
+    if (characterCha !== null) characterInfo.push(`Харизма: ${characterCha}`);
+    if (characterInt !== null) characterInfo.push(`Интеллект: ${characterInt}`);
+    if (characterWis !== null) characterInfo.push(`Мудрость: ${characterWis}`);
+    
+    // Упрощенный промпт для быстрой генерации SSML
+    const systemPrompt = `Создай SSML разметку для синтеза речи.
+
+${isNarrator ? 'Текст рассказчика - мягкий, с интонацией.' : `Реплика персонажа${characterName ? ` ${characterName}` : ''}.`}
+${characterInfo.length > 0 ? `Характеристики: ${characterInfo.join(', ')}` : ''}
+Эмоция: ${emotion}, интенсивность: ${intensity}
+
+Правила:
+- Паузы <break time="100ms"/> после запятых, точек
+- Акценты <emphasis level="moderate"> на ключевых словах
+- Интонации <prosody pitch="+2st"> для вопросов/восклицаний
+- Естественный ритм
+
+Верни ТОЛЬКО SSML:
+<speak><prosody rate="${baseRate}" pitch="${basePitch >= 0 ? '+' : ''}${basePitch}st">текст</prosody></speak>`;
+
+    const userPrompt = `Создай SSML для: "${text}"
+
+БЫСТРО: паузы, акценты, интонации. ТОЛЬКО SSML.`;
+
+    const startTime = Date.now();
+    
+    try {
+      // Динамический таймаут в зависимости от длины текста (минимум 20 секунд, максимум 60 секунд)
+      const timeoutMs = Math.min(60000, Math.max(20000, text.length * 50));
+      
+      const ssmlPromise = generateChatCompletion({
+        systemPrompt,
+        userPrompt,
+        history: []
+      });
+      
+      const timeoutPromise = new Promise<{ text: string }>((_, reject) => {
+        setTimeout(() => reject(new Error('SSML generation timeout')), timeoutMs);
+      });
+      
+      const { text: ssmlResponse } = await Promise.race([ssmlPromise, timeoutPromise]);
+    
+      if (ssmlResponse) {
+        // Извлекаем SSML из ответа
+        const ssmlMatch = ssmlResponse.match(/<speak>[\s\S]*<\/speak>/i);
+        if (ssmlMatch) {
+          return ssmlMatch[0];
+        }
+        // Если SSML не найден, но есть теги speak, используем весь ответ
+        if (ssmlResponse.includes('<speak>')) {
+          return ssmlResponse;
+        }
+      }
+    } catch (e) {
+      // Продолжаем с fallback
+    }
+  } catch (e) {
+    // Продолжаем с fallback
+  }
+  return null; // Fallback на обычный SSML
+}
+
+function detectEmotion(text: string): { emotion: string; intensity: number } {
+  const lowerText = text.toLowerCase();
+  
+  // Радость
+  const joyPatterns = [
+    /\b(рад|радост|счастлив|весел|улыб|смех|лику|торжеств|праздн|восторг|восхищ|отличн|прекрасн|замечательн)\b/gi,
+    /[!]{2,}/g, // Множественные восклицательные знаки
+    /\b(да!|ура!|отлично!|прекрасно!)\b/gi
+  ];
+  const joyMatches = joyPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Грусть
+  const sadnessPatterns = [
+    /\b(груст|печал|тоск|скорб|плач|слез|уныл|отчаян|безнадежн|разочарован)\b/gi,
+    /\.{3,}/g, // Многоточие
+    /\b(увы|жаль|к сожалению)\b/gi
+  ];
+  const sadnessMatches = sadnessPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Страх
+  const fearPatterns = [
+    /\b(страх|боюсь|боязн|ужас|испуг|паник|тревог|опасн|жутк|жутко)\b/gi,
+    /\b(что если|вдруг|не дай бог)\b/gi
+  ];
+  const fearMatches = fearPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Злость
+  const angerPatterns = [
+    /\b(зло|зли|ярост|гнев|ненавист|проклят|черт|дьявол|бесит|разозл|раздражен)\b/gi,
+    /\b(как же|как можно|не могу|достало)\b/gi
+  ];
+  const angerMatches = angerPatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Удивление
+  const surprisePatterns = [
+    /\b(удивл|невероятн|неожиданн|внезапн|ошеломл|поразительн|не может быть|неужели)\b/gi,
+    /\?{2,}/g // Множественные вопросительные знаки
+  ];
+  const surpriseMatches = surprisePatterns.reduce((sum, pattern) => sum + (lowerText.match(pattern)?.length || 0), 0);
+  
+  // Определяем доминирующую эмоцию
+  const emotions = [
+    { name: 'joy', score: joyMatches },
+    { name: 'sadness', score: sadnessMatches },
+    { name: 'fear', score: fearMatches },
+    { name: 'anger', score: angerMatches },
+    { name: 'surprise', score: surpriseMatches }
+  ];
+  
+  emotions.sort((a, b) => b.score - a.score);
+  const dominant = emotions[0];
+  
+  // Интенсивность на основе количества совпадений
+  const intensity = Math.min(1.0, dominant.score / 3.0);
+  
+  return {
+    emotion: dominant.score > 0 ? dominant.name : 'neutral',
+    intensity: dominant.score > 0 ? intensity : 0
+  };
+}
+
+// Функция выбора параметров голоса (pitch, rate) для Gemini TTS на основе персонажа/локации с поддержкой многоголосости
+function selectVoiceForContext(params: {
+  characterId?: string;
+  characterName?: string;
+  locationId?: string;
+  gender?: string | null;
+  characterGender?: string | null;
+  isNarrator?: boolean;
+  locationType?: string | null;
+  characterClass?: string | null;
+  characterRace?: string | null;
+  characterPersona?: string | null;
+  characterCha?: number | null;
+  characterInt?: number | null;
+  characterWis?: number | null;
+  characterLevel?: number | null;
+}): { voice: string; pitch: number; rate: number } {
+  const { 
+    characterId, 
+    characterName, 
+    locationId, 
+    gender, 
+    characterGender, 
+    isNarrator, 
+    locationType,
+    characterClass,
+    characterRace,
+    characterPersona,
+    characterCha,
+    characterInt,
+    characterWis,
+    characterLevel
+  } = params;
+  
+  // Определяем пол для выбора голоса
+  const finalGender = characterGender || gender || null;
+  const isFemale = finalGender && (finalGender.toLowerCase().includes('жен') || finalGender.toLowerCase().includes('female') || finalGender.toLowerCase().includes('f'));
+  const isMale = finalGender && (finalGender.toLowerCase().includes('муж') || finalGender.toLowerCase().includes('male') || finalGender.toLowerCase().includes('m'));
+  
+  // Параметры голоса для Gemini TTS (voice используется только для совместимости, реально используется pitch и rate)
+  // Эти значения используются для настройки параметров Gemini TTS
+  
+  let voice = 'default'; // По умолчанию - используется для совместимости
+  let pitch = 0.0; // Нейтральная интонация
+  let rate = 1.0; // Нормальный темп
+  
+  // Выбор голоса на основе персонажа с уникальностью для каждого персонажа
+  if (characterId && !isNarrator) {
+    // Создаем уникальный голос для каждого персонажа на основе его ID
+    const charHash = simpleHash(characterId);
+    const voiceIndex = charHash % 5; // 5 доступных голосов
+    
+    // Базовые настройки на основе пола
+    if (isFemale) {
+      voice = 'female'; // Для совместимости (не используется в Gemini TTS)
+      pitch = 1.5 + (charHash % 3) * 0.5; // От 1.5 до 3.0
+      rate = 0.95 + (charHash % 5) * 0.05; // От 0.95 до 1.15
+    } else if (isMale) {
+      voice = 'male'; // Для совместимости (не используется в Gemini TTS)
+      pitch = -2.0 + (charHash % 3) * 0.5; // От -2.0 до -0.5
+      rate = 0.9 + (charHash % 5) * 0.05; // От 0.9 до 1.1
+    } else {
+      voice = 'neutral'; // Для совместимости (не используется в Gemini TTS)
+      pitch = -0.5 + (charHash % 3) * 0.5; // От -0.5 до 1.0
+      rate = 0.95 + (charHash % 5) * 0.05; // От 0.95 до 1.15
+    }
+    
+    // Корректировки на основе класса персонажа
+    if (characterClass) {
+      const classLower = characterClass.toLowerCase();
+      if (classLower.includes('маг') || classLower.includes('wizard') || classLower.includes('чародей') || classLower.includes('sorcerer')) {
+        // Маги говорят более интеллигентно, размеренно
+        rate = Math.max(0.85, rate - 0.1);
+        pitch += 0.5; // Немного выше для интеллектуальности
+      } else if (classLower.includes('воин') || classLower.includes('fighter') || classLower.includes('варвар') || classLower.includes('barbarian')) {
+        // Воины говорят прямо, уверенно
+        rate = Math.min(1.15, rate + 0.1);
+        pitch -= 0.3; // Немного ниже для уверенности
+      } else if (classLower.includes('друид') || classLower.includes('druid') || classLower.includes('жрец') || classLower.includes('cleric')) {
+        // Друиды и жрецы говорят мудро, размеренно
+        rate = Math.max(0.88, rate - 0.08);
+        pitch += 0.2; // Немного выше для мудрости
+      } else if (classLower.includes('плут') || classLower.includes('rogue') || classLower.includes('бард') || classLower.includes('bard')) {
+        // Плуты и барды говорят быстро, хитро
+        rate = Math.min(1.2, rate + 0.15);
+        pitch += 0.3; // Выше для хитрости
+      } else if (classLower.includes('паладин') || classLower.includes('paladin')) {
+        // Паладины говорят уверенно, благородно
+        rate = Math.max(0.9, rate - 0.05);
+        pitch -= 0.2; // Немного ниже для благородства
+      }
+    }
+    
+    // Корректировки на основе расы
+    if (characterRace) {
+      const raceLower = characterRace.toLowerCase();
+      if (raceLower.includes('эльф') || raceLower.includes('elf')) {
+        // Эльфы говорят изысканно, мелодично
+        pitch += 0.4;
+        rate = Math.max(0.9, rate - 0.05);
+      } else if (raceLower.includes('дварф') || raceLower.includes('dwarf')) {
+        // Дварфы говорят грубовато, низко
+        pitch -= 0.5;
+        rate = Math.min(1.1, rate + 0.05);
+      } else if (raceLower.includes('гном') || raceLower.includes('gnome')) {
+        // Гномы говорят быстро, высоко
+        pitch += 0.6;
+        rate = Math.min(1.15, rate + 0.1);
+      } else if (raceLower.includes('орк') || raceLower.includes('orc') || raceLower.includes('полуорк')) {
+        // Орки говорят грубо, низко
+        pitch -= 0.7;
+        rate = Math.min(1.1, rate + 0.08);
+      }
+    }
+    
+    // Корректировки на основе характеристик
+    if (characterCha !== null && characterCha !== undefined) {
+      // Высокая харизма = более убедительная, красноречивая речь
+      const chaMod = (characterCha - 10) / 2; // Модификатор харизмы
+      rate += chaMod * 0.02; // Более высокая харизма = более быстрая, уверенная речь
+      pitch += chaMod * 0.1; // Более высокая харизма = более выразительная интонация
+    }
+    
+    if (characterInt !== null && characterInt !== undefined) {
+      // Высокий интеллект = более размеренная, продуманная речь
+      const intMod = (characterInt - 10) / 2;
+      rate = Math.max(0.85, rate - intMod * 0.015); // Более высокий интеллект = более медленная, продуманная речь
+    }
+    
+    if (characterWis !== null && characterWis !== undefined) {
+      // Высокая мудрость = более спокойная, размеренная речь
+      const wisMod = (characterWis - 10) / 2;
+      rate = Math.max(0.88, rate - wisMod * 0.01);
+      pitch += wisMod * 0.05; // Более высокая мудрость = более спокойная интонация
+    }
+    
+    // Корректировки на основе уровня
+    if (characterLevel !== null && characterLevel !== undefined) {
+      // Более высокий уровень = более уверенная, опытная речь
+      if (characterLevel >= 10) {
+        rate = Math.max(0.9, rate - 0.05); // Опытные персонажи говорят размереннее
+        pitch -= 0.2; // Более низкий, уверенный голос
+      }
+    }
+    
+    // Ограничиваем значения
+    pitch = Math.max(-5.0, Math.min(5.0, pitch));
+    rate = Math.max(0.75, Math.min(1.25, rate));
+  } else if (isNarrator) {
+    // Для рассказчика используем женский мягкий голос
+    // Всегда один и тот же голос для рассказчика для консистентности
+    voice = 'ru-RU-Wavenet-E'; // Женский мягкий голос
+    pitch = 1.5; // Немного выше для мягкости
+    rate = 1.0; // Нормальный темп для естественной речи
+  } else if (locationType) {
+    // Выбор голоса на основе типа локации
+    const locType = locationType.toLowerCase();
+    if (locType.includes('темн') || locType.includes('подзем') || locType.includes('пещер')) {
+      voice = 'male-deep'; // Мужской, более глубокий для мрачных локаций (для совместимости)
+      pitch = -1.5;
+      rate = 0.9; // Медленнее для атмосферы
+    } else if (locType.includes('светл') || locType.includes('лес') || locType.includes('природ')) {
+      voice = 'female-soft'; // Женский, мягкий для светлых локаций (для совместимости)
+      pitch = 1.5;
+      rate = 1.05; // Немного быстрее
+    } else {
+      voice = 'neutral'; // Нейтральный (для совместимости)
+    }
+  }
+  
+  return { voice, pitch, rate };
+}
+
+// Endpoint для анализа текста и разбиения на сегменты
+app.post('/api/tts/analyze', async (req, res) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+    
+    if (!text.trim()) {
+      return res.status(400).json({ error: 'text_required' });
+    }
+    
+    // Получаем список персонажей для контекста с полной информацией
+    let availableCharacters: Array<CharacterForAnalysis> = [];
+    if (gameId) {
+      try {
+        const prisma = getPrisma();
+        const game = await prisma.game.findUnique({
+          where: { id: gameId },
+          include: { 
+            characters: { 
+              select: { 
+                id: true, 
+                name: true, 
+                gender: true,
+                race: true,
+                class: true,
+                level: true,
+                persona: true,
+                origin: true,
+                description: true,
+                abilities: true,
+                role: true,
+                cha: true,
+                int: true,
+                wis: true
+              } 
+            } 
+          }
+        }).catch(() => null);
+        if (game?.characters) {
+          availableCharacters = game.characters.map(c => ({
+            id: c.id,
+            name: c.name,
+            gender: c.gender,
+            race: c.race,
+            class: c.class,
+            level: c.level,
+            persona: c.persona,
+            origin: c.origin,
+            description: c.description,
+            abilities: c.abilities,
+            role: c.role,
+            cha: c.cha,
+            int: c.int,
+            wis: c.wis
+          }));
+        }
+      } catch (e) {
+        console.error('[TTS-ANALYZE] Failed to fetch characters:', e);
+      }
+    }
+    
+    // Разбиваем текст на сегменты
+    const segments = await parseTextIntoSegments({
+      text,
+      gameId,
+      availableCharacters
+    });
+    
+    return res.json({ segments });
+  } catch (e) {
+    console.error('[TTS-ANALYZE] Error:', e);
+    return res.status(500).json({ error: 'analysis_failed', details: String(e) });
+  }
+});
+
+app.post('/api/tts', async (req, res) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const voiceReq = typeof req.body?.voice === 'string' ? req.body.voice : undefined;
+    const format = typeof req.body?.format === 'string' ? req.body.format : 'mp3';
+    const speedReq = typeof req.body?.speed === 'string' ? parseFloat(req.body.speed) : undefined;
+    const pitchReq = typeof req.body?.pitch === 'string' ? parseFloat(req.body.pitch) : undefined;
+    const lang = typeof req.body?.lang === 'string' ? req.body.lang : 'ru-RU';
+    const segmentMode = typeof req.body?.segmentMode === 'boolean' ? req.body.segmentMode : false; // Режим сегментированного текста
+    
+    // Контекст для выбора голоса
+    const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
+    const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
+    const locationId = typeof req.body?.locationId === 'string' ? req.body.locationId : undefined;
+    const gender = typeof req.body?.gender === 'string' ? req.body.gender : undefined;
+    const isNarrator = typeof req.body?.isNarrator === 'boolean' ? req.body.isNarrator : undefined; // undefined = автоопределение
+    
+    // Параметры для цепочек диалогов (depth, choiceIndex, parentHash)
+    const depth = typeof req.body?.depth === 'number' ? req.body.depth : undefined;
+    const choiceIndex = typeof req.body?.choiceIndex === 'number' ? req.body.choiceIndex : undefined;
+    const parentHash = typeof req.body?.parentHash === 'string' ? req.body.parentHash : undefined;
+    
+    // Логируем только важную информацию
+    if (text.length > 500) {
+      console.log(`[TTS] Request: ${text.length} chars, format=${format}`);
+    }
+    
+    if (!text.trim()) {
+      console.warn('[TTS] Empty text received');
+      return res.status(400).json({ error: 'text_required' });
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Не генерируем TTS для системных сообщений об ошибке распознавания
+    if (text.trim() === 'Не распознали ваш ответ, выберите вариант корректно!') {
+      console.log('[TTS] Skipping TTS generation for clarification message');
+      return res.status(200).json({ error: 'tts_not_needed', message: 'This message should not be voiced' });
+    }
+    
+    // ПРОВЕРКА ПРЕГЕНЕРИРОВАННОГО АУДИО ДЛЯ ВСЕХ СООБЩЕНИЙ
+    // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
+      let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
+    if (gameId) {
+      
+      // Пытаемся найти сессию по gameId и locationId, чтобы получить scenarioGameId
+      try {
+        const prisma = getPrisma();
+        if (locationId) {
+          // Ищем сессию по locationId
+          const location = await prisma.location.findUnique({ where: { id: locationId }, select: { gameId: true } });
+          if (location?.gameId) {
+            // Пытаемся найти любую сессию для этого gameId
+            const sess = await prisma.gameSession.findFirst({ 
+              where: { scenarioGameId: location.gameId },
+              select: { scenarioGameId: true }
+            });
+            if (sess?.scenarioGameId) {
+              scenarioGameIdForPregen = sess.scenarioGameId;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[TTS] Failed to get scenarioGameId from session, using gameId:', e);
+      }
+      
+      const messageType = isNarrator !== false ? 'narrator' : 'character';
+      // Для welcome сообщений (когда depth не передан, но есть locationId и это narrator) используем depth=0
+      // Поиск прегенерированного аудио с учетом depth, choiceIndex, parentHash для цепочек диалогов
+      const searchDepth = depth !== undefined ? depth : (locationId && isNarrator !== false ? 0 : undefined);
+      const pregenPath = findPregenAudio(scenarioGameIdForPregen, text, locationId, characterId, messageType, searchDepth, choiceIndex, parentHash);
+      
+      if (pregenPath) {
+        try {
+          console.log('[TTS] ✅ Using pre-generated audio from:', pregenPath);
+          const audioBuffer = fs.readFileSync(pregenPath);
+          res.setHeader('Content-Type', 'audio/wav');
+          res.setHeader('Content-Length', String(audioBuffer.length));
+          return res.send(audioBuffer);
+        } catch (e) {
+          console.warn('[TTS] Failed to read pre-generated audio:', e);
+        }
+      } else {
+        console.log(`[TTS] ⚠️ Pre-generated audio not found for scenarioGameId=${scenarioGameIdForPregen}`);
+        // Проверяем, существует ли директория для этой игры
+        const gameDir = path.join(PRAGEN_DIR, scenarioGameIdForPregen);
+        if (fs.existsSync(gameDir)) {
+          console.log(`[TTS] 📁 Game directory exists: ${gameDir}`);
+        } else {
+          console.log(`[TTS] 📁 Game directory does not exist: ${gameDir}`);
+        }
+      }
+      
+    }
+    
+    // Если включен режим сегментов, разбиваем текст и обрабатываем каждый сегмент
+    if (segmentMode) {
+      // Получаем список персонажей для контекста с полной информацией
+      let availableCharacters: Array<CharacterForAnalysis> = [];
+      if (gameId) {
+        try {
+          const prisma = getPrisma();
+          const game = await prisma.game.findUnique({
+            where: { id: gameId },
+            include: { 
+              characters: { 
+                select: { 
+                  id: true, 
+                  name: true, 
+                  gender: true,
+                  race: true,
+                  class: true,
+                  level: true,
+                  persona: true,
+                  origin: true,
+                  description: true,
+                  abilities: true,
+                  role: true,
+                  cha: true,
+                  int: true,
+                  wis: true
+                } 
+              } 
+            }
+          }).catch(() => null);
+          if (game?.characters) {
+            availableCharacters = game.characters.map(c => ({
+              id: c.id,
+              name: c.name,
+              gender: c.gender,
+              race: c.race,
+              class: c.class,
+              level: c.level,
+              persona: c.persona,
+              origin: c.origin,
+              description: c.description,
+              abilities: c.abilities,
+              role: c.role,
+              cha: c.cha,
+              int: c.int,
+              wis: c.wis
+            }));
+          }
+        } catch (e) {
+          console.error('[TTS] Failed to fetch characters for segments:', e);
+        }
+      }
+      
+      const segments = await parseTextIntoSegments({
+        text,
+        gameId,
+        availableCharacters
+      });
+      
+      // Возвращаем сегменты для последовательной обработки на клиенте
+      return res.json({ 
+        segments: segments.map(seg => ({
+          text: seg.text,
+          isNarrator: seg.isNarrator,
+          characterId: seg.characterId,
+          characterName: seg.characterName,
+          gender: seg.gender,
+          emotion: seg.emotion,
+          intensity: seg.intensity
+        }))
+      });
+    }
+    
+    // Получаем информацию о персонаже/локации из базы данных для выбора голоса
+    let characterGender: string | null = null;
+    let characterName: string | null = null;
+    let characterClass: string | null = null;
+    let characterRace: string | null = null;
+    let characterPersona: string | null = null;
+    let characterCha: number | null = null;
+    let characterInt: number | null = null;
+    let characterWis: number | null = null;
+    let characterLevel: number | null = null;
+    let locationType: string | null = null;
+    
+    if (characterId || locationId) {
+      try {
+        const prisma = getPrisma();
+        if (characterId) {
+          const char = await prisma.character.findUnique({ 
+            where: { id: characterId }, 
+            select: { 
+              gender: true, 
+              name: true,
+              race: true,
+              class: true,
+              level: true,
+              persona: true,
+              cha: true,
+              int: true,
+              wis: true
+            } 
+          });
+          if (char) {
+            characterGender = char.gender;
+            characterName = char.name;
+            characterClass = char.class;
+            characterRace = char.race;
+            characterPersona = char.persona;
+            characterCha = char.cha;
+            characterInt = char.int;
+            characterWis = char.wis;
+            characterLevel = char.level;
+          }
+        }
+        if (locationId) {
+          const loc = await prisma.location.findUnique({ where: { id: locationId }, select: { title: true, description: true } });
+          if (loc) {
+            // Определяем тип локации из названия/описания
+            const locText = ((loc.title || '') + ' ' + (loc.description || '')).toLowerCase();
+            if (locText.includes('темн') || locText.includes('подзем') || locText.includes('пещер') || locText.includes('тюрьм')) {
+              locationType = 'dark';
+            } else if (locText.includes('светл') || locText.includes('лес') || locText.includes('природ') || locText.includes('сад')) {
+              locationType = 'light';
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[TTS] Failed to fetch character/location context:', e);
+      }
+    }
+    
+    // Динамический анализ текста через LLM для определения контекста
+    let speechContext: {
+      isNarrator: boolean;
+      characterId?: string;
+      characterName?: string;
+      gender?: string | null;
+      emotion: string;
+      intensity: number;
+    };
+    
+    // Получаем список персонажей для контекста анализа с полной информацией
+    let availableCharacters: Array<CharacterForAnalysis> = [];
+    if (gameId) {
+      try {
+        const prisma = getPrisma();
+        const game = await prisma.game.findUnique({
+          where: { id: gameId },
+          include: { 
+            characters: { 
+              select: { 
+                id: true, 
+                name: true, 
+                gender: true,
+                race: true,
+                class: true,
+                level: true,
+                persona: true,
+                origin: true,
+                description: true,
+                abilities: true,
+                role: true,
+                cha: true,
+                int: true,
+                wis: true
+              } 
+            } 
+          }
+        }).catch(() => null);
+        if (game?.characters) {
+          availableCharacters = game.characters.map(c => ({
+            id: c.id,
+            name: c.name,
+            gender: c.gender,
+            race: c.race,
+            class: c.class,
+            level: c.level,
+            persona: c.persona,
+            origin: c.origin,
+            description: c.description,
+            abilities: c.abilities,
+            role: c.role,
+            cha: c.cha,
+            int: c.int,
+            wis: c.wis
+          }));
+        }
+      } catch (e) {
+        console.error('[TTS] Failed to fetch characters for analysis:', e);
+      }
+    }
+    
+    // Если characterId передан явно, добавляем его в список с полной информацией
+    if (characterId && characterName && !availableCharacters.find(c => c.id === characterId)) {
+      availableCharacters.push({
+        id: characterId,
+        name: characterName,
+        gender: characterGender,
+        race: characterRace,
+        class: characterClass,
+        level: characterLevel,
+        persona: characterPersona,
+        cha: characterCha,
+        int: characterInt,
+        wis: characterWis
+      });
+    }
+    
+    // Оптимизация: используем AI анализ только если параметры не переданы явно
+    // Если параметры переданы - используем их напрямую для ускорения
+    if (isNarrator !== undefined || characterId || characterName || gender) {
+      // Параметры переданы явно - используем их без AI анализа
+      const emotion = detectEmotion(text);
+      speechContext = {
+        isNarrator: isNarrator !== undefined ? isNarrator : true,
+        characterId: characterId,
+        characterName: characterName || undefined,
+        gender: gender || characterGender,
+        emotion: emotion.emotion,
+        intensity: emotion.intensity
+      };
+    } else {
+      // Параметры не переданы - используем быстрый анализ только для коротких текстов
+      if (text.length < 50) {
+        const emotion = detectEmotion(text);
+        const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
+        speechContext = {
+          isNarrator: !hasQuotes,
+          characterId: characterId,
+          characterName: characterName || undefined,
+          gender: gender || characterGender,
+          emotion: emotion.emotion,
+          intensity: emotion.intensity
+        };
+      } else {
+        // Для длинных текстов - используем AI анализ
+    try {
+      speechContext = await analyzeSpeechContext({
+        text,
+        gameId,
+        availableCharacters
+      });
+    } catch (e) {
+          // Fallback на паттерн-бейзированное определение
+      const emotion = detectEmotion(text);
+          const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
+      speechContext = {
+            isNarrator: !hasQuotes,
+        characterId: characterId,
+        characterName: characterName || undefined,
+        gender: gender || characterGender,
+        emotion: emotion.emotion,
+        intensity: emotion.intensity
+      };
+        }
+      }
+    }
+    
+    // Используем результат анализа для выбора голоса
+    // Если isNarrator передан явно, используем его, иначе - результат анализа
+    const finalIsNarrator = isNarrator !== undefined ? isNarrator : speechContext.isNarrator;
+    const finalCharacterId = speechContext.characterId || characterId;
+    const finalCharacterName = speechContext.characterName || characterName;
+    const finalGender = speechContext.gender || gender || characterGender;
+    
+    // Функция для сохранения сгенерированного аудио и текста
+    const saveGeneratedAudio = (audioBuffer: Buffer, scenarioGameId: string | undefined) => {
+      // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации (если есть)
+      if (!scenarioGameId) return;
+      
+      // Проверяем размер аудио - если меньше 1 МБ, не сохраняем
+      const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+      if (audioBuffer.length < MIN_AUDIO_SIZE) {
+        console.warn(`[TTS] ⚠️ Audio buffer too small to save: ${audioBuffer.length} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Skipping save.`);
+        return;
+      }
+      
+      try {
+        const messageType = finalIsNarrator !== false ? 'narrator' : 'character';
+        // Для welcome сообщений (когда нет locationId или это первое сообщение) используем depth=0
+        // Если depth не передан, но есть locationId и это narrator - вероятно это welcome, используем depth=0
+        const finalDepth = depth !== undefined ? depth : (locationId && finalIsNarrator !== false ? 0 : undefined);
+        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то text НЕ используется для сохранения!
+        // AI уже подставил индекс выбора, поэтому сохраняем только по choiceIndex, depth, parentHash
+        // ТОЧНО ТАК ЖЕ КАК В /api/chat/reply
+        const saveText = choiceIndex !== undefined ? '' : text;
+        // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации (если есть)
+        const hashWithoutLoc = createAudioHash(saveText, undefined, characterId, messageType, finalDepth, choiceIndex, parentHash);
+        // Если choiceIndex определен - сохраняем в 'general', иначе в папку локации (ТОЧНО ТАК ЖЕ КАК В /api/chat/reply)
+        const subDir = choiceIndex !== undefined ? 'general' : (locationId || 'general');
+        const audioPath = path.join(PRAGEN_DIR, scenarioGameId, subDir, `${messageType}_${hashWithoutLoc}.wav`);
+        const audioDir = path.dirname(audioPath);
+        try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+        fs.writeFileSync(audioPath, audioBuffer);
+        
+        // Сохраняем также текст
+        const textPath = path.join(PRAGEN_DIR, scenarioGameId, subDir, `${messageType}_${hashWithoutLoc}.txt`);
+        try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+        fs.writeFileSync(textPath, text, 'utf-8');
+        
+        console.log(`[TTS] 💾 Saved generated audio and text: saveText="${saveText.slice(0, 50) || '(empty)'}", hash=${hashWithoutLoc.slice(0, 8)}, subDir=${subDir}, scenarioGameId=${scenarioGameId}, locationId=${locationId || 'none'}, depth=${finalDepth ?? 'none'}, choiceIndex=${choiceIndex ?? 'none'}, parentHash=${parentHash ? parentHash.slice(0, 8) : 'none'}`);
+      } catch (e) {
+        console.warn('[TTS] Failed to save generated audio:', e);
+      }
+    };
+    
+    // Находим полную информацию о персонаже для выбора голоса
+    let finalCharacterClass = characterClass;
+    let finalCharacterRace = characterRace;
+    let finalCharacterPersona = characterPersona;
+    let finalCharacterCha = characterCha;
+    let finalCharacterInt = characterInt;
+    let finalCharacterWis = characterWis;
+    let finalCharacterLevel = characterLevel;
+    
+    if (finalCharacterId && availableCharacters.length > 0) {
+      const foundChar = availableCharacters.find(c => c.id === finalCharacterId);
+      if (foundChar) {
+        finalCharacterClass = foundChar.class || finalCharacterClass;
+        finalCharacterRace = foundChar.race || finalCharacterRace;
+        finalCharacterPersona = foundChar.persona || finalCharacterPersona;
+        finalCharacterCha = foundChar.cha !== null && foundChar.cha !== undefined ? foundChar.cha : finalCharacterCha;
+        finalCharacterInt = foundChar.int !== null && foundChar.int !== undefined ? foundChar.int : finalCharacterInt;
+        finalCharacterWis = foundChar.wis !== null && foundChar.wis !== undefined ? foundChar.wis : finalCharacterWis;
+        finalCharacterLevel = foundChar.level !== null && foundChar.level !== undefined ? foundChar.level : finalCharacterLevel;
+      }
+    }
+    
+    // Выбираем голос на основе контекста с учетом всех характеристик персонажа
+    const voiceContext = selectVoiceForContext({
+      characterId: finalCharacterId,
+      characterName: finalCharacterName,
+      locationId,
+      gender: finalGender,
+      characterGender: finalGender,
+      isNarrator: finalIsNarrator,
+      locationType,
+      characterClass: finalCharacterClass,
+      characterRace: finalCharacterRace,
+      characterPersona: finalCharacterPersona,
+      characterCha: finalCharacterCha,
+      characterInt: finalCharacterInt,
+      characterWis: finalCharacterWis,
+      characterLevel: finalCharacterLevel,
+    });
+    
+    // Используем эмоцию из анализа
+    const emotion = {
+      emotion: speechContext.emotion,
+      intensity: speechContext.intensity
+    };
+    console.log('[TTS] Final context:', {
+      isNarrator: finalIsNarrator,
+      characterId: finalCharacterId,
+      characterName: finalCharacterName,
+      emotion: emotion.emotion,
+      intensity: emotion.intensity
+    });
+    
+    // Используем выбранный голос или переданный явно
+    const finalVoice = voiceReq || voiceContext.voice;
+    let finalSpeed = speedReq !== undefined ? speedReq : voiceContext.rate;
+    let finalPitch = pitchReq !== undefined ? pitchReq : voiceContext.pitch;
+    
+    // Корректируем pitch и rate на основе эмоций
+    if (emotion.emotion !== 'neutral' && emotion.intensity > 0) {
+      const intensity = emotion.intensity;
+      switch (emotion.emotion) {
+        case 'joy':
+          // Радость: выше pitch, быстрее rate
+          finalPitch += 1.5 * intensity;
+          finalSpeed += 0.1 * intensity;
+          break;
+        case 'sadness':
+          // Грусть: ниже pitch, медленнее rate
+          finalPitch -= 1.0 * intensity;
+          finalSpeed -= 0.1 * intensity;
+          break;
+        case 'fear':
+          // Страх: выше pitch, быстрее rate (нервность)
+          finalPitch += 1.0 * intensity;
+          finalSpeed += 0.15 * intensity;
+          break;
+        case 'anger':
+          // Злость: ниже pitch, быстрее rate
+          finalPitch -= 0.5 * intensity;
+          finalSpeed += 0.1 * intensity;
+          break;
+        case 'surprise':
+          // Удивление: выше pitch, быстрее rate
+          finalPitch += 2.0 * intensity;
+          finalSpeed += 0.2 * intensity;
+          break;
+      }
+      // Ограничиваем значения
+      finalPitch = Math.max(-5.0, Math.min(5.0, finalPitch));
+      finalSpeed = Math.max(0.75, Math.min(1.25, finalSpeed));
+    }
+    
+    console.log('[TTS] Voice context:', {
+      finalVoice,
+      finalSpeed,
+      finalPitch,
+      characterGender,
+      locationType,
+      isNarrator,
+    });
+    
+    // ПОЛНОЦЕННАЯ ГЕНЕРАЦИЯ ЧЕРЕЗ GEMINI - AI сам распознает контекст и озвучивает
+    // Используем Gemini 2.5 Pro для прямой генерации аудио с полным пониманием контекста
+    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    if (!geminiApiKey) {
+      console.error('[TTS] Gemini API key not configured');
+      return res.status(500).json({ 
+        error: 'tts_key_missing', 
+        message: 'Необходимо настроить GEMINI_API_KEY для генерации речи через Gemini.'
+      });
+    }
+    
+    // Находим информацию о персонаже для использования в TTS
+    const characterInfo = finalCharacterId && availableCharacters.length > 0
+      ? availableCharacters.find(c => c.id === finalCharacterId)
+      : null;
+    
+    // Функция для генерации через Google TTS (используется как fallback)
+    const generateGoogleTTS = async (): Promise<Buffer | null> => {
+      try {
+        const googleKey = process.env.GOOGLE_TTS_API_KEY || process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY;
+        
+        if (!googleKey) {
+          console.warn('[GOOGLE-TTS] API key not configured');
+          return null;
+        }
+        
+        // Генерируем SSML для интонации
+        const ssmlText = await generateSSMLWithIntonation({
+          text,
+          isNarrator: finalIsNarrator,
+          characterName: finalCharacterName,
+          characterClass: characterInfo?.class || null,
+          characterRace: characterInfo?.race || null,
+          characterPersona: characterInfo?.persona || null,
+          characterCha: finalCharacterCha,
+          characterInt: finalCharacterInt,
+          characterWis: finalCharacterWis,
+          emotion: emotion.emotion,
+          intensity: emotion.intensity,
+          basePitch: finalPitch,
+          baseRate: finalSpeed
+        }).catch(() => null);
+        
+        // Выбираем голос для Google TTS
+        const isFemale = finalIsNarrator || (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f'));
+        const isMale = !finalIsNarrator && (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m'));
+        
+        // Лучшие голоса Google TTS для русского языка с интонацией
+        let voiceName = 'ru-RU-Wavenet-D'; // Мужской голос по умолчанию
+        if (finalIsNarrator || isFemale) {
+          voiceName = 'ru-RU-Wavenet-A'; // Женский голос для рассказчика
+        } else if (isMale) {
+          voiceName = 'ru-RU-Wavenet-D'; // Мужской голос
+        }
+        
+        // Используем Google Cloud TTS REST API
+        const googleTtsUrl = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleKey}`;
+        
+        // Функция для разбиения SSML на части по 4500 байт (с запасом от лимита 5000)
+        const splitSSMLIntoChunks = (ssml: string, maxBytes: number = 4500): string[] => {
+          const ssmlBytes = Buffer.from(ssml, 'utf-8');
+          if (ssmlBytes.length <= maxBytes) {
+            return [ssml];
+          }
+          
+          // Извлекаем содержимое из <speak>...</speak> если есть
+          const speakMatch = ssml.match(/<speak[^>]*>(.*?)<\/speak>/s);
+          const content = speakMatch ? speakMatch[1] : ssml;
+          const speakOpen = speakMatch ? ssml.match(/<speak[^>]*>/)?.[0] || '<speak>' : '<speak>';
+          const speakClose = '</speak>';
+          
+          // Разбиваем содержимое по предложениям (точка, восклицательный, вопросительный знак)
+          // Учитываем, что могут быть теги внутри
+          const sentences: string[] = [];
+          let currentSentence = '';
+          let inTag = false;
+          
+          for (let i = 0; i < content.length; i++) {
+            const char = content[i];
+            currentSentence += char;
+            
+            if (char === '<') inTag = true;
+            if (char === '>') inTag = false;
+            
+            // Разбиваем по знакам препинания только вне тегов
+            if (!inTag && (char === '.' || char === '!' || char === '?')) {
+              // Проверяем, что это конец предложения (следующий символ пробел, перенос или конец)
+              if (i === content.length - 1 || /[\s\n\r]/.test(content[i + 1])) {
+                sentences.push(currentSentence.trim());
+                currentSentence = '';
+              }
+            }
+          }
+          
+          if (currentSentence.trim()) {
+            sentences.push(currentSentence.trim());
+          }
+          
+          if (sentences.length === 0) {
+            sentences.push(content);
+          }
+          
+          // Группируем предложения в чанки
+          const chunks: string[] = [];
+          let currentChunk = '';
+          
+          for (const sentence of sentences) {
+            const testChunk = currentChunk + (currentChunk ? ' ' : '') + sentence;
+            const wrappedChunk = speakOpen + testChunk + speakClose;
+            const testBytes = Buffer.from(wrappedChunk, 'utf-8').length;
+            
+            if (testBytes <= maxBytes) {
+              currentChunk = testChunk;
+            } else {
+              if (currentChunk) {
+                chunks.push(speakOpen + currentChunk + speakClose);
+              }
+              // Если одно предложение больше лимита - разбиваем по словам
+              const wrappedSentence = speakOpen + sentence + speakClose;
+              const sentenceBytes = Buffer.from(wrappedSentence, 'utf-8').length;
+              if (sentenceBytes > maxBytes) {
+                // Разбиваем по словам, но сохраняем теги
+                const parts = sentence.split(/(\s+)/);
+                let wordChunk = '';
+                for (const part of parts) {
+                  const testWordChunk = wordChunk + part;
+                  const wrappedWordChunk = speakOpen + testWordChunk + speakClose;
+                  const testWordBytes = Buffer.from(wrappedWordChunk, 'utf-8').length;
+                  if (testWordBytes <= maxBytes) {
+                    wordChunk = testWordChunk;
+                  } else {
+                    if (wordChunk) {
+                      chunks.push(speakOpen + wordChunk + speakClose);
+                    }
+                    wordChunk = part;
+                  }
+                }
+                currentChunk = wordChunk;
+              } else {
+                currentChunk = sentence;
+              }
+            }
+          }
+          
+          if (currentChunk) {
+            chunks.push(speakOpen + currentChunk + speakClose);
+          }
+          
+          return chunks.length > 0 ? chunks : [ssml];
+        };
+        
+        // Функция для генерации одной части аудио
+        const generateChunk = async (chunkText: string): Promise<Buffer | null> => {
+        const requestBody = {
+          input: {
+              ssml: chunkText
+          },
+          voice: {
+            languageCode: 'ru-RU',
+            name: voiceName,
+            ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
+          },
+          audioConfig: {
+            audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
+            sampleRateHertz: 24000,
+            speakingRate: finalSpeed,
+            pitch: finalPitch,
+            volumeGainDb: 0.0,
+              effectsProfileId: ['headphone-class-device']
+          }
+        };
+        
+        const googleResponse = await undiciFetch(googleTtsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(20000)
+        });
+        
+        if (googleResponse.ok) {
+          const googleData = await googleResponse.json() as any;
+            
+          if (googleData.audioContent) {
+              try {
+            const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
+                
+                // Для отдельных чанков НЕ проверяем минимальный размер - проверяем только финальное объединенное аудио
+                // Короткие чанки (например, последний из нескольких) могут быть меньше 1 МБ, это нормально
+            return audioBuffer;
+              } catch (decodeErr) {
+                console.error('[GOOGLE-TTS] ⚠️ Failed to decode base64 audioContent:', decodeErr);
+                return null;
+              }
+            } else {
+              console.error('[GOOGLE-TTS] ⚠️ No audioContent in response');
+          }
+        } else {
+          const errorText = await googleResponse.text().catch(() => '');
+            console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 200));
+          }
+          return null;
+        };
+        
+        // Подготавливаем финальный SSML или простой текст
+        const finalInput = ssmlText || `<speak><prosody rate="${finalSpeed}" pitch="${finalPitch >= 0 ? '+' : ''}${finalPitch}st">${text}</prosody></speak>`;
+        
+        // Проверяем размер в байтах
+        const inputBytes = Buffer.from(finalInput, 'utf-8').length;
+        console.log('[GOOGLE-TTS] Input size:', inputBytes, 'bytes, voice:', voiceName);
+        
+        if (inputBytes <= 4500) {
+          // Текст помещается в один запрос
+          const audioBuffer = await generateChunk(finalInput);
+          if (audioBuffer) {
+            // КРИТИЧЕСКИ ВАЖНО: Проверяем размер аудио - если меньше 1 МБ, это явно ошибка
+            // Все ответы достаточно большие и массивные, поэтому аудио должно быть минимум 1 МБ
+            const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+            if (audioBuffer.length < MIN_AUDIO_SIZE) {
+              console.error('[GOOGLE-TTS] ❌ Generated audio too small:', audioBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes). This is likely an error!');
+              console.error('[GOOGLE-TTS] Input text length:', text.length, 'chars');
+              console.error('[GOOGLE-TTS] SSML length:', finalInput.length, 'chars');
+              return null;
+            }
+            console.log('[GOOGLE-TTS] ✅ Successfully generated audio, size:', audioBuffer.length, 'bytes');
+            return audioBuffer;
+          } else {
+            console.error('[GOOGLE-TTS] ❌ generateChunk returned null/undefined for single chunk');
+          }
+        } else {
+          // Нужно разбить на части
+          console.log('[GOOGLE-TTS] Text too long, splitting into chunks...');
+          const chunks = splitSSMLIntoChunks(finalInput, 4500);
+          console.log('[GOOGLE-TTS] Split into', chunks.length, 'chunks');
+          
+          const audioBuffers: Buffer[] = [];
+          for (let i = 0; i < chunks.length; i++) {
+            console.log(`[GOOGLE-TTS] Generating chunk ${i + 1}/${chunks.length}...`);
+            const chunkAudio = await generateChunk(chunks[i]);
+            if (chunkAudio) {
+              audioBuffers.push(chunkAudio);
+            } else {
+              console.error(`[GOOGLE-TTS] Failed to generate chunk ${i + 1}`);
+              return null; // Если одна часть не сгенерировалась - возвращаем ошибку
+            }
+          }
+          
+          // Объединяем все части
+          const combinedBuffer = Buffer.concat(audioBuffers);
+          
+          // КРИТИЧЕСКИ ВАЖНО: Проверяем размер ТОЛЬКО для финального объединенного аудио
+          // Для отдельных чанков не проверяем, так как короткие чанки могут быть меньше 1 МБ
+          const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+          if (combinedBuffer.length < MIN_AUDIO_SIZE) {
+            console.error('[GOOGLE-TTS] ❌ Combined audio too small:', combinedBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes)');
+            return null;
+          }
+          
+          console.log('[GOOGLE-TTS] ✅ Successfully generated and combined audio, total size:', combinedBuffer.length, 'bytes');
+          return combinedBuffer;
+        }
+      } catch (googleErr) {
+        console.error('[GOOGLE-TTS] Error:', googleErr);
+      }
+      return null;
+    };
+    
+    try {
+      // Используем только специализированные TTS модели
+      // Остальные модели не поддерживают TTS или возвращают текст вместо аудио
+      const modelsToTry = [
+        'gemini-2.5-pro-preview-tts'        // Лучшее качество, более естественное произношение
+      ];
+      
+      const proxies = parseGeminiProxies();
+      const attempts = proxies.length ? proxies : ['__direct__'];
+      
+      // ПРОВЕРКА КВОТЫ: Делаем БЫСТРЫЙ минимальный TTS запрос с очень коротким текстом
+      // Это быстрее, чем полная генерация, но проверяет именно TTS модель
+      let geminiQuotaAvailable = true;
+      try {
+        const testModelName = modelsToTry[0];
+        const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/${testModelName}:generateContent`;
+        const testDispatcher = attempts[0] !== '__direct__' ? new ProxyAgent(attempts[0]) : undefined;
+        
+        // Быстрая проверка доступности Gemini TTS (логи убраны)
+        const testResponse = await undiciFetch(testUrl, {
+          method: 'POST',
+          dispatcher: testDispatcher,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': geminiApiKey
+          },
+          body: JSON.stringify({
+          contents: [{
+            role: 'user',
+              parts: [{ text: 'а' }] // Минимальный текст - одна буква для быстрой проверки
+          }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: 'Aoede'
+                }
+              }
+            }
+          }
+          }),
+          signal: AbortSignal.timeout(5000) // Быстрая проверка - 5 секунд (увеличено для прокси)
+        });
+        
+        if (testResponse.status === 429) {
+          const errorText = await testResponse.text().catch(() => '');
+          const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+          if (isQuotaError) {
+            console.warn('[GEMINI-TTS] ⚠️ Quota exceeded (429) - skipping Gemini, using Google TTS directly');
+            geminiQuotaAvailable = false;
+          }
+        } else if (testResponse.ok) {
+          console.log('[GEMINI-TTS] ✅ TTS quota available, proceeding with Gemini TTS');
+        }
+      } catch (testErr: any) {
+        // Игнорируем ошибки тестового запроса, продолжаем с обычной логикой
+        const isTimeout = testErr?.name === 'TimeoutError' || testErr?.message?.includes('timeout') || testErr?.message?.includes('aborted');
+        if (isTimeout) {
+          console.log('[GEMINI-TTS] Quick TTS check timed out (this is normal), proceeding with normal flow');
+        } else {
+          console.log('[GEMINI-TTS] Quick TTS check failed, proceeding with normal flow:', testErr?.message || String(testErr));
+        }
+      }
+      
+      // Если квота недоступна - сразу используем Google TTS
+      if (!geminiQuotaAvailable) {
+        const googleAudio = await generateGoogleTTS();
+        if (googleAudio) {
+          console.log('[TTS] ✅ Returning Google TTS audio to client, size:', googleAudio.length, 'bytes');
+          // Сохраняем сгенерированное аудио
+          saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
+          res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
+          res.setHeader('Content-Length', googleAudio.length.toString());
+          return res.send(googleAudio);
+        } else {
+          console.warn('[TTS] ⚠️ Google TTS returned null/undefined, continuing with Gemini fallback');
+        }
+      }
+      
+      // Формируем директорские заметки на основе полного контекста персонажа
+      // characterInfo уже определен выше
+      let directorsNotes = '';
+      
+      if (finalIsNarrator) {
+        // ВСЕГДА женский мягкий голос для рассказчика
+        directorsNotes = `### DIRECTORS NOTES
+Style: Soft, warm, female narrator voice. Gentle and inviting tone. Natural, non-robotic speech with full emotional understanding and semantic meaning.
+Pacing: Calm and measured, with natural rhythm variations based on content meaning.
+Accent: Natural Russian, clear pronunciation.
+Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
+Voice: Female, soft, warm, gentle
+Tone: Always warm and inviting, never harsh or robotic
+`;
+      } else {
+        // Для персонажей - детальные директорские заметки на основе всех характеристик
+        const emotionDesc = emotion.emotion === 'joy' ? 'joyful and enthusiastic' :
+                          emotion.emotion === 'sadness' ? 'sad and melancholic' :
+                          emotion.emotion === 'anger' ? 'angry and intense' :
+                          emotion.emotion === 'fear' ? 'fearful and anxious' :
+                          emotion.emotion === 'surprise' ? 'surprised and excited' :
+                          'neutral';
+        
+        // Определяем пол для голоса
+        const isFemale = finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f');
+        const isMale = finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m');
+        const voiceGender = isFemale ? 'female' : isMale ? 'male' : 'neutral';
+        
+        // Описание класса и его влияния на голос
+        let classVoiceDesc = '';
+        if (characterInfo?.class) {
+          const classLower = characterInfo.class.toLowerCase();
+          if (classLower.includes('маг') || classLower.includes('wizard') || classLower.includes('чародей') || classLower.includes('sorcerer')) {
+            classVoiceDesc = 'Intelligent, articulate, measured speech. Sophisticated vocabulary.';
+          } else if (classLower.includes('воин') || classLower.includes('fighter') || classLower.includes('варвар') || classLower.includes('barbarian')) {
+            classVoiceDesc = 'Direct, confident, strong speech. Clear and decisive.';
+          } else if (classLower.includes('друид') || classLower.includes('druid') || classLower.includes('жрец') || classLower.includes('cleric')) {
+            classVoiceDesc = 'Wise, calm, measured speech. Thoughtful and contemplative.';
+          } else if (classLower.includes('плут') || classLower.includes('rogue') || classLower.includes('бард') || classLower.includes('bard')) {
+            classVoiceDesc = 'Quick, clever, witty speech. Fast-paced and cunning.';
+          } else if (classLower.includes('паладин') || classLower.includes('paladin')) {
+            classVoiceDesc = 'Noble, confident, righteous speech. Strong and honorable.';
+          }
+        }
+        
+        // Описание расы и её влияния на голос
+        let raceVoiceDesc = '';
+        if (characterInfo?.race) {
+          const raceLower = characterInfo.race.toLowerCase();
+          if (raceLower.includes('эльф') || raceLower.includes('elf')) {
+            raceVoiceDesc = 'Elegant, melodic, refined accent.';
+          } else if (raceLower.includes('дварф') || raceLower.includes('dwarf')) {
+            raceVoiceDesc = 'Rough, deep, gruff accent.';
+          } else if (raceLower.includes('гном') || raceLower.includes('gnome')) {
+            raceVoiceDesc = 'Quick, high-pitched, energetic accent.';
+          } else if (raceLower.includes('орк') || raceLower.includes('orc') || raceLower.includes('полуорк')) {
+            raceVoiceDesc = 'Harsh, deep, guttural accent.';
+          }
+        }
+        
+        // Влияние характеристик на голос
+        let statsVoiceDesc = '';
+        if (characterInfo) {
+          const cha = characterInfo.cha || finalCharacterCha || 10;
+          const int = characterInfo.int || finalCharacterInt || 10;
+          const wis = characterInfo.wis || finalCharacterWis || 10;
+          
+          if (cha >= 16) statsVoiceDesc += 'Highly charismatic, persuasive, eloquent. ';
+          if (int >= 16) statsVoiceDesc += 'Intelligent, articulate, sophisticated vocabulary. ';
+          if (wis >= 16) statsVoiceDesc += 'Wise, thoughtful, measured pace. ';
+          if (cha < 8) statsVoiceDesc += 'Less confident, hesitant speech. ';
+          if (int < 8) statsVoiceDesc += 'Simpler vocabulary, straightforward. ';
+        }
+        
+        const classDesc = characterInfo?.class ? `Class: ${characterInfo.class}. ` : '';
+        const raceDesc = characterInfo?.race ? `Race: ${characterInfo.race}. ` : '';
+        const personaDesc = characterInfo?.persona ? `Personality: ${characterInfo.persona}. ` : '';
+        const nameDesc = finalCharacterName ? `Character name: ${finalCharacterName}. ` : '';
+        
+        directorsNotes = `### DIRECTORS NOTES
+Character: ${nameDesc}${classDesc}${raceDesc}${personaDesc}
+Style: ${emotionDesc}, natural and expressive. ${classVoiceDesc}${raceVoiceDesc}${statsVoiceDesc}
+Pacing: ${finalSpeed > 1.0 ? 'faster, energetic' : finalSpeed < 1.0 ? 'slower, thoughtful' : 'normal, natural rhythm'}.
+Accent: Natural Russian, ${raceVoiceDesc || 'character-appropriate'}.
+Emotion: ${emotion.emotion}, intensity: ${emotion.intensity}
+Voice: ${voiceGender}, pitch: ${finalPitch > 0 ? 'higher' : finalPitch < 0 ? 'lower' : 'neutral'}, rate: ${finalSpeed}
+Tone: Character-appropriate based on class, race, personality, and stats. Real voice variation based on all character traits.
+`;
+      }
+      
+      // Для TTS передаем ТОЛЬКО чистый текст без директорских заметок
+      // Директорские заметки используются только для понимания контекста, но не передаются в TTS
+      // Используем generateContent с speechConfig для прямой генерации аудио через Gemini
+      // Согласно документации: https://ai.google.dev/gemini-api/docs/speech-generation
+      
+      // Функция для создания тела запроса в зависимости от типа модели
+      const createRequestBody = (modelName: string) => {
+        const isTTSModel = modelName.includes('-tts');
+        
+        if (isTTSModel) {
+          // Для специализированных TTS моделей нужен responseModalities: ['AUDIO']
+          return {
+            contents: [{
+              role: 'user',
+              parts: [{ text: text }]
+            }],
+            generationConfig: {
+              responseModalities: ['AUDIO'], // КРИТИЧЕСКИ ВАЖНО: указываем, что хотим получить AUDIO, а не TEXT
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    // ВСЕГДА женский мягкий голос для рассказчика (Aoede)
+                    // Для персонажей - в зависимости от пола (Kore для женских, Charon для мужских)
+                    voiceName: finalIsNarrator ? 'Aoede' : 
+                              (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f')) ? 'Kore' : 
+                              (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m')) ? 'Charon' : 
+                              'Charon' // По умолчанию мужской голос
+                  }
+                }
+              }
+            }
+          };
+        } else {
+          // Для обычных моделей используем speechConfig
+          return {
+            contents: [{
+              role: 'user',
+              parts: [{ text: text }]
+            }],
+            generationConfig: {
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    // ВСЕГДА женский мягкий голос для рассказчика (Aoede)
+                    // Для персонажей - в зависимости от пола (Kore для женских, Charon для мужских)
+                    voiceName: finalIsNarrator ? 'Aoede' : 
+                              (finalGender?.toLowerCase().includes('жен') || finalGender?.toLowerCase().includes('female') || finalGender?.toLowerCase().includes('f')) ? 'Kore' : 
+                              (finalGender?.toLowerCase().includes('муж') || finalGender?.toLowerCase().includes('male') || finalGender?.toLowerCase().includes('m')) ? 'Charon' : 
+                              'Charon' // По умолчанию мужской голос
+                  }
+                }
+              }
+            }
+          };
+        }
+      };
+      
+      // Пробуем каждую модель с каждым прокси
+      for (const modelName of modelsToTry) {
+        const requestBody = createRequestBody(modelName);
+        
+        for (const p of attempts) {
+          try {
+            const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+            console.log(`[GEMINI-TTS] 🎤 Attempting full audio generation via ${modelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
+            console.log(`[GEMINI-TTS] Request body for ${modelName}:`, JSON.stringify(requestBody, null, 2).slice(0, 500));
+            
+            const response = await undiciFetch(url, {
+            method: 'POST',
+              dispatcher,
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': geminiApiKey
+              },
+            body: JSON.stringify(requestBody),
+              signal: AbortSignal.timeout(120000) // 120 секунд (2 минуты) для длинных текстов и прокси
+            });
+            
+            if (response.ok) {
+              const contentType = response.headers.get('content-type') || '';
+              console.log(`[GEMINI-TTS] ${modelName} response OK, Content-Type: ${contentType}`);
+              
+              // Проверяем прямой аудио ответ
+              if (contentType.includes('audio')) {
+                const audioBuffer = Buffer.from(await response.arrayBuffer());
+                console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
+                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+                res.setHeader('Content-Length', String(audioBuffer.length));
+                // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
+                (async () => {
+                  try {
+                    console.log(`[GEMINI-TTS] 💾 Saving audio and text via saveGeneratedAudio (text length=${text.length}, scenarioGameId=${scenarioGameIdForPregen || 'none'})`);
+                    saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
+                  } catch (e) {
+                    console.warn('[GEMINI-TTS] Failed to save audio in background:', e);
+                  }
+                })();
+                return res.send(audioBuffer);
+              }
+              
+              // Проверяем JSON ответ с аудио в inlineData
+              const responseText = await response.text();
+              console.log(`[GEMINI-TTS] ${modelName} response body preview (first 1000 chars):`, responseText.slice(0, 1000));
+              
+              let json = null;
+              try {
+                json = JSON.parse(responseText);
+              } catch (e) {
+                console.warn(`[GEMINI-TTS] ${modelName} response is not JSON, full response:`, responseText.slice(0, 2000));
+                continue;
+              }
+              
+              // Логируем полную структуру для отладки
+              console.log(`[GEMINI-TTS] ${modelName} JSON structure:`, JSON.stringify(json, null, 2).slice(0, 2000));
+              
+              if (json?.candidates?.[0]?.content?.parts) {
+                console.log(`[GEMINI-TTS] ${modelName} found ${json.candidates[0].content.parts.length} parts`);
+                let audioFound = false;
+                for (let i = 0; i < json.candidates[0].content.parts.length; i++) {
+                  const part = json.candidates[0].content.parts[i];
+                  console.log(`[GEMINI-TTS] ${modelName} part ${i} keys:`, Object.keys(part));
+                  
+                  const inlineData = part.inlineData || part.inline_data;
+                  const mimeType = inlineData?.mimeType || inlineData?.mime_type || '';
+                  const data = inlineData?.data;
+                  
+                  console.log(`[GEMINI-TTS] ${modelName} part ${i} inlineData:`, {
+                    hasInlineData: !!inlineData,
+                    mimeType,
+                    hasData: !!data,
+                    dataLength: data ? data.length : 0
+                  });
+                  
+                  if (mimeType.includes('audio') && data) {
+                    let audioBuffer = Buffer.from(data, 'base64');
+                    let contentType = format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
+                    
+                    // Gemini возвращает PCM (L16), нужно конвертировать в WAV или OGG
+                    if (mimeType.includes('L16') || mimeType.includes('pcm')) {
+                      // Конвертируем PCM в WAV (добавляем WAV заголовок)
+                      const sampleRate = 24000; // Из mimeType: rate=24000
+                      const channels = 1; // Моно
+                      const bitsPerSample = 16;
+                      const byteRate = sampleRate * channels * (bitsPerSample / 8);
+                      const blockAlign = channels * (bitsPerSample / 8);
+                      const dataSize = audioBuffer.length;
+                      const fileSize = 36 + dataSize;
+                      
+                      // Создаем WAV заголовок
+                      const wavHeader = Buffer.alloc(44);
+                      wavHeader.write('RIFF', 0);
+                      wavHeader.writeUInt32LE(fileSize, 4);
+                      wavHeader.write('WAVE', 8);
+                      wavHeader.write('fmt ', 12);
+                      wavHeader.writeUInt32LE(16, 16); // fmt chunk size
+                      wavHeader.writeUInt16LE(1, 20); // audio format (PCM)
+                      wavHeader.writeUInt16LE(channels, 22);
+                      wavHeader.writeUInt32LE(sampleRate, 24);
+                      wavHeader.writeUInt32LE(byteRate, 28);
+                      wavHeader.writeUInt16LE(blockAlign, 32);
+                      wavHeader.writeUInt16LE(bitsPerSample, 34);
+                      wavHeader.write('data', 36);
+                      wavHeader.writeUInt32LE(dataSize, 40);
+                      
+                      // Объединяем заголовок и данные
+                      audioBuffer = Buffer.concat([wavHeader, audioBuffer]);
+                      contentType = 'audio/wav';
+                      console.log(`[GEMINI-TTS] Converted PCM to WAV, final size: ${audioBuffer.length} bytes`);
+                    }
+                    
+                    console.log(`[GEMINI-TTS] ✅ Success (inlineData audio via ${modelName}, ${mimeType}), audio size: ${audioBuffer.length} bytes, Content-Type: ${contentType}`);
+                    // Сохраняем сгенерированное аудио - ТОЧНО ТАК ЖЕ КАК ДЛЯ GOOGLE TTS
+                    // Функция saveGeneratedAudio сохраняет И текст, И аудио
+                    res.setHeader('Content-Type', contentType);
+                    res.setHeader('Content-Length', String(audioBuffer.length));
+                    audioFound = true;
+                    // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
+                    (async () => {
+                      try {
+                        console.log(`[GEMINI-TTS] 💾 Saving audio and text via saveGeneratedAudio (text length=${text.length}, scenarioGameId=${scenarioGameIdForPregen || 'none'})`);
+                        saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
+                      } catch (e) {
+                        console.warn('[GEMINI-TTS] Failed to save audio in background:', e);
+                      }
+                    })();
+                    return res.send(audioBuffer);
+                  }
+                  
+                  // Проверяем, может быть текст вместо аудио (модель не поддерживает TTS)
+                  if (part.text) {
+                    console.warn(`[GEMINI-TTS] ${modelName} returned text instead of audio. Text preview:`, part.text.slice(0, 200));
+                  }
+                }
+                
+                // Если аудио не найдено в частях, логируем предупреждение
+                if (!audioFound) {
+                  console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in parts`);
+                }
+            } else {
+                console.warn(`[GEMINI-TTS] ${modelName} response structure:`, JSON.stringify(json).slice(0, 1000));
+                console.warn(`[GEMINI-TTS] ${modelName} response OK but no audio found in expected structure`);
+            }
+          } else {
+              const errorText = await response.text().catch(() => '');
+              
+              // Если получили 429 - сразу переходим на Google TTS (не тратим время на другие попытки)
+              if (response.status === 429) {
+                const isQuotaError = errorText.includes('quota') || errorText.includes('Quota exceeded') || errorText.includes('generate_requests_per_model_per_day');
+                if (isQuotaError) {
+                  console.warn(`[GEMINI-TTS] ⚠️ Quota exceeded (429) for ${modelName} - switching to Google TTS immediately`);
+                  const googleAudio = await generateGoogleTTS();
+                  if (googleAudio) {
+                    // Сохраняем сгенерированное аудио
+                    saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
+                    res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
+                    res.setHeader('Content-Length', googleAudio.length.toString());
+                    return res.send(googleAudio);
+                  }
+                  break; // Выходим из цикла моделей
+                }
+              }
+              
+              // Пропускаем 404 - модель не поддерживает TTS, пробуем следующую
+              if (response.status === 404) {
+                console.log(`[GEMINI-TTS] ${modelName} doesn't support TTS (404), trying next model...`);
+                continue;
+              }
+              console.warn(`[GEMINI-TTS] ${modelName} returned ${response.status}:`, errorText.slice(0, 500));
+            }
+          } catch (e: any) {
+            // Пропускаем ошибки и пробуем следующую модель
+            if (e?.message?.includes('404') || e?.message?.includes('NOT_FOUND')) {
+              console.log(`[GEMINI-TTS] ${modelName} not found, trying next model...`);
+              continue;
+            }
+            const isTimeout = e?.name === 'TimeoutError' || e?.message?.includes('timeout') || e?.message?.includes('aborted');
+            if (isTimeout) {
+              console.warn(`[GEMINI-TTS] ${modelName} request timed out (text may be too long or proxy slow), trying next model...`);
+            } else {
+              console.warn(`[GEMINI-TTS] ${modelName} error:`, e?.message || String(e));
+            }
+          }
+        }
+      }
+      
+      console.error('[GEMINI-TTS] All models failed - Gemini audio generation not available');
+    } catch (geminiErr) {
+      console.error('[TTS] Gemini audio generation failed:', geminiErr);
+    }
+    
+    // FALLBACK: Если Gemini не сработал (любая ошибка), используем Google TTS с интонацией
+    // Это работает для ВСЕХ запросов: прегенерация, welcome, reply, и обычные TTS запросы
+    console.log('[TTS] Falling back to Google TTS (works for all requests: pregen, welcome, reply, regular)...');
+    const googleAudio = await generateGoogleTTS();
+    if (googleAudio) {
+      console.log('[TTS] ✅ Returning Google TTS fallback audio to client, size:', googleAudio.length, 'bytes');
+      res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/mpeg');
+      res.setHeader('Content-Length', googleAudio.length.toString());
+      // КРИТИЧЕСКИ ВАЖНО: Сохраняем асинхронно ПОСЛЕ отправки ответа, чтобы не блокировать клиента
+      (async () => {
+        try {
+          saveGeneratedAudio(googleAudio, scenarioGameIdForPregen);
+        } catch (e) {
+          console.warn('[TTS] Failed to save audio in background:', e);
+        }
+      })();
+      return res.send(googleAudio);
+    } else {
+      console.error('[TTS] ❌ Google TTS fallback also returned null/undefined!');
+    }
+    
+    return res.status(502).json({ 
+      error: 'tts_failed', 
+      message: 'Не удалось сгенерировать аудио через Gemini и Google TTS. Проверьте настройки API ключей.'
+    });
+  } catch (e) {
+    console.error('[TTS] TTS endpoint error:', e);
+    return res.status(500).json({ error: 'tts_error', details: String(e) });
+  }
+});
+
+// Тестовый эндпоинт для проверки работоспособности Gemini/Imagen API
+app.get('/api/image/test-gemini', async (req, res) => {
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (!geminiKey) {
+      return res.status(400).json({ error: 'GEMINI_API_KEY not found in environment variables' });
+    }
+    
+    const testPrompt = 'A simple test image: a red circle on white background';
+    const testSize = '1024x1024';
+    
+    console.log('[IMG-TEST] Testing Gemini/Imagen API endpoints...');
+    const result = await generateViaGemini(testPrompt, testSize, geminiKey);
+    
+    if (result) {
+      return res.json({ 
+        success: true, 
+        message: 'Gemini/Imagen API работает! Изображение успешно сгенерировано.',
+        imageSize: Math.round(result.length * 0.75),
+        dataUrl: `data:image/png;base64,${result.slice(0, 100)}...` // Показываем только начало для проверки
+      });
+    } else {
+      return res.status(502).json({ 
+        success: false, 
+        error: 'Все эндпоинты Gemini/Imagen вернули ошибку. Проверьте логи сервера для деталей.',
+        hint: 'Убедитесь, что API ключ имеет права на генерацию изображений и что эндпоинты доступны.'
+      });
+    }
+  } catch (e: any) {
+    console.error('[IMG-TEST] Error:', e);
+    return res.status(500).json({ error: 'test_failed', details: e?.message || String(e) });
+  }
+});
+
+app.post('/api/image/generate', async (req, res) => {
+  try {
+    const promptRaw = typeof req.body?.prompt === 'string' ? req.body.prompt : '';
+    const width = Math.max(1, Number(req.body?.width || 1280));
+    const height = Math.max(1, Number(req.body?.height || 720));
+    const provider = typeof req.body?.provider === 'string' ? String(req.body.provider).toLowerCase() : '';
+    if (!promptRaw.trim()) return res.status(400).json({ error: 'prompt_required' });
+
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+    if (!apiKey) {
+      console.warn('[IMG] no OPENAI_API_KEY, skip generation');
+      return res.status(200).json({ dataUrl: '' });
+    }
+
+    const client = createOpenAIClient(apiKey);
+    let size = '1536x1024';
+    if (width === height) size = '1024x1024';
+    else if (width > height) size = '1536x1024';
+    else size = '1024x1536';
+    const guidance = 'Сгенерируй атмосферный реалистичный фон по описанию сцены для приключенческой ролевой игры. Без текста, без надписей, без людей крупным планом, без UI. Киношный свет, глубокая перспектива.';
+    const fullPrompt = `${guidance}\n\nСцена: ${promptRaw}`.slice(0, 1800);
+    console.log('[IMG] request', { size, providerReq: provider || 'auto', promptLen: fullPrompt.length, promptHead: fullPrompt.slice(0, 120) });
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (geminiKey && (provider === 'gemini' || !provider)) {
+      try {
+        console.log('[IMG] gemini try');
+        const gB64 = await generateViaGemini(fullPrompt, size, geminiKey);
+        if (gB64) {
+          console.log('[IMG] gemini success', { bytes: Math.round(gB64.length * 0.75), size });
+          return res.json({ dataUrl: `data:image/png;base64,${gB64}` });
+        }
+        if (provider === 'gemini') {
+          console.warn('[IMG] gemini returned empty');
+          return res.status(200).json({ dataUrl: '' });
+        }
+      } catch (e) {
+        console.error('[IMG] gemini failed:', e);
+        if (provider === 'gemini') return res.status(200).json({ dataUrl: '' });
+      }
+    }
+    if (provider === 'gemini' && !geminiKey) {
+      console.warn('[IMG] gemini key missing');
+      return res.status(200).json({ dataUrl: '' });
+    }
+    try {
+      const img = await client.images.generate({
+        model: 'gpt-image-1',
+        prompt: fullPrompt,
+        size,
+        quality: 'high',
+      } as any);
+      let b64 = img?.data?.[0]?.b64_json || '';
+      const url = img?.data?.[0]?.url || '';
+      if (!b64 && url) {
+        try {
+          const r = await undiciFetch(url);
+          const buf = Buffer.from(await r.arrayBuffer());
+          b64 = buf.toString('base64');
+        } catch {}
+      }
+      if (!b64) return res.status(200).json({ dataUrl: '' });
+      console.log('[IMG] success', { bytes: Math.round(b64.length * 0.75), size });
+      return res.json({ dataUrl: `data:image/png;base64,${b64}` });
+    } catch (e) {
+      console.error('[IMG] failed:', e);
+      const stabKey = process.env.STABILITY_API_KEY || process.env.STABILITY_KEY;
+      if (stabKey) {
+        try {
+          let w = 1024; let h = 1024;
+          if (size === '1536x1024') { w = 1024; h = 704; }
+          else if (size === '1024x1536') { w = 704; h = 1024; }
+          const b64 = await generateViaStability(fullPrompt, w, h, stabKey);
+          if (b64) {
+            console.log('[IMG] stability success', { bytes: Math.round(b64.length * 0.75), w, h });
+            return res.json({ dataUrl: `data:image/png;base64,${b64}` });
+          }
+        } catch (e2) {
+          console.error('[IMG] stability failed:', e2);
+        }
+      }
+      return res.status(200).json({ dataUrl: '' });
+    }
+  } catch (e) {
+    console.error('[IMG] error:', e);
+    return res.status(500).json({ error: 'image_error' });
+  }
+});
+
+async function generateViaStability(prompt: string, width: number, height: number, apiKey: string): Promise<string> {
+  const endpoint = 'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image';
+  const body = {
+    width,
+    height,
+    steps: 30,
+    cfg_scale: 7,
+    samples: 1,
+    text_prompts: [
+      { text: 'high quality, atmospheric, cinematic lighting, detailed environment, no text, no watermark, background only' },
+      { text: prompt },
+    ],
+  } as any;
+  const r = await undiciFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'Accept': 'image/png',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`stability_bad_status_${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  return buf.toString('base64');
+}
+
+async function generateViaGemini(prompt: string, size: string, apiKey: string): Promise<string> {
+  const geminiProxies = parseGeminiProxies();
+  const openaiProxies = parseProxies();
+  const attempts = geminiProxies.length ? geminiProxies : (openaiProxies.length ? openaiProxies : ['__direct__']);
+  const [wStr, hStr] = size.split('x');
+  const w = Number(wStr); const h = Number(hStr);
+
+  // Список эндпоинтов для проверки (в порядке приоритета)
+  // Примечание: Google Imagen через generativelanguage API может быть недоступен через API ключ
+  // Пробуем разные варианты, включая альтернативные подходы
+  const endpoints = [
+    // Вариант 1: Imagen 3.0 через generativelanguage API (если доступен)
+    {
+      name: 'imagen-3.0-generate-001',
+      url: 'https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:generateImages',
+      body: {
+        prompt: { text: prompt },
+        imageGenerationConfig: {
+          numberOfImages: 1,
+          aspectRatio: `${w}:${h}`,
+          imageFormat: 'PNG'
+        }
+      },
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+      extractBase64: (data: any) => {
+        const gi = Array.isArray(data?.generatedImages) ? data.generatedImages[0] : null;
+        return gi?.image?.base64 || gi?.image?.bytesBase64Encoded || gi?.bytesBase64Encoded || gi?.base64 || null;
+      },
+    },
+    // Вариант 2: Старый эндпоинт images:generate (для обратной совместимости)
+    {
+      name: 'images:generate',
+      url: 'https://generativelanguage.googleapis.com/v1beta/images:generate',
+      body: {
+        prompt: { text: prompt },
+        imageGenerationConfig: {
+          numberOfImages: 1,
+          imageFormat: 'PNG'
+        }
+      },
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+      extractBase64: (data: any) => {
+        const gi = Array.isArray(data?.generatedImages) ? data.generatedImages[0] : null;
+        return gi?.image?.base64 || gi?.image?.bytesBase64Encoded || gi?.bytesBase64Encoded || gi?.base64 || null;
+      },
+    },
+    // Вариант 3: Попытка через Gemini API с другим форматом (если поддерживается)
+    {
+      name: 'gemini-pro-vision-generate',
+      url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent?key=${apiKey}`,
+      body: {
+        contents: [{
+          parts: [{
+            text: `Generate an image: ${prompt}. Size: ${size}`
+          }]
+        }]
+      },
+      headers: { 'Content-Type': 'application/json' },
+      extractBase64: (data: any) => {
+        // Если Gemini вернет изображение в ответе
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        for (const part of parts) {
+          if (part.inlineData?.mimeType?.startsWith('image/')) {
+            return part.inlineData.data;
+          }
+        }
+        return null;
+      },
+    },
+  ];
+
+  // Пробуем каждый эндпоинт
+  for (const endpoint of endpoints) {
+    if (!endpoint.url) continue; // Пропускаем если URL не определен
+    
+    for (const p of attempts) {
+      try {
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        console.log(`[IMG] gemini trying endpoint: ${endpoint.name} (proxy: ${p === '__direct__' ? 'direct' : 'proxy'})`);
+        
+        const r = await undiciFetch(endpoint.url, {
+          method: 'POST',
+          dispatcher,
+          headers: endpoint.headers,
+          body: JSON.stringify(endpoint.body),
+        });
+        
+        if (!r.ok) {
+          const t = await r.text().catch(() => '');
+          let errorBody: any = { error: 'Unknown error' };
+          if (t) {
+            try {
+              errorBody = JSON.parse(t);
+            } catch {
+              errorBody = { error: t.slice(0, 200) };
+            }
+          }
+          
+          if (r.status === 404) {
+            console.warn(`[IMG] gemini endpoint ${endpoint.name} returned 404 - эндпоинт не найден, пробуем следующий...`);
+          } else if (r.status === 403) {
+            console.warn(`[IMG] gemini endpoint ${endpoint.name} returned 403 - доступ запрещен, проверьте API ключ и права доступа`);
+          } else if (r.status === 401) {
+            console.warn(`[IMG] gemini endpoint ${endpoint.name} returned 401 - неверный API ключ`);
+          } else {
+            console.warn(`[IMG] gemini endpoint ${endpoint.name} returned ${r.status}:`, errorBody);
+          }
+          continue; // Пробуем следующий прокси или эндпоинт
+        }
+        
+        const data = await r.json() as any;
+        const b64a = endpoint.extractBase64(data);
+        if (b64a) {
+          console.log(`[IMG] gemini success via ${endpoint.name}, image size: ${Math.round(b64a.length * 0.75)} bytes`);
+          return b64a;
+        } else {
+          console.warn(`[IMG] gemini endpoint ${endpoint.name} returned data but no base64 found. Response structure:`, JSON.stringify(data).slice(0, 300));
+        }
+      } catch (e: any) {
+        console.warn(`[IMG] gemini endpoint ${endpoint.name} failed:`, e?.message || String(e));
+      }
+    }
+  }
+  
+  console.warn('[IMG] gemini all endpoints failed');
+  return '';
+}
+
+/**
+ * УДАЛЕНО: Gemini API не предоставляет прямой синтез речи через generateSpeech endpoint
+ * Все endpoint'ы возвращают 404, так как они не существуют
+ * УДАЛЕНО: Теперь используется только Gemini для прямой генерации аудио
+ * Эта функция больше не используется
+ */
+async function generateSpeechViaGemini_DEPRECATED(params: {
+  text: string;
+  apiKey: string;
+  voice?: string;
+  language?: string;
+  emotion?: string;
+  speed?: number;
+}): Promise<Buffer | null> {
+  const { text, apiKey, voice = 'default', language = 'ru-RU', emotion = 'neutral', speed = 1.0 } = params;
+  
+  try {
+    // Используем стандартный формат Gemini API (как в generateContent)
+    // Пробуем разные варианты endpoint'ов на основе официальной документации
+    const proxies = parseGeminiProxies();
+    const attempts = proxies.length ? proxies : ['__direct__'];
+    const maxRetries = 2;
+    
+    // Пробуем реальные модели Gemini, которые могут поддерживать TTS
+    // Согласно документации, TTS - это функция API, а не отдельная модель
+    // Пробуем разные варианты endpoint'ов для реальных моделей
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+    
+    const endpoints = [
+      // Пробуем 1.5 Pro (как запросил пользователь)
+      {
+        name: 'gemini-1.5-pro-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      {
+        name: 'gemini-1.5-flash-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      // Пробуем 2.5 Pro (текущая модель проекта)
+      {
+        name: 'gemini-2.5-pro-generateSpeech',
+        url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateSpeech`,
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      {
+        name: 'gemini-2.5-flash-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      },
+      // Пробуем 2.0 Flash
+      {
+        name: 'gemini-2.0-flash-generateSpeech',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateSpeech',
+        body: {
+          input: { text },
+          voiceConfig: {
+            languageCode: language,
+            name: voice,
+            emotion: emotion,
+            speed: speed
+          },
+          audioConfig: {
+            audioEncoding: 'OGG_OPUS',
+            sampleRateHertz: 24000
+          }
+        }
+      }
+    ];
+    
+    for (const endpoint of endpoints) {
+      for (const p of attempts) {
+        for (let retry = 0; retry < maxRetries; retry++) {
+          try {
+            if (retry > 0) {
+              const delay = Math.min(1000 * Math.pow(2, retry - 1), 5000);
+              console.log(`[GEMINI-TTS] Retry ${retry}/${maxRetries - 1} for ${endpoint.name} after ${delay}ms`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 30000);
+            const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+            
+            console.log(`[GEMINI-TTS] Trying ${endpoint.name} via ${p === '__direct__' ? 'direct' : 'proxy'}`);
+            
+            const response = await undiciFetch(endpoint.url, {
+              method: 'POST',
+              dispatcher,
+              signal: controller.signal,
+              headers: { 
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': apiKey
+              },
+              body: JSON.stringify(endpoint.body),
+            });
+            
+            clearTimeout(timer);
+            
+            if (!response.ok) {
+              const errorText = await response.text().catch(() => '');
+              console.warn(`[GEMINI-TTS] ${endpoint.name} returned ${response.status}:`, errorText.slice(0, 200));
+              
+              // Если 404 или 400 - endpoint не существует, пробуем следующий
+              if (response.status === 404 || response.status === 400) {
+                break; // Переходим к следующему endpoint
+              }
+              
+              // Для других ошибок - retry
+              if (retry < maxRetries - 1) {
+                continue;
+              }
+              break; // Переходим к следующему прокси
+            }
+            
+            // Проверяем тип ответа
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('audio')) {
+              // Прямой аудио ответ
+              const audioBuffer = Buffer.from(await response.arrayBuffer());
+              console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+              return audioBuffer;
+            } else {
+              // JSON ответ от generateSpeech endpoint
+              const json = await response.json().catch(() => null);
+              
+              // Проверяем стандартные поля для generateSpeech
+              if (json?.audioContent) {
+                const audioBuffer = Buffer.from(json.audioContent, 'base64');
+                console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+                return audioBuffer;
+              }
+              if (json?.audio) {
+                const audioBuffer = Buffer.from(json.audio, 'base64');
+                console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+                return audioBuffer;
+              }
+              if (json?.data) {
+                const audioBuffer = Buffer.from(json.data, 'base64');
+                console.log(`[GEMINI-TTS] ✅ Success via ${endpoint.name}, audio size: ${audioBuffer.length} bytes`);
+                return audioBuffer;
+              }
+              
+              console.warn(`[GEMINI-TTS] ${endpoint.name} returned JSON but no audio field found. Response structure:`, JSON.stringify(json).slice(0, 500));
+            }
+          } catch (e: any) {
+            if (e.name === 'AbortError' || e.message?.includes('timeout')) {
+              console.warn(`[GEMINI-TTS] ${endpoint.name} timeout`);
+              if (retry < maxRetries - 1) continue;
+            } else {
+              console.warn(`[GEMINI-TTS] ${endpoint.name} error:`, e?.message || String(e));
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[GEMINI-TTS] Fatal error:', e);
+  }
+  
+  console.log('[GEMINI-TTS] All endpoints failed - no fallback available');
+  return null;
+}
+
+/**
+ * Генерирует текстовый ответ через Google Gemini (1.5 Pro/Flash или 2.0).
+ * Адаптировано под ТЗ: расширенное окно контекста и D&D логика.
+ */
+async function generateViaGeminiText(params: {
+  systemPrompt?: string;
+  userPrompt: string;
+  history?: Array<{ role: 'user' | 'model' | 'assistant'; content: string }>;
+  apiKey: string;
+  modelName?: string;
+}): Promise<string> {
+  const { systemPrompt, userPrompt, history = [], apiKey, modelName = 'gemini-2.5-pro' } = params; // ВСЕГДА используем gemini-2.5-pro
+  
+  const proxies = parseGeminiProxies();
+  const attempts = proxies.length ? proxies : ['__direct__'];
+  // Для импорта нужен больший таймаут, так как обрабатываются большие файлы (до 10 минут)
+  const timeoutMs = Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 600000);
+  const contents = history.map(h => ({
+    role: h.role === 'assistant' || h.role === 'model' ? 'model' : 'user',
+    parts: [{ text: h.content }]
+  }));
+  contents.push({ role: 'user', parts: [{ text: userPrompt }] });
+
+  const body: any = {
+    contents,
+    generationConfig: {
+      temperature: 0.45,
+      maxOutputTokens: 32768,
+    },
+  };
+  if (systemPrompt) {
+    body.systemInstruction = { parts: [{ text: systemPrompt }] };
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+  let lastErr: unknown = null;
+  const maxRetries = 3;
+  const retryableStatuses = [503, 429, 500, 502]; // Перегружен, слишком много запросов, внутренняя ошибка
+  
+  for (const p of attempts) {
+    for (let retry = 0; retry < maxRetries; retry++) {
+      try {
+        if (retry > 0) {
+          const delay = Math.min(1000 * Math.pow(2, retry - 1), 10000); // Экспоненциальная задержка: 1s, 2s, 4s (макс 10s)
+          console.log(`[GEMINI-TEXT] Retry ${retry}/${maxRetries - 1} after ${delay}ms delay`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.max(60000, timeoutMs));
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        const r = await undiciFetch(url, {
+          method: 'POST',
+          dispatcher,
+          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+          body: JSON.stringify(body),
+        });
+        clearTimeout(timer);
+        
+        if (!r.ok) {
+          const t = await r.text().catch(() => '');
+          let errorData: any = {};
+          try {
+            if (t) errorData = JSON.parse(t) || {};
+          } catch {}
+          const status = r.status;
+          
+          console.error('[GEMINI-TEXT] HTTP', status, t.slice(0, 200));
+          
+          // Если это retryable ошибка и есть попытки - повторяем
+          if (retryableStatuses.includes(status) && retry < maxRetries - 1) {
+            lastErr = errorData.error || t || r.statusText;
+            continue; // Продолжаем retry
+          }
+          
+          // Если не retryable или закончились попытки - переходим к следующему прокси
+          lastErr = errorData.error || t || r.statusText;
+          break; // Выходим из retry цикла, переходим к следующему прокси
+        }
+        
+        const data = await r.json() as any;
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+        if (text) return text;
+        lastErr = 'empty_text';
+        break; // Успешно получили ответ, но он пустой - не retry
+      } catch (e) {
+        lastErr = e;
+        console.error('[GEMINI-TEXT] Error:', e);
+        // Если это не последняя попытка и ошибка может быть временной - retry
+        if (retry < maxRetries - 1 && (e instanceof Error && (e.message.includes('aborted') || e.message.includes('timeout')))) {
+          continue; // Retry для таймаутов
+        }
+        break; // Выходим из retry цикла
+      }
+    }
+  }
+  throw lastErr || new Error('gemini_text_failed');
+}
+
+/**
+ * Универсальная функция генерации ответа (Gemini -> OpenAI -> Fallback).
+ * Реализует ТЗ по расширенной памяти для Gemini.
+ */
+async function generateChatCompletion(params: {
+  systemPrompt: string;
+  userPrompt: string;
+  history?: Array<{ from: string; text: string }>;
+}): Promise<{ text: string; provider: string }> {
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
+  
+  // ВСЕГДА используем Gemini 2.5 Pro для генерации текста (кроме случаев, когда явно указан OpenAI)
+  const pregenProvider = process.env.PREGEN_AI_PROVIDER?.toLowerCase();
+  const preferOpenAI = pregenProvider === 'openai' || pregenProvider === 'gpt';
+
+  // Сначала пробуем Gemini 2.5 Pro (если не указан явно OpenAI)
+  if (geminiKey && !preferOpenAI) {
+    try {
+      // Для Gemini используем расширенную историю без обрезки (или с минимальной)
+      const chatHistory = (params.history || []).map(h => ({
+        role: (h.from === 'bot' ? 'model' : 'user') as any,
+        content: h.text
+      }));
+
+      const text = await generateViaGeminiText({
+        apiKey: geminiKey,
+        systemPrompt: params.systemPrompt,
+        userPrompt: params.userPrompt,
+        history: chatHistory,
+        modelName: 'gemini-2.5-pro' // ВСЕГДА используем gemini-2.5-pro
+      });
+      if (text) return { text, provider: 'gemini' };
+    } catch (e: any) {
+      const errorMsg = e?.error?.message || e?.message || String(e);
+      const isOverloaded = errorMsg.includes('overloaded') || errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE');
+      const isQuotaError = errorMsg.includes('quota') || errorMsg.includes('Quota exceeded') || errorMsg.includes('generate_requests_per_model_per_day');
+      console.error('[COMPLETION] Gemini failed:', errorMsg);
+      
+      // Если Gemini перегружен или квота превышена - переключаемся на OpenAI
+      if ((isOverloaded || isQuotaError) && openaiKey) {
+        console.log('[COMPLETION] Gemini overloaded/quota exceeded, switching to OpenAI');
+      } else {
+        if (openaiKey) {
+          console.log('[COMPLETION] Trying OpenAI as fallback');
+        }
+      }
+    }
+  }
+
+  // Если указано использовать OpenAI для прегенерации и есть ключ - используем его
+  if (preferOpenAI && openaiKey) {
+    try {
+      const client = createOpenAIClient(openaiKey);
+      const messages = [
+        { role: 'system', content: params.systemPrompt },
+        ...(params.history || []).slice(-15).map(h => ({
+          role: h.from === 'bot' ? 'assistant' : 'user',
+          content: h.text
+        })),
+        { role: 'user', content: params.userPrompt }
+      ];
+      const r = await client.chat.completions.create({
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        temperature: 0.4,
+        messages: messages as any,
+      });
+      const text = r.choices?.[0]?.message?.content || '';
+      if (text) return { text, provider: 'openai' };
+    } catch (e) {
+      console.error('[COMPLETION] OpenAI failed (preferred for pregen):', e);
+    }
+  }
+
+  // OpenAI используется только как fallback, если Gemini не сработал или явно указан preferOpenAI
+  if (openaiKey && (preferOpenAI || !geminiKey)) {
+    try {
+      const client = createOpenAIClient(openaiKey);
+      // Для OpenAI оставляем обрезку или стандартное поведение
+      const messages = [
+        { role: 'system', content: params.systemPrompt },
+        ...(params.history || []).slice(-15).map(h => ({
+          role: h.from === 'bot' ? 'assistant' : 'user',
+          content: h.text
+        })),
+        { role: 'user', content: params.userPrompt }
+      ];
+      const r = await client.chat.completions.create({
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        temperature: 0.4,
+        messages: messages as any,
+      });
+      const text = r.choices?.[0]?.message?.content || '';
+      if (text) return { text, provider: 'openai' };
+    } catch (e) {
+      console.error('[COMPLETION] OpenAI failed:', e);
+    }
+  }
+
+  return { text: '', provider: 'none' };
+}
+
+
+async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameId: string, context: string, outcomeText: string): Promise<{ text: string; fallback: boolean }> {
+  const game = await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true } }).catch(() => null);
+  const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
+  const baseLines: string[] = [];
+  if (game) {
+    baseLines.push(`Игра: ${game.title}`);
+    if (game.worldRules) baseLines.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
+    if (game.gameplayRules) baseLines.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
+  }
+  if (playable.length) {
+    baseLines.push('Игровые персонажи D&D 5e:\n' + playable.map((p: any) => {
+      const stats = `HP: ${p.hp}/${p.maxHp}, AC: ${p.ac}, STR:${p.str}, DEX:${p.dex}, CON:${p.con}, INT:${p.int}, WIS:${p.wis}, CHA:${p.cha}`;
+      return `- ${p.name} (Ур.${p.level} ${p.class || 'Путешественник'}, ${p.race || 'Человек'}) — ${stats}. ${p.persona ? `Характер: ${p.persona}` : ''}`;
+    }).join('\n'));
+  }
+  const sys = 'Ты — мастер (DM) приключения D&D 5e. Пиши атмосферно и кратко: 2–4 абзаца. ' +
+      'Опирайся на правила 5-й редакции, характеристики персонажей и контекст сцены. ' +
+      'Не добавляй новых объектов, если их нет в сценарии. ' +
+      'Учитывай исход проверки d20: модификаторы, бонусы мастерства и сложность (DC). ' +
+      'Если в сцене есть NPC — отыгрывай их согласно их persona. ' +
+      'В конце каждого ответа дай 2–3 действия (1) ..., 2) ...). ' +
+      'Отвечай только текстом.';
+  const user = [
+    baseLines.length ? ('Контекст игры:\n' + baseLines.join('\n')) : '',
+    context ? `Действие игрока: ${context}` : '',
+    outcomeText ? `Исход проверки: ${outcomeText}` : '',
+    'Продолжи сцену согласно исходу. Опиши обнаруженное/последствия/альтернативы. В конце задай, что герой делает дальше.'
+  ].filter(Boolean).join('\n\n');
+
+  try {
+    const { text } = await generateChatCompletion({
+      systemPrompt: sys,
+      userPrompt: user,
+      history: []
+    });
+    if (text && text.trim()) return { text: text.trim(), fallback: false };
+  } catch (e) {
+    console.error('[NARRATIVE] AI generation failed:', e);
+  }
+
+  // Fallback на захардкоженные ответы
+  const low = outcomeText.toLowerCase();
+  const successText = 'Вы замечаете важную деталь: в стене едва виден шов, холодный поток воздуха указывает направление. За каменной плитой скрывается узкий проход. Что вы сделаете дальше?';
+  const critSuccessText = 'Ваши действия идеальны: скрытый механизм щёлкает, плита мягко отъезжает, открывая проход с еле заметной голубой подсветкой. Внутри слышится дальний шёпот. Куда направитесь?';
+  const partialText = 'Вы находите следы старого механизма, но он заедает. Дверь приоткрывается лишь на ладонь, из щели веет сыростью. Можно попытаться расширить проход или поискать иной способ. Что выберете?';
+  const failText = 'Несмотря на усилия, стена кажется монолитной, а следы уходят в темноту. Где-то рядом скрипит камень — возможно, сработала ловушка, но вы успели отпрянуть. Как поступите?';
+  const critFailText = 'Механизм срабатывает грубо: камни осыпаются, воздух свистит, где-то щёлкают зубцы. Вы едва избегаете травмы. Путь закрывается. Попробуете обойти или искать другой подход?';
+  const pick = low.includes('критический успех') ? critSuccessText
+    : low.includes('успех') ? successText
+    : low.includes('частичный') ? partialText
+    : low.includes('критический провал') ? critFailText
+    : failText;
+  return { text: pick, fallback: true };
+}
+
+async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params: {
+  gameId: string;
+  lobbyId?: string;
+  userId?: string | null;
+  history?: Array<{ from?: string; text?: string }>;
+  cachedGameSession?: any; // ОПТИМИЗАЦИЯ: Передаем кэшированную сессию
+}): Promise<string> {
+  const { gameId, lobbyId, userId, cachedGameSession } = params;
+  let sess: any = cachedGameSession;
+  
+  // Если сессия не передана, получаем её
+  if (!sess) {
+    try {
+      if (lobbyId) {
+        sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+      } else if (userId) {
+        sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId } });
+      }
+    } catch {}
+  }
+  
+  // ОПТИМИЗАЦИЯ: Параллельно получаем location и npcs (npcs не зависит от location)
+  let loc: any = null;
+  let npcs: any[] = [];
+  
+  const [locationResult, npcsResult] = await Promise.all([
+    (async () => {
+      try {
+        if (sess?.currentLocationId) {
+          return await prisma.location.findUnique({ where: { id: sess.currentLocationId } });
+        } else {
+          return await prisma.location.findFirst({ where: { gameId }, orderBy: { order: 'asc' } });
+        }
+      } catch {
+        return null;
+      }
+    })(),
+    prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 50 }).catch(() => [])
+  ]);
+  
+  loc = locationResult;
+  npcs = npcsResult;
+  
+  // ОПТИМИЗАЦИЯ: Параллельно получаем exits и targets (targets зависит от exits, но можем начать после получения targetIds)
+  let exits: any[] = [];
+  let targets: any[] = [];
+  
+  if (loc?.id) {
+    try {
+      exits = await prisma.locationExit.findMany({ where: { locationId: loc.id } });
+      const targetIds = Array.from(new Set((exits || []).map((e) => e.targetLocationId).filter(Boolean))) as string[];
+      if (targetIds.length) {
+        targets = await prisma.location.findMany({ where: { id: { in: targetIds } } });
+      }
+    } catch {}
+  }
+  
+  const targetTitleById = new Map<string, string>();
+  for (const t of targets) targetTitleById.set(t.id, t.title || '');
+  // Фильтрация NPC по упоминанию в mini‑prompt/description
+  const sceneText = String((loc?.rulesPrompt || '') + '\n' + (loc?.description || '')).toLowerCase();
+  const sceneNpcs = npcs.filter((n) => sceneText.includes(String(n?.name || '').toLowerCase()));
+  const npcBlock = sceneNpcs.length ? sceneNpcs.map((n) => `${n.name}: ${(n.persona || n.role || n.origin || '').toString().slice(0, 160)}`).join('\n') : '';
+  const buttons = (exits || []).filter((e) => e.type === 'BUTTON').map((e) => {
+    const label = (e.buttonText || '').trim();
+    return { text: label, target: e.targetLocationId || null, target_title: e.targetLocationId ? (targetTitleById.get(e.targetLocationId) || '') : '' };
+  }).filter((b) => b.text);
+  const triggers = (exits || []).filter((e) => e.type === 'TRIGGER').map((e) => {
+    const label = (e.triggerText || '').trim();
+    return { phrase: label, target: e.targetLocationId || null, target_title: e.targetLocationId ? (targetTitleById.get(e.targetLocationId) || '') : '' };
+  }).filter((t) => t.phrase);
+  const isGameOver = Boolean((exits || []).some((e) => e.isGameOver || e.type === 'GAMEOVER'));
+  const historyLines = (params.history || []).map((m) => {
+    const from = (m?.from === 'bot' ? 'BOT' : (m?.from === 'me' ? 'ME' : (m?.from || 'USER'))).toString();
+    const text = String(m?.text || '').replace(/\s+/g, ' ');
+    return `${from}: ${text}`;
+  }).join('\n');
+  // slug: берём из loc.slug или формируем из title
+  const slug = String((loc?.slug || '') || String(loc?.title || '').toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9\-а-яё]/gi, ''));
+  // Соберём JSON‑контекст сцены
+  const sceneJson = {
+    scene_slug: slug || '',
+    scene_name: loc?.title || '',
+    description: (loc?.rulesPrompt || loc?.description || '').toString(),
+    npc: sceneNpcs.map((n) => ({ name: n.name, persona: n.persona || '' })),
+    buttons,
+    triggers,
+    isGameOver,
+  };
+  const gptContext = [
+    `SCENE_JSON:\n${JSON.stringify(sceneJson, null, 2)}`,
+    historyLines ? `История:\n${historyLines}` : '',
+  ].filter(Boolean).join('\n\n');
+  return gptContext;
+}
+
+function trimToNiceLimit(text: string, limit = 700): string {
+  try {
+    const t = String(text || '');
+    if (t.length <= limit) return t;
+    const slice = t.slice(0, limit);
+    // ищем последнее "завершение мысли"
+    const punct = ['. ', '…', '!', '?', '."', '!"', '?"', '.»', '!"»', '?"»', '.”', '!”', '?”', '»', '\n'];
+    let cut = -1;
+    for (const p of punct) {
+      const i = slice.lastIndexOf(p);
+      if (i > cut) cut = i + (p.trimEnd() === '\n' ? 0 : p.length - 1);
+    }
+    if (cut >= 0 && cut <= limit && cut > Math.floor(limit * 0.6)) {
+      return slice.slice(0, cut + 1).trimEnd();
+    }
+    // иначе — по последнему пробелу
+    const sp = slice.lastIndexOf(' ');
+    if (sp > Math.floor(limit * 0.5)) {
+      return (slice.slice(0, sp).trimEnd() + '…');
+    }
+    // жёсткое усечение с многоточием
+    return slice.trimEnd() + '…';
+  } catch {
+    return String(text || '').slice(0, limit);
+  }
+}
+
+
+function rollSingleDie(sides: number): number {
+  const s = Math.max(2, Math.floor(sides));
+  try {
+    if (typeof (crypto as any).randomInt === 'function') {
+      return (crypto as any).randomInt(1, s + 1);
+    }
+  } catch {  }
+  return Math.floor(Math.random() * s) + 1;
+}
+
+function getDndModifier(score: number): number {
+  return Math.floor((score - 10) / 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СИСТЕМА СОСТОЯНИЙ D&D 5e С РЕАЛЬНОЙ ЛОГИКОЙ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type ConditionEffect = {
+  name: string;
+  duration?: number; // в ходах, undefined = до снятия
+  onTurnStart?: (charState: any, baseChar: any) => { hpChange?: number; statChanges?: Record<string, number>; message?: string };
+  onCheck?: (stat: string, baseValue: number, modifier: number) => { advantage?: boolean; disadvantage?: boolean; blocked?: boolean; modifierChange?: number };
+  onSave?: (stat: string, baseValue: number, modifier: number) => { advantage?: boolean; disadvantage?: boolean; modifierChange?: number };
+  onAttack?: (baseModifier: number) => { advantage?: boolean; disadvantage?: boolean; modifierChange?: number; blocked?: boolean };
+  blocksActions?: boolean;
+  blocksMovement?: boolean;
+  blocksVision?: boolean;
+};
+
+const CONDITION_EFFECTS: Record<string, ConditionEffect> = {
+  'отравлен': {
+    name: 'Отравлен',
+    duration: undefined, // до снятия
+    onTurnStart: (charState, baseChar) => {
+      // Отравление: урон 1d4 каждый ход (упрощенно - 2 HP)
+      const damage = 2;
+      return {
+        hpChange: -damage,
+        message: `Отравление причиняет ${damage} урона.`
+      };
+    },
+    onCheck: (stat, baseValue, modifier) => {
+      // Отравление: помеха на проверки характеристик
+      if (stat === 'con' || stat === 'dex') {
+        return { disadvantage: true };
+      }
+      return {};
+    },
+    onSave: (stat, baseValue, modifier) => {
+      // Отравление: помеха на спасброски
+      return { disadvantage: true };
+    }
+  },
+  'парализован': {
+    name: 'Парализован',
+    duration: undefined,
+    blocksActions: true,
+    blocksMovement: true,
+    onCheck: () => ({ blocked: true }),
+    onAttack: () => ({ blocked: true }),
+    onSave: (stat) => {
+      // Паралич: автоматический провал спасбросков STR и DEX
+      if (stat === 'str' || stat === 'dex') {
+        return { blocked: true };
+      }
+      return {};
+    }
+  },
+  'оглушен': {
+    name: 'Оглушен',
+    duration: undefined,
+    blocksActions: true,
+    blocksMovement: true,
+    onCheck: () => ({ disadvantage: true, blocked: true }),
+    onAttack: () => ({ disadvantage: true, blocked: true }),
+    onSave: () => ({ disadvantage: true })
+  },
+  'ослеплен': {
+    name: 'Ослеплен',
+    duration: undefined,
+    blocksVision: true,
+    onCheck: (stat) => {
+      // Ослепление: помеха на проверки, требующие зрения
+      if (stat === 'wis' || stat === 'int') {
+        return { disadvantage: true };
+      }
+      return {};
+    },
+    onAttack: () => ({ disadvantage: true })
+  },
+  'очарован': {
+    name: 'Очарован',
+    duration: undefined,
+    blocksActions: true, // не может атаковать очаровавшего
+    onCheck: (stat) => {
+      if (stat === 'cha') {
+        return { disadvantage: true };
+      }
+      return {};
+    }
+  },
+  'испуган': {
+    name: 'Испуган',
+    duration: undefined,
+    blocksMovement: true, // не может добровольно приближаться к источнику страха
+    onCheck: (stat) => {
+      if (stat === 'wis' || stat === 'cha') {
+        return { disadvantage: true };
+      }
+      return {};
+    },
+    onAttack: () => ({ disadvantage: true })
+  },
+  'невидим': {
+    name: 'Невидим',
+    duration: undefined,
+    onAttack: () => ({ advantage: true }),
+    onCheck: () => ({ advantage: true }) // преимущество на скрытность
+  },
+  'невидима': {
+    name: 'Невидима',
+    duration: undefined,
+    onAttack: () => ({ advantage: true }),
+    onCheck: () => ({ advantage: true })
+  },
+  'истощение': {
+    name: 'Истощение',
+    duration: undefined,
+    onTurnStart: (charState, baseChar) => {
+      // Истощение: -1 к проверкам характеристик за каждый уровень
+      const exhaustionLevel = charState.exhaustionLevel || 1;
+      return {
+        statChanges: {
+          str: -exhaustionLevel,
+          dex: -exhaustionLevel,
+          con: -exhaustionLevel,
+          int: -exhaustionLevel,
+          wis: -exhaustionLevel,
+          cha: -exhaustionLevel
+        }
+      };
+    },
+    onCheck: () => ({ modifierChange: -1 }),
+    onSave: () => ({ modifierChange: -1 })
+  },
+  'усталость': {
+    name: 'Усталость',
+    duration: 1, // 1 ход
+    onCheck: () => ({ disadvantage: true }),
+    onAttack: () => ({ disadvantage: true })
+  },
+  'болезнь': {
+    name: 'Болезнь',
+    duration: undefined,
+    onTurnStart: (charState, baseChar) => {
+      // Болезнь: урон 1 HP каждый ход
+      return {
+        hpChange: -1,
+        message: 'Болезнь причиняет урон.'
+      };
+    },
+    onCheck: () => ({ disadvantage: true }),
+    onSave: () => ({ disadvantage: true })
+  }
+};
+
+/**
+ * Применяет эффекты состояний к персонажу в начале хода
+ */
+function applyConditionEffects(charState: any, baseChar: any): { hpChange: number; statChanges: Record<string, number>; messages: string[] } {
+  const conditions = charState.conditions || [];
+  let totalHpChange = 0;
+  const statChanges: Record<string, number> = {};
+  const messages: string[] = [];
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.onTurnStart) {
+      const result = effect.onTurnStart(charState, baseChar);
+      if (result.hpChange) {
+        totalHpChange += result.hpChange;
+      }
+      if (result.statChanges) {
+        for (const [stat, change] of Object.entries(result.statChanges)) {
+          statChanges[stat] = (statChanges[stat] || 0) + change;
+        }
+      }
+      if (result.message) {
+        messages.push(result.message);
+      }
+    }
+  }
+  
+  return { hpChange: totalHpChange, statChanges, messages };
+}
+
+/**
+ * Получает модификаторы для проверки характеристики с учетом состояний
+ */
+function getCheckModifiersWithConditions(charState: any, stat: string, baseValue: number, baseModifier: number): { 
+  modifier: number; 
+  advantage: boolean; 
+  disadvantage: boolean; 
+  blocked: boolean 
+} {
+  const conditions = charState.conditions || [];
+  let modifier = baseModifier;
+  let advantage = false;
+  let disadvantage = false;
+  let blocked = false;
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.onCheck) {
+      const result = effect.onCheck(stat, baseValue, modifier);
+      if (result.blocked) blocked = true;
+      if (result.advantage) advantage = true;
+      if (result.disadvantage) disadvantage = true;
+      if (result.modifierChange) modifier += result.modifierChange;
+    }
+  }
+  
+  return { modifier, advantage, disadvantage, blocked };
+}
+
+/**
+ * Получает модификаторы для спасброска с учетом состояний
+ */
+function getSaveModifiersWithConditions(charState: any, stat: string, baseValue: number, baseModifier: number): { 
+  modifier: number; 
+  advantage: boolean; 
+  disadvantage: boolean; 
+  blocked: boolean 
+} {
+  const conditions = charState.conditions || [];
+  let modifier = baseModifier;
+  let advantage = false;
+  let disadvantage = false;
+  let blocked = false;
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.onSave) {
+      const result = effect.onSave(stat, baseValue, modifier);
+      if (result.blocked) blocked = true;
+      if (result.advantage) advantage = true;
+      if (result.disadvantage) disadvantage = true;
+      if (result.modifierChange) modifier += result.modifierChange;
+    }
+  }
+  
+  return { modifier, advantage, disadvantage, blocked };
+}
+
+/**
+ * Проверяет, может ли персонаж выполнить действие с учетом состояний
+ */
+function canPerformAction(charState: any): { can: boolean; reason?: string } {
+  const conditions = charState.conditions || [];
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.blocksActions) {
+      return { can: false, reason: `Персонаж ${effect.name.toLowerCase()} и не может действовать.` };
+    }
+  }
+  
+  return { can: true };
+}
+
+/**
+ * Обновляет длительность состояний и удаляет истекшие
+ */
+function updateConditionDurations(charState: any): { removed: string[] } {
+  const conditions = charState.conditions || [];
+  const removed: string[] = [];
+  const updated: string[] = [];
+  
+  for (const condition of conditions) {
+    const effect = CONDITION_EFFECTS[condition.toLowerCase()];
+    if (effect && effect.duration !== undefined) {
+      // Уменьшаем длительность
+      const conditionData = charState.conditionData || {};
+      const conditionKey = condition.toLowerCase();
+      const currentDuration = conditionData[conditionKey]?.duration ?? effect.duration;
+      
+      if (currentDuration <= 1) {
+        removed.push(condition);
+      } else {
+        updated.push(condition);
+        if (!conditionData[conditionKey]) conditionData[conditionKey] = {};
+        conditionData[conditionKey].duration = currentDuration - 1;
+        charState.conditionData = conditionData;
+      }
+    } else {
+      updated.push(condition);
+    }
+  }
+  
+  charState.conditions = updated;
+  return { removed };
+}
+function rollMultiple(count: number, sides: number): number[] {
+  const rolls: number[] = [];
+  const c = Math.max(1, Math.floor(count));
+  const s = Math.max(2, Math.floor(sides));
+  for (let i = 0; i < c; i++) rolls.push(rollSingleDie(s));
+  return rolls;
+}
+function parseDiceExpression(exprRaw: string): { count: number; sides: number; mod: number; adv: boolean; dis: boolean } | null {
+  const expr = String(exprRaw || '').toLowerCase().replace(/\s+/g, '');
+  if (!expr) return null;
+
+  const m = expr.match(/^(\d*)d(\d+|%)((?:\+|-)\d+)?(adv|dis)?$/);
+  if (!m) return null;
+  const count = m[1] ? Math.max(1, parseInt(m[1], 10)) : 1;
+  const sides = m[2] === '%' ? 100 : Math.max(2, parseInt(m[2], 10));
+  const mod = m[3] ? parseInt(m[3], 10) : 0;
+  const adv = m[4] === 'adv';
+  const dis = m[4] === 'dis';
+  return { count, sides, mod, adv, dis };
+}
+function rollDiceDnd(params: { expr?: string; count?: number; sides?: number; mod?: number; adv?: boolean; dis?: boolean }) {
+  const byExpr = params.expr ? parseDiceExpression(params.expr) : null;
+  const count = byExpr ? byExpr.count : Math.max(1, Math.floor(Number(params.count || 1)));
+  const sides = byExpr ? byExpr.sides : Math.max(2, Math.floor(Number(params.sides || 20)));
+  const mod = byExpr ? byExpr.mod : Math.floor(Number(params.mod || 0));
+  const adv = byExpr ? byExpr.adv : Boolean(params.adv);
+  const dis = byExpr ? byExpr.dis : Boolean(params.dis);
+
+  if ((adv || dis) && sides === 20) {
+    const a = rollSingleDie(20);
+    const b = rollSingleDie(20);
+    const picked = adv ? Math.max(a, b) : Math.min(a, b);
+    const total = picked + mod;
+    return {
+      notation: `${adv ? 'adv' : 'dis'} d20${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`,
+      sides: 20,
+      adv,
+      dis,
+      rolls: [a, b],
+      picked,
+      natural: picked,
+      mod,
+      total,
+    };
+  }
+  const rolls = rollMultiple(count, sides);
+  const sum = rolls.reduce((acc, n) => acc + n, 0);
+  const total = sum + mod;
+  const notation = `${count}d${sides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+  const natural = sides === 20 ? (rolls[0] || 0) : undefined;
+  return { notation, sides, adv: false, dis: false, rolls, sum, mod, total, natural };
+}
+
+function normalizeRollKind(raw: string): 'attack' | 'save' | 'damage' | 'check' {
+  const low = String(raw || '').toLowerCase();
+  if (/(attack|atk|hit|атака|атак|удар|strike)/.test(low)) return 'attack';
+  if (/(save|saving|сейв|спас|спасбросок|saving throw|спасброс)/.test(low)) return 'save';
+  if (/(damage|dmg|урон)/.test(low)) return 'damage';
+  return 'check';
+}
+
+function getNaturalD20(r: any): number | null {
+  if (!r || r.sides !== 20) return null;
+  if (typeof r.natural === 'number') return r.natural;
+  if ('picked' in r) return r.picked;
+  const first = Array.isArray(r.rolls) ? r.rolls[0] : null;
+  return typeof first === 'number' ? first : null;
+}
+
+function evaluateDndOutcome(params: { roll: any; dc?: number; kind?: string }): { outcome: string; outcomeCode: '' | 'crit_success' | 'crit_fail' | 'success' | 'partial' | 'fail' } {
+  const kind = normalizeRollKind(params.kind || '');
+  const dc = typeof params.dc === 'number' ? params.dc : undefined;
+  if (kind === 'damage') return { outcome: '', outcomeCode: '' };
+  if (typeof dc !== 'number' && params.roll?.sides !== 20) return { outcome: '', outcomeCode: '' };
+  const nat = getNaturalD20(params.roll);
+  if (nat === 20) return { outcome: 'Критический успех', outcomeCode: 'crit_success' };
+  if (nat === 1) return { outcome: 'Критический провал', outcomeCode: 'crit_fail' };
+  if (typeof dc === 'number') {
+    const total = Number(params.roll?.total || 0);
+    if (total >= dc) return { outcome: 'Успех', outcomeCode: 'success' };
+    if (total >= dc - 2) return { outcome: 'Частичный успех / с риском', outcomeCode: 'partial' };
+    return { outcome: 'Провал', outcomeCode: 'fail' };
+  }
+  return { outcome: '', outcomeCode: '' };
+}
+
+function formatKindLabel(kind: string): string {
+  const k = normalizeRollKind(kind);
+  if (k === 'attack') return 'Атака';
+  if (k === 'save') return 'Спасбросок';
+  if (k === 'damage') return 'Урон';
+  return 'Проверка';
+}
+app.post('/api/dice/roll', async (req, res) => {
+  try {
+    const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
+    const count = req.body?.count;
+    const sides = req.body?.sides;
+    const mod = req.body?.mod;
+    const adv = req.body?.adv === true;
+    const dis = req.body?.dis === true;
+    const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    const times = Math.max(1, Math.min(100, Number(req.body?.times || 1)));
+    const results: any[] = [];
+    for (let i = 0; i < times; i++) {
+      if (manual.length) {
+        const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
+        const nSides = Number(sides || (expr.includes('d') ? Number(expr.split('d')[1]) || 20 : 20));
+        const rolls = manual.slice(0, nCount);
+        const sum = rolls.reduce((a, b) => a + b, 0);
+        const total = sum + (Number(mod) || 0);
+        const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+        results.push({ notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total });
+      } else {
+        results.push(rollDiceDnd({ expr, count, sides, mod, adv, dis }));
+      }
+    }
+    return res.json({ ok: true, results });
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_error' });
+  }
+});
+
+
+app.post('/api/lobbies/:id/dice', async (req, res) => {
+  try {
+    const lobbyId = String(req.params.id);
+    const prisma = getPrisma();
+    const lob = await prisma.gameLobby.findUnique({ where: { id: lobbyId } });
+    if (!lob) return res.status(404).json({ error: 'lobby_not_found' });
+    const gameId = lob.gameId || String(req.body?.gameId || '');
+    if (!gameId) return res.status(400).json({ error: 'game_required' });
+    const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
+    const count = req.body?.count;
+    const sides = req.body?.sides;
+    const mod = req.body?.mod;
+    const adv = req.body?.adv === true;
+    const dis = req.body?.dis === true;
+    const dc = Number.isFinite(req.body?.dc) ? Number(req.body.dc) : undefined;
+    const context = typeof req.body?.context === 'string' ? String(req.body.context).slice(0, 200) : '';
+    const kind = typeof req.body?.kind === 'string' ? String(req.body.kind) : '';
+    const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    const r = (manual.length
+      ? (() => {
+          const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
+          const nSides = Number(sides || (expr.includes('d') ? Number(expr.split('d')[1]) || 20 : 20));
+          const rolls = manual.slice(0, nCount);
+          const sum = rolls.reduce((a, b) => a + b, 0);
+          const total = sum + (Number(mod) || 0);
+          const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+          const natural = nSides === 20 ? (rolls[0] || 0) : undefined;
+          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total, natural };
+        })()
+      : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
+    const kindNorm = normalizeRollKind(kind);
+    const kindLabel = formatKindLabel(kind);
+    const dcLabel = kindNorm === 'attack' ? 'AC' : 'DC';
+    const { outcome } = evaluateDndOutcome({ roll: r, dc, kind });
+    const fmt = (() => {
+      const headLines = [
+        kindLabel ? `Тип: ${kindLabel}` : '',
+        context ? `Контекст: ${context}` : '',
+      ].filter(Boolean);
+      const head = headLines.length ? `${headLines.join('\n')}\n` : '';
+      const dcStr = typeof dc === 'number' ? ` · ${dcLabel}=${dc}` : '';
+      if ('picked' in r) {
+        return `🎲 Бросок\n${head}${r.notation}${dcStr} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+      }
+      return `🎲 Бросок\n${head}${r.notation}${dcStr} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+    })();
+
+    const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+    const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+    history.push({ from: 'bot', text: fmt });
+
+    const gptContext = await buildGptSceneContext(prisma, { gameId, lobbyId, history });
+    const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt);
+    history.push({ from: 'bot', text: narr.text });
+    await prisma.chatSession.upsert({
+      where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
+      update: { history: history as any },
+      create: { userId: 'lobby:' + lobbyId, gameId, history: history as any },
+    });
+    wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
+    return res.json({ ok: true, messages: [fmt, narr.text] });
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_lobby_error' });
+  }
+});
+
+
+app.post('/api/chat/dice', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const gameId = String(req.body?.gameId || '');
+    if (!gameId) return res.status(400).json({ error: 'game_required' });
+    const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+    if (!uid) return res.status(400).json({ error: 'user_required' });
+    const expr = typeof req.body?.expr === 'string' ? req.body.expr : '';
+    const count = req.body?.count;
+    const sides = req.body?.sides;
+    let mod = req.body?.mod;
+    let adv = req.body?.adv === true;
+    let dis = req.body?.dis === true;
+    const dc = Number.isFinite(req.body?.dc) ? Number(req.body.dc) : undefined;
+    const context = typeof req.body?.context === 'string' ? String(req.body.context).slice(0, 200) : '';
+    const kind = typeof req.body?.kind === 'string' ? String(req.body.kind) : '';
+    const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
+    const stat = typeof req.body?.stat === 'string' ? req.body.stat.toLowerCase() : undefined;
+    const manual = Array.isArray(req.body?.manualResults) ? (req.body.manualResults as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)) : [];
+    
+    // Определяем тип броска ДО применения эффектов
+    const kindNorm = normalizeRollKind(kind);
+    
+    // Применяем эффекты состояний к броску
+    if (characterId && gameId && stat) {
+      try {
+        let sess: any = null;
+        const uidForSession = await resolveUserIdFromQueryOrBody(req, prisma);
+        if (uidForSession) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uidForSession } });
+        
+        if (sess?.state) {
+          const state = sess.state as any;
+          const charState = state.characters?.[characterId];
+          if (charState) {
+            const baseChar = await prisma.character.findUnique({ where: { id: characterId } });
+            if (baseChar) {
+              const baseStat = (baseChar as any)[stat] || 10;
+              const baseMod = getDndModifier(baseStat);
+              const statMods = charState.statModifiers || {};
+              const statMod = statMods[stat] || 0;
+              const finalMod = baseMod + statMod;
+              
+              // Применяем эффекты состояний
+              if (kindNorm === 'save') {
+                const saveMods = getSaveModifiersWithConditions(charState, stat, baseStat, finalMod);
+                if (saveMods.blocked) {
+                  return res.json({ 
+                    ok: true, 
+                    blocked: true, 
+                    message: `Персонаж не может выполнить спасбросок из-за состояния.`,
+                    roll: { notation: 'N/A', total: 0, natural: 1 }
+                  });
+                }
+                if (saveMods.advantage) adv = true;
+                if (saveMods.disadvantage) dis = true;
+                mod = (mod || 0) + (saveMods.modifier - finalMod);
+              } else if (kindNorm === 'check' || kindNorm === 'attack') {
+                const checkMods = getCheckModifiersWithConditions(charState, stat, baseStat, finalMod);
+                if (checkMods.blocked) {
+                  return res.json({ 
+                    ok: true, 
+                    blocked: true, 
+                    message: `Персонаж не может выполнить действие из-за состояния.`,
+                    roll: { notation: 'N/A', total: 0, natural: 1 }
+                  });
+                }
+                if (checkMods.advantage) adv = true;
+                if (checkMods.disadvantage) dis = true;
+                mod = (mod || 0) + (checkMods.modifier - finalMod);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[DICE] Failed to apply condition effects:', e);
+      }
+    }
+    
+    const r = (manual.length
+      ? (() => {
+          const nCount = Number(count || (expr ? (Number(expr.split('d')[0]) || 1) : manual.length));
+          const nSides = Number(sides || (expr.includes('d') ? Number(expr.split('d')[1]) || 20 : 20));
+          const rolls = manual.slice(0, nCount);
+          const sum = rolls.reduce((a, b) => a + b, 0);
+          const total = sum + (Number(mod) || 0);
+          const notation = `${nCount}d${nSides}${mod ? (mod > 0 ? `+${mod}` : `${mod}`) : ''}`;
+          const natural = nSides === 20 ? (rolls[0] || 0) : undefined;
+          return { notation, sides: nSides, adv: false, dis: false, rolls, sum, mod: Number(mod) || 0, total, natural };
+        })()
+      : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
+    const kindLabel = formatKindLabel(kind);
+    const dcLabel = kindNorm === 'attack' ? 'AC' : 'DC';
+    const { outcome, outcomeCode } = evaluateDndOutcome({ roll: r, dc, kind });
+    const fmt = (() => {
+      const headLines = [
+        kindLabel ? `Тип: ${kindLabel}` : '',
+        context ? `Контекст: ${context}` : '',
+      ].filter(Boolean);
+      const head = headLines.length ? `${headLines.join('\n')}\n` : '';
+      const dcStr = typeof dc === 'number' ? ` · ${dcLabel}=${dc}` : '';
+      if ('picked' in r) {
+        return `🎲 Бросок\n${head}${r.notation}${dcStr} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+      }
+      return `🎲 Бросок\n${head}${r.notation}${dcStr} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}${outcome ? ` · Итог: ${outcome}` : ''}`;
+    })();
+    const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
+    const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+    
+    // КРИТИЧЕСКИ ВАЖНО: Определяем depth и parentHash для прегенерации
+    // Исключаем сообщения об ошибке из подсчета depth
+    const botMessages = history.filter(m => {
+      if (m.from !== 'bot') return false;
+      const text = m.text || '';
+      if (text.trim() === 'Не распознали ваш ответ, выберите вариант корректно!') return false;
+      if (text.trim().startsWith('Техническая ошибка')) return false;
+      return true;
+    });
+    const depthForPregen = botMessages.length;
+    let parentHashForPregen: string | undefined = undefined;
+    if (botMessages.length > 0) {
+      const lastBotMessage = botMessages[botMessages.length - 1];
+      if (lastBotMessage && lastBotMessage.text) {
+        parentHashForPregen = createAudioHash(lastBotMessage.text, undefined, undefined, 'narrator', depthForPregen - 1);
+        console.log('[DICE] ✅ Created parentHash from last bot message (game context), depth:', depthForPregen - 1, 'hash:', parentHashForPregen?.slice(0, 8), 'message preview:', lastBotMessage.text.slice(0, 100));
+      }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Используем outcomeCode + контекст броска как ключ для прегенерации
+    // outcomeCode может быть: 'crit_success', 'crit_fail', 'success', 'partial', 'fail' или ''
+    // Включаем контекст броска (context, kind, stat, dc) в ключ, чтобы разные броски с одинаковым outcome имели разные ответы
+    const contextParts: string[] = [];
+    if (context) contextParts.push(`ctx_${context.slice(0, 50).replace(/\s+/g, '_')}`);
+    if (kind) contextParts.push(`kind_${kind}`);
+    if (stat) contextParts.push(`stat_${stat}`);
+    if (dc !== undefined) contextParts.push(`dc_${dc}`);
+    const contextKey = contextParts.length > 0 ? `_${contextParts.join('_')}` : '';
+    const diceKey = outcomeCode ? `dice_${outcomeCode}${contextKey}` : `dice_no_outcome${contextKey}`;
+    
+    // Получаем scenarioGameId и locationId для прегенерации
+    let scenarioGameIdForPregen: string | undefined = gameId;
+    let locationIdForPregen: string | undefined = undefined;
+    try {
+      const gameSess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+      if (gameSess) {
+        scenarioGameIdForPregen = gameSess.scenarioGameId;
+        locationIdForPregen = gameSess.currentLocationId || undefined;
+      }
+    } catch (e) {
+      console.warn('[DICE] Failed to get session for pregen:', e);
+    }
+    
+    // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
+    let narr: { text: string; fallback: boolean } | null = null;
+    if (scenarioGameIdForPregen && hasPregenMaterials(scenarioGameIdForPregen)) {
+      // Ищем по outcome (diceKey), depth, parentHash
+      // КРИТИЧЕСКИ ВАЖНО: parentHash учитывает контекст игры (последнее сообщение бота перед броском)
+      const searchText = diceKey; // Используем outcome как ключ
+      console.log('[DICE] Searching for pre-generated content:', {
+        diceKey,
+        depth: depthForPregen,
+        parentHash: parentHashForPregen?.slice(0, 8),
+        locationId: locationIdForPregen
+      });
+      const foundText = findPregenText(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
+      if (foundText) {
+        narr = { text: foundText, fallback: false };
+        console.log('[DICE] ✅ Found pre-generated text for outcome:', outcomeCode || outcome);
+      }
+    }
+    
+    // Если прегенерированного текста нет - генерируем через AI
+    if (!narr) {
+    history.push({ from: 'bot', text: fmt });
+    const gptContext = await buildGptSceneContext(prisma, { gameId, userId: uid, history });
+      narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt);
+      console.log('[DICE] ⚠️ Generated NEW text (pre-generated not found) for outcome:', outcomeCode || outcome);
+    }
+    
+    history.push({ from: 'bot', text: narr.text });
+    await prisma.chatSession.upsert({
+      where: { userId_gameId: { userId: uid, gameId } },
+      update: { history: history as any },
+      create: { userId: uid, gameId, history: history as any },
+    });
+    
+    // КРИТИЧЕСКИ ВАЖНО: Генерируем TTS для текста после броска кубиков
+    let audioData: { buffer: Buffer; contentType: string } | null = null;
+    if (narr.text) {
+      try {
+        // Сначала ищем прегенерированное аудио
+        if (scenarioGameIdForPregen && hasPregenMaterials(scenarioGameIdForPregen)) {
+          const searchText = diceKey; // Используем outcome как ключ
+          const pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
+          if (pregenPath) {
+            try {
+              const audioBuffer = fs.readFileSync(pregenPath);
+              const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+              if (audioBuffer.byteLength >= MIN_AUDIO_SIZE) {
+                audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                console.log('[DICE] ✅ Using pre-generated audio for outcome:', outcomeCode || outcome, 'size:', audioBuffer.byteLength, 'bytes');
+              } else {
+                console.warn('[DICE] ⚠️ Pre-generated audio too small:', audioBuffer.byteLength, 'bytes, regenerating...');
+                try {
+                  fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch (e) {
+                  console.warn('[DICE] Failed to delete invalid audio:', e);
+                }
+              }
+            } catch (e) {
+              console.warn('[DICE] Failed to read pre-generated audio:', e);
+            }
+          }
+        }
+        
+        // Если прегенерированного аудио нет - генерируем новое
+        if (!audioData) {
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const ttsUrl = `${apiBase}/api/tts`;
+          const ttsResponse = await undiciFetch(ttsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: narr.text,
+              gameId,
+              locationId: locationIdForPregen,
+              format: 'wav',
+              isNarrator: true,
+              depth: depthForPregen,
+              choiceIndex: undefined,
+              parentHash: parentHashForPregen
+            }),
+            signal: AbortSignal.timeout(60000)
+          });
+        
+        if (ttsResponse.ok) {
+          const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
+          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+          const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+          if (audioBuffer.byteLength >= MIN_AUDIO_SIZE) {
+            audioData = { buffer: audioBuffer, contentType };
+            console.log('[DICE] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+            
+            // КРИТИЧЕСКИ ВАЖНО: Сохраняем аудио с правильным ключом (diceKey) для прегенерации
+            if (scenarioGameIdForPregen && narr.text) {
+              try {
+                // Используем diceKey для создания хеша, чтобы успех и неудача сохранялись отдельно
+                const hashWithoutLoc = createAudioHash(diceKey, undefined, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
+                const subDir = locationIdForPregen || 'general';
+                const audioPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.wav`);
+                const audioDir = path.dirname(audioPath);
+                try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+                fs.writeFileSync(audioPath, audioBuffer);
+                
+                // Сохраняем также текст
+                const textPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.txt`);
+                try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+                fs.writeFileSync(textPath, narr.text, 'utf-8');
+                
+                console.log('[DICE] 💾 Saved generated audio and text for outcome:', outcomeCode || outcome, 'hash:', hashWithoutLoc);
+              } catch (e) {
+                console.warn('[DICE] Failed to save generated audio:', e);
+              }
+            }
+          } else {
+            console.warn('[DICE] ⚠️ Generated audio too small:', audioBuffer.byteLength, 'bytes');
+          }
+          } else {
+            console.warn('[DICE] TTS generation failed:', ttsResponse.status);
+          }
+        }
+      } catch (ttsErr) {
+        console.warn('[DICE] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
+      }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
+    const response: any = { ok: true, messages: [fmt, narr.text] };
+    if (audioData) {
+      response.audio = {
+        data: audioData.buffer.toString('base64'),
+        contentType: audioData.contentType || 'audio/wav',
+        format: 'base64'
+      };
+      console.log('[DICE] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+    } else {
+      console.warn('[DICE] ⚠️ No audio generated - response will be sent without audio');
+    }
+    return res.json(response);
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_chat_error' });
+  }
+});
