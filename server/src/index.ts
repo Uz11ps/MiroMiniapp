@@ -4619,6 +4619,47 @@ app.post('/api/chat/welcome', async (req, res) => {
               const audioBuffer = fs.readFileSync(pregenPath);
               audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
               console.log(`[WELCOME] ✅ Pre-generated audio loaded (SOLO), size: ${audioBuffer.byteLength} bytes`);
+              
+              // КРИТИЧЕСКИ ВАЖНО: Ищем и загружаем соответствующий текст
+              const textPath = pregenPath.replace(/\.wav$/, '.txt');
+              if (fs.existsSync(textPath)) {
+                try {
+                  const pregenText = fs.readFileSync(textPath, 'utf-8');
+                  if (pregenText && pregenText.trim()) {
+                    text = pregenText.trim();
+                    console.log('[WELCOME] ✅ Pre-generated text loaded (SOLO) from:', textPath);
+                  } else {
+                    console.warn('[WELCOME] ⚠️ Pre-generated text file is empty (SOLO), deleting incomplete files');
+                    try {
+                      fs.unlinkSync(pregenPath);
+                      fs.unlinkSync(textPath);
+                      audioData = null;
+                      pregenPath = null;
+                    } catch (delErr) {
+                      console.warn('[WELCOME] Failed to delete incomplete files:', delErr);
+                    }
+                  }
+                } catch (textErr) {
+                  console.warn('[WELCOME] ⚠️ Failed to read pre-generated text (SOLO), deleting incomplete files:', textErr);
+                  try {
+                    fs.unlinkSync(pregenPath);
+                    fs.unlinkSync(textPath);
+                    audioData = null;
+                    pregenPath = null;
+                  } catch (delErr) {
+                    console.warn('[WELCOME] Failed to delete incomplete files:', delErr);
+                  }
+                }
+              } else {
+                console.warn('[WELCOME] ⚠️ Pre-generated text file not found (SOLO), deleting incomplete audio:', textPath);
+                try {
+                  fs.unlinkSync(pregenPath);
+                  audioData = null;
+                  pregenPath = null;
+                } catch (delErr) {
+                  console.warn('[WELCOME] Failed to delete incomplete audio:', delErr);
+                }
+              }
             } catch (e) {
               console.warn('[WELCOME] Failed to read pre-generated audio (SOLO):', e);
             }
