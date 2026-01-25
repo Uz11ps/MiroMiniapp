@@ -5564,10 +5564,12 @@ app.post('/api/chat/reply', async (req, res) => {
           if (gameId) {
             try {
               const sess = await getGameSession();
+              console.log(`[REPLY] 🔍 Checking exit selection: gameId=${gameId}, sess=${!!sess}, currentLocationId=${sess?.currentLocationId}`);
               if (sess?.currentLocationId) {
                 const curLocId = sess.currentLocationId;
                 const exits = await prisma.locationExit.findMany({ where: { locationId: curLocId } });
                 const btns = exits.filter((e: any) => e.type === 'BUTTON');
+                console.log(`[REPLY] 🔍 Found ${btns.length} buttons for location ${curLocId}, choiceIndexForPregen=${choiceIndexForPregen}`);
                 if (btns.length > 0 && choiceIndexForPregen >= 0 && choiceIndexForPregen < btns.length) {
                   const chosenExit = btns[choiceIndexForPregen];
                   console.log(`[REPLY] ✅ Chosen exit by choiceIndex ${choiceIndexForPregen}:`, { 
