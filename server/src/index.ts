@@ -4563,8 +4563,23 @@ app.post('/api/chat/welcome', async (req, res) => {
                     // Используем предгенерированное аудио
                     console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
                     const audioBuffer = fs.readFileSync(pregenPath);
-                    audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-                    console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+                    const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+                    if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+                      console.warn(`[WELCOME] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
+                      // Удаляем невалидные файлы
+                      try {
+                        fs.unlinkSync(pregenPath);
+                        const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                        if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                      } catch (e) {
+                        console.warn('[WELCOME] Failed to delete invalid pre-generated files:', e);
+                      }
+                      pregenText = null;
+                      pregenPath = null;
+                    } else {
+                      audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                      console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+                    }
                   }
                 } catch (e) {
                   console.warn('[WELCOME] Failed to read pre-generated materials:', e);
@@ -4601,11 +4616,17 @@ app.post('/api/chat/welcome', async (req, res) => {
             if (ttsResponse.ok) {
               const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
               const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-              audioData = { buffer: audioBuffer, contentType };
-              console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+              const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+              if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+                console.error(`[WELCOME] ❌ Generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
+                audioData = null;
+              } else {
+                audioData = { buffer: audioBuffer, contentType };
+                console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+              }
               
-              // КРИТИЧЕСКИ ВАЖНО: Сохраняем ОБА файла (текст и аудио) всегда
-              if (gameId && first?.id) {
+              // КРИТИЧЕСКИ ВАЖНО: Сохраняем ОБА файла (текст и аудио) всегда, но только если аудио валидное
+              if (audioData && gameId && first?.id) {
                 try {
                   // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации
                   const hashWithoutLoc = createAudioHash(text, undefined, undefined, 'narrator', 0);
@@ -4613,7 +4634,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                   const audioPath = path.join(PRAGEN_DIR, gameId, subDir, `narrator_${hashWithoutLoc}.wav`);
                   const audioDir = path.dirname(audioPath);
                   try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-                  fs.writeFileSync(audioPath, audioBuffer);
+                  fs.writeFileSync(audioPath, audioData.buffer);
                   
                   // Сохраняем также текст
                   const textPath = path.join(PRAGEN_DIR, gameId, subDir, `narrator_${hashWithoutLoc}.txt`);
@@ -4624,7 +4645,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                 } catch (e) {
                   console.warn('[WELCOME] Failed to save generated audio:', e);
                 }
-              } else if (gameId && first?.id) {
+              } else if (audioData && gameId && first?.id) {
                 // Сохраняем и при выключенном флаге для кэширования
                 // КРИТИЧЕСКИ ВАЖНО: Сохраняем ОБА файла (текст и аудио)
                 try {
@@ -4634,7 +4655,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                   const audioPath = path.join(PRAGEN_DIR, gameId, subDir, `narrator_${hashWithoutLoc}.wav`);
                   const audioDir = path.dirname(audioPath);
                   try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-                  fs.writeFileSync(audioPath, audioBuffer);
+                  fs.writeFileSync(audioPath, audioData.buffer);
                   
                   // Сохраняем также текст
                   const textPath = path.join(PRAGEN_DIR, gameId, subDir, `narrator_${hashWithoutLoc}.txt`);
@@ -4785,8 +4806,22 @@ app.post('/api/chat/welcome', async (req, res) => {
             try {
               console.log('[WELCOME] ✅ Using pre-generated audio from (SOLO):', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
-              audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-              console.log(`[WELCOME] ✅ Pre-generated audio loaded (SOLO), size: ${audioBuffer.byteLength} bytes`);
+              const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+              if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+                console.warn(`[WELCOME] ⚠️ Pre-generated audio too small (SOLO): ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
+                // Удаляем невалидные файлы
+                try {
+                  fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch (e) {
+                  console.warn('[WELCOME] Failed to delete invalid pre-generated files (SOLO):', e);
+                }
+                pregenPath = null;
+              } else {
+                audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                console.log(`[WELCOME] ✅ Pre-generated audio loaded (SOLO), size: ${audioBuffer.byteLength} bytes`);
+              }
               
               // КРИТИЧЕСКИ ВАЖНО: Ищем и загружаем соответствующий текст
               const textPath = pregenPath.replace(/\.wav$/, '.txt');
@@ -4861,12 +4896,18 @@ app.post('/api/chat/welcome', async (req, res) => {
           if (ttsResponse.ok) {
             const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
             const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            audioData = { buffer: audioBuffer, contentType };
-            console.log('[WELCOME] ✅ TTS generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
+            const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+            if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+              console.error(`[WELCOME] ❌ Generated audio too small (SOLO): ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
+              audioData = null;
+            } else {
+              audioData = { buffer: audioBuffer, contentType };
+              console.log('[WELCOME] ✅ TTS generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
+            }
             
-            // Сохраняем сгенерированное аудио для будущего использования
+            // Сохраняем сгенерированное аудио для будущего использования, но только если аудио валидное
             // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии
-            if (sess?.scenarioGameId && first?.id) {
+            if (audioData && sess?.scenarioGameId && first?.id) {
               try {
                 // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
                 // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации
@@ -4875,7 +4916,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                 const audioPath = path.join(PRAGEN_DIR, sess.scenarioGameId, subDir, `narrator_${hashWithoutLoc}.wav`);
                 const audioDir = path.dirname(audioPath);
                 try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-                fs.writeFileSync(audioPath, audioBuffer);
+                fs.writeFileSync(audioPath, audioData.buffer);
                 
                 // Сохраняем также текст
                 const textPath = path.join(PRAGEN_DIR, sess.scenarioGameId, subDir, `narrator_${hashWithoutLoc}.txt`);
@@ -5480,16 +5521,20 @@ app.post('/api/chat/reply', async (req, res) => {
         hasMaterials
       });
       if (hasMaterials) {
-        // Ищем по userText (действие игрока) с УЖЕ ОПРЕДЕЛЕННЫМ choiceIndex (через AI)
-        let foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
+        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен через AI, то userText НЕ используется для поиска!
+        // AI уже подставил индекс выбора, поэтому ищем только по choiceIndex, depth, parentHash
+        const searchText = choiceIndexForPregen !== undefined ? '' : (userText || '');
+        
+        // Ищем по choiceIndex (если определен) или по userText (если choiceIndex не определен)
+        let foundText = findPregenText(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
         
         // Если не нашли с определенным choiceIndex, пробуем поиск по всем возможным choiceIndex (0-9) как fallback
         // Это нужно на случай, если AI неправильно определил choiceIndex или файлы сохранены с другим choiceIndex
-        if (!foundText && userText) {
+        if (!foundText && choiceIndexForPregen !== undefined) {
           for (let ci = 0; ci < 10; ci++) {
             // Пропускаем уже проверенный choiceIndex
             if (ci === choiceIndexForPregen) continue;
-            foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, ci, parentHashForPregen);
+            foundText = findPregenText(scenarioGameIdForPregen, '', locationIdForPregen, undefined, 'narrator', depthForPregen, ci, parentHashForPregen);
             if (foundText) {
               choiceIndexForPregen = ci;
               console.log('[REPLY] ✅ Found pre-generated text with different choiceIndex:', ci);
@@ -5901,18 +5946,21 @@ app.post('/api/chat/reply', async (req, res) => {
           const searchText = pregenTextFound || text;
           
           // Если материалы есть - ищем по точному хэшу (каждое сообщение имеет свой хэш)
-          // ВАЖНО: Ищем по userText (действие игрока), а не по text (ответ бота), так как текст может быть уже сгенерирован
+          // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для поиска!
+          // AI уже подставил индекс выбора, поэтому ищем только по choiceIndex, depth, parentHash
+          const searchText = choiceIndex !== undefined ? '' : (userText || '');
+          
           // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации locationId не обязателен в хеше!
           // Пробуем найти с учетом depth и choiceIndex, но БЕЗ locationId в хеше (для диалогов внутри локации)
           console.log('[REPLY] Searching pregen audio with params:', {
-            userText: userText?.slice(0, 50),
+            searchText: choiceIndex !== undefined ? '(using choiceIndex only)' : userText?.slice(0, 50),
             depth,
             choiceIndex,
             parentHash: parentHash?.slice(0, 8),
             locationId: locationId || 'none'
           });
-          let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
-          let pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
           console.log('[REPLY] Pregen search result:', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
           
           // Если не нашли с определенным choiceIndex, пробуем поиск по всем возможным choiceIndex (0-9) как fallback
@@ -5922,10 +5970,10 @@ app.post('/api/chat/reply', async (req, res) => {
               // Пропускаем уже проверенный choiceIndex
               if (ci === choiceIndex) continue;
               if (!foundPregenText) {
-                foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
+                foundPregenText = findPregenText(scenarioGameIdForPregen, '', undefined, characterId, 'narrator', depth, ci, parentHash);
               }
               if (!pregenPath) {
-                pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
+                pregenPath = findPregenAudio(scenarioGameIdForPregen, '', undefined, characterId, 'narrator', depth, ci, parentHash);
               }
               if (foundPregenText && pregenPath) {
                 console.log('[REPLY] ✅ Found pre-generated content with different choiceIndex:', ci);
@@ -5939,31 +5987,36 @@ app.post('/api/chat/reply', async (req, res) => {
           // Если не нашли БЕЗ locationId, пробуем С locationId (для обратной совместимости)
           if (!foundPregenText || !pregenPath) {
             if (!foundPregenText) {
-              foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+              foundPregenText = findPregenText(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
             }
             if (!pregenPath) {
-              pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+              pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
             }
           }
           
           // Если не нашли с параметрами, пробуем без них (для обратной совместимости)
-          // ВАЖНО: Ищем по userText, а не по text
+          // Только если choiceIndex не определен - ищем по userText
           if (!foundPregenText || !pregenPath) {
-            if (!foundPregenText) {
-              foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator');
-            }
-            if (!pregenPath) {
-              pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator');
+            if (choiceIndex === undefined) {
+              if (!foundPregenText) {
+                foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator');
+              }
+              if (!pregenPath) {
+                pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator');
+              }
             }
           }
           
           // Последняя попытка - с locationId, но без параметров depth/choiceIndex
+          // Только если choiceIndex не определен - ищем по userText
           if (!foundPregenText || !pregenPath) {
-            if (!foundPregenText) {
-              foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
-            }
-            if (!pregenPath) {
-              pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+            if (choiceIndex === undefined) {
+              if (!foundPregenText) {
+                foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+              }
+              if (!pregenPath) {
+                pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+              }
             }
           }
           
@@ -5995,7 +6048,8 @@ app.post('/api/chat/reply', async (req, res) => {
           // Если нашли текст, проверяем наличие аудио рядом с ним
           if (foundPregenText && !pregenPath) {
             try {
-              const textPath = getPregenTextPath(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+              const searchTextForPath = choiceIndex !== undefined ? '' : (userText || '');
+              const textPath = getPregenTextPath(scenarioGameIdForPregen, searchTextForPath, locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
               if (fs.existsSync(textPath)) {
                 const audioPath = textPath.replace(/\.txt$/, '.wav');
                 if (fs.existsSync(audioPath)) {
@@ -6040,8 +6094,23 @@ app.post('/api/chat/reply', async (req, res) => {
               // Используем предгенерированное аудио
               console.log('[REPLY] ✅ Found pre-generated audio from:', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
-              pregenAudioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-              console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+              const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+              if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+                console.warn(`[REPLY] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
+                // Удаляем невалидные файлы
+                try {
+                  fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch (e) {
+                  console.warn('[REPLY] Failed to delete invalid pre-generated files:', e);
+                }
+                foundPregenText = null;
+                pregenPath = null;
+              } else {
+                pregenAudioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+              }
               }
             } catch (e) {
               console.warn('[REPLY] Failed to read pre-generated materials:', e);
@@ -6049,7 +6118,8 @@ app.post('/api/chat/reply', async (req, res) => {
               pregenPath = null;
             }
           } else {
-            console.log(`[REPLY] ⚠️ Pre-generated materials not found or incomplete for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
+            const searchTextForHash = choiceIndex !== undefined ? '' : (userText || '');
+            console.log(`[REPLY] ⚠️ Pre-generated materials not found or incomplete for scenarioGameId=${scenarioGameIdForPregen}, locationId=${locationId || 'none'} (hash: ${createAudioHash(searchTextForHash, locationId, characterId, 'narrator', depth, choiceIndex, parentHash)})`);
           }
         }
         // УБРАНО: background generation - не нужен, так как мы генерируем синхронно ниже
@@ -6092,28 +6162,38 @@ app.post('/api/chat/reply', async (req, res) => {
         if (ttsResponse.ok) {
           const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
           const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          audioData = { buffer: audioBuffer, contentType };
+          const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
           const ttsDuration = Date.now() - ttsStartTime;
-          console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
+          if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
+            console.error(`[REPLY] ❌ Generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
+            audioData = null;
+          } else {
+            audioData = { buffer: audioBuffer, contentType };
+            console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
+          }
           
-          // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов
+          // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов, но только если аудио валидное
           // ВАЖНО: Сохраняем по userText (действие игрока), а не по text (ответ бота)
           // Это нужно, чтобы потом можно было найти ответ бота по действию игрока
           // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации сохраняем БЕЗ locationId в хеше!
           // locationId используется только для папки, но НЕ в хеше (чтобы диалоги внутри локации находились)
-          if (scenarioGameIdForPregen && userText) {
+          if (audioData && scenarioGameIdForPregen) {
             try {
-              // Сохраняем аудио по userText (действие игрока)
+              // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для сохранения!
+              // AI уже подставил индекс выбора, поэтому сохраняем только по choiceIndex, depth, parentHash
+              const saveText = choiceIndex !== undefined ? '' : (userText || '');
+              
+              // Сохраняем аудио по choiceIndex (если определен) или по userText (если choiceIndex не определен)
               // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации сохраняем БЕЗ locationId в хеше!
               // Но используем locationId для папки (если есть), чтобы файлы были организованы по локациям
               // Хеш создается БЕЗ locationId (undefined), чтобы диалоги внутри локации находились независимо от locationId
               // Сохраняем в папке локации, но с хешем БЕЗ locationId
-              const hashWithoutLoc = createAudioHash(userText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+              const hashWithoutLoc = createAudioHash(saveText, undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
               const subDir = locationId || 'general';
               const audioPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.wav`);
               const audioDir = path.dirname(audioPath);
               try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
-              fs.writeFileSync(audioPath, audioBuffer);
+              fs.writeFileSync(audioPath, audioData.buffer);
               
               // Сохраняем текст ответа бота (не userText!)
               const textPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.txt`);
@@ -8156,6 +8236,13 @@ app.post('/api/tts', async (req, res) => {
       // КРИТИЧЕСКИ ВАЖНО: Сохраняем БЕЗ locationId в хеше, но в папке локации (если есть)
       if (!scenarioGameId) return;
       
+      // Проверяем размер аудио - если меньше 1 МБ, не сохраняем
+      const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+      if (audioBuffer.length < MIN_AUDIO_SIZE) {
+        console.warn(`[TTS] ⚠️ Audio buffer too small to save: ${audioBuffer.length} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Skipping save.`);
+        return;
+      }
+      
       try {
         const messageType = finalIsNarrator !== false ? 'narrator' : 'character';
         // Для welcome сообщений (когда нет locationId или это первое сообщение) используем depth=0
@@ -8455,6 +8542,13 @@ app.post('/api/tts', async (req, res) => {
             }
           };
           
+          console.log('[GOOGLE-TTS] Sending request to Google TTS, chunk length:', chunkText.length, 'chars');
+          console.log('[GOOGLE-TTS] Request body preview:', JSON.stringify({
+            input: requestBody.input,
+            voice: requestBody.voice,
+            audioConfig: requestBody.audioConfig
+          }).slice(0, 500));
+          
           const googleResponse = await undiciFetch(googleTtsUrl, {
             method: 'POST',
             headers: {
@@ -8464,14 +8558,44 @@ app.post('/api/tts', async (req, res) => {
             signal: AbortSignal.timeout(20000)
           });
           
+          console.log('[GOOGLE-TTS] Response status:', googleResponse.status, googleResponse.statusText);
+          
           if (googleResponse.ok) {
             const googleData = await googleResponse.json() as any;
+            console.log('[GOOGLE-TTS] Response structure:', {
+              hasAudioContent: !!googleData.audioContent,
+              audioContentLength: googleData.audioContent?.length || 0,
+              audioContentPreview: googleData.audioContent?.slice(0, 100) || 'none',
+              error: googleData.error || null,
+              keys: Object.keys(googleData)
+            });
+            
             if (googleData.audioContent) {
-              return Buffer.from(googleData.audioContent, 'base64');
+              try {
+                const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
+                console.log('[GOOGLE-TTS] Decoded audio buffer size:', audioBuffer.length, 'bytes');
+                
+                // КРИТИЧЕСКИ ВАЖНО: Проверяем размер аудио - если меньше 1 МБ, это явно ошибка
+                // Все ответы достаточно большие и массивные, поэтому аудио должно быть минимум 1 МБ
+                const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+                if (audioBuffer.length < MIN_AUDIO_SIZE) {
+                  console.error('[GOOGLE-TTS] ⚠️ Audio buffer too small:', audioBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes). This is likely an error!');
+                  console.error('[GOOGLE-TTS] Raw audioContent (first 200 chars):', googleData.audioContent.slice(0, 200));
+                  console.error('[GOOGLE-TTS] Full response (first 1000 chars):', JSON.stringify(googleData).slice(0, 1000));
+                  return null;
+                }
+                return audioBuffer;
+              } catch (decodeErr) {
+                console.error('[GOOGLE-TTS] ⚠️ Failed to decode base64 audioContent:', decodeErr);
+                console.error('[GOOGLE-TTS] audioContent preview:', googleData.audioContent?.slice(0, 200));
+                return null;
+              }
+            } else {
+              console.error('[GOOGLE-TTS] ⚠️ No audioContent in response. Full response:', JSON.stringify(googleData).slice(0, 1000));
             }
           } else {
             const errorText = await googleResponse.text().catch(() => '');
-            console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 200));
+            console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 500));
           }
           return null;
         };
@@ -8487,6 +8611,15 @@ app.post('/api/tts', async (req, res) => {
           // Текст помещается в один запрос
           const audioBuffer = await generateChunk(finalInput);
           if (audioBuffer) {
+            // КРИТИЧЕСКИ ВАЖНО: Проверяем размер аудио - если меньше 1 МБ, это явно ошибка
+            // Все ответы достаточно большие и массивные, поэтому аудио должно быть минимум 1 МБ
+            const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+            if (audioBuffer.length < MIN_AUDIO_SIZE) {
+              console.error('[GOOGLE-TTS] ❌ Generated audio too small:', audioBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes). This is likely an error!');
+              console.error('[GOOGLE-TTS] Input text length:', text.length, 'chars');
+              console.error('[GOOGLE-TTS] SSML length:', finalInput.length, 'chars');
+              return null;
+            }
             console.log('[GOOGLE-TTS] ✅ Successfully generated audio, size:', audioBuffer.length, 'bytes');
             return audioBuffer;
           } else {
