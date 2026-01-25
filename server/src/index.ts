@@ -5816,6 +5816,20 @@ app.post('/api/chat/reply', async (req, res) => {
       const kindNorm = normalizeRollKind(kindRaw);
       aiRequestDice = { expr: 'd20', dc, context: `Проверка: ${kindRaw}`, kind: kindNorm, skill: kindRaw };
       text = text.replace(diceTagRegex, '').trim();
+      
+      // КРИТИЧЕСКИ ВАЖНО: Если в тексте предлагается ТОЛЬКО бросок кубиков (1 действие) - удаляем варианты выбора
+      // Если есть другие варианты - оставляем их
+      const choices = parseChoiceOptions(text);
+      if (choices.length === 1) {
+        // Только один вариант - это бросок кубиков, удаляем варианты выбора
+        text = text.replace(/\n\n\*\*.*[?]\s*\*\*\s*\n\n[\s\S]*?(\d+\.\s+[^\n]+(?:\n\d+\.\s+[^\n]+)*)/gi, '');
+        text = text.replace(/\n\n(\d+\.\s+[^\n]+(?:\n\d+\.\s+[^\n]+)*)\s*$/g, '');
+        text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+        console.log('[REPLY] ✅ Removed choice options because only dice roll is required (1 action)');
+      } else {
+        // Больше одного варианта - оставляем варианты выбора
+        console.log(`[REPLY] ✅ Keeping choice options (${choices.length} options, dice roll is one of them)`);
+      }
     }
 
     // Парсинг изменений состояния персонажей из ответа ИИ
