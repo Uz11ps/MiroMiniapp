@@ -5151,23 +5151,6 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
     
-    // КРИТИЧЕСКИ ВАЖНО: ИЩЕМ прегенерированный текст ПЕРЕД генерацией
-    if (scenarioGameIdForPregen && !pregenTextFound) {
-      const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
-      if (hasMaterials) {
-        // Ищем по userText (действие игрока) с учетом depth, choiceIndex, parentHash
-        let foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
-        if (!foundText) {
-          // Пробуем без параметров для обратной совместимости
-          foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator');
-        }
-        if (foundText) {
-          pregenTextFound = foundText;
-          console.log('[REPLY] ✅ Found pre-generated text BEFORE generation');
-        }
-      }
-    }
-    
     // КРИТИЧЕСКИ ВАЖНО: Используем найденный прегенерированный текст, если он был найден
     if (pregenTextFound) {
       text = pregenTextFound;
@@ -5533,70 +5516,18 @@ app.post('/api/chat/reply', async (req, res) => {
     let audioData: { buffer: Buffer; contentType: string } | null = null;
     
     try {
-      // Получаем контекст для TTS (локация, персонаж и т.д.)
-      let locationId: string | undefined = undefined;
-      let characterId: string | undefined = undefined;
-      let scenarioGameIdForPregen: string | undefined = undefined;
-      
-      if (gameId) {
-        try {
-          let sess: any = null;
-          if (lobbyId) {
-            sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
-          } else {
-            const uid = await resolveUserIdFromQueryOrBody(req, prisma);
-            if (uid) sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-          }
-          if (sess) {
-            locationId = sess.currentLocationId || undefined;
-            scenarioGameIdForPregen = sess.scenarioGameId; // Используем scenarioGameId из сессии!
-          } else {
-            scenarioGameIdForPregen = gameId; // Fallback на gameId если сессии нет
-          }
-        } catch (e) {
-          console.warn('[REPLY] Failed to get session context for TTS:', e);
-          scenarioGameIdForPregen = gameId; // Fallback на gameId при ошибке
-        }
-      }
-      
-      // КРИТИЧЕСКИ ВАЖНО: Проверяем прегенерированные материалы (текст и аудио) ДО генерации текста
-      // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
-      let pregenTextFound: string | null = null;
+      // КРИТИЧЕСКИ ВАЖНО: Используем уже определенные переменные из верхнего блока поиска текста!
+      // scenarioGameIdForPregen, locationIdForPregen, depthForPregen, choiceIndexForPregen, parentHashForPregen уже определены выше
+      // pregenTextFound тоже уже определен выше
       let pregenAudioData: { buffer: Buffer; contentType: string } | null = null;
       
       if (scenarioGameIdForPregen) {
-        // Определяем depth и choiceIndex из истории
-        let depth = 0;
-        let choiceIndex: number | undefined = undefined;
-        let parentHash: string | undefined = undefined;
-        
-        // Подсчитываем depth по количеству сообщений от бота в истории
-        if (baseHistory && baseHistory.length > 0) {
-          const botMessages = baseHistory.filter(m => m.from === 'bot');
-          depth = botMessages.length;
-          
-          // Находим последнее сообщение от игрока для определения choiceIndex
-          const lastUserMessage = [...baseHistory].reverse().find(m => m.from === 'me');
-          if (lastUserMessage && lastUserMessage.text) {
-            // Пытаемся определить choiceIndex из текста (если это "1", "2", "3" и т.д.)
-            const choiceMatch = lastUserMessage.text.trim().match(/^(\d+)$/);
-            if (choiceMatch) {
-              choiceIndex = parseInt(choiceMatch[1], 10) - 1; // Индекс с 0
-            }
-            
-            // Вычисляем parentHash из предыдущего сообщения бота
-            // Важно: parentHash должен учитывать depth предыдущего сообщения
-            if (botMessages.length > 0) {
-              const lastBotMessage = botMessages[botMessages.length - 1];
-              if (lastBotMessage && lastBotMessage.text) {
-                // Для parentHash используем depth предыдущего сообщения (depth - 1)
-                // Но нужно также учесть choiceIndex и parentHash предыдущего сообщения, если они есть
-                // Пока используем упрощенный вариант - только текст и depth-1
-                parentHash = createAudioHash(lastBotMessage.text, locationId, characterId, 'narrator', depth - 1);
-              }
-            }
-          }
-        }
+        // Используем уже определенные переменные
+        const depth = depthForPregen;
+        const choiceIndex = choiceIndexForPregen;
+        const parentHash = parentHashForPregen;
+        const locationId = locationIdForPregen;
+        const characterId = undefined; // Для narrator всегда undefined
         
         // Поиск прегенерированных материалов (логи убраны)
         
@@ -5604,26 +5535,34 @@ app.post('/api/chat/reply', async (req, res) => {
         const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
         
         if (hasMaterials) {
+          // КРИТИЧЕСКИ ВАЖНО: Используем уже найденный текст (pregenTextFound), если он был найден выше
+          // Если текст был найден выше - используем его, иначе используем текущий text
+          const searchText = pregenTextFound || text;
+          
           // Если материалы есть - ищем по точному хэшу (каждое сообщение имеет свой хэш)
           // ВАЖНО: Ищем по userText (действие игрока), а не по text (ответ бота), так как текст может быть уже сгенерирован
           // Пробуем найти с учетом depth и choiceIndex
-          let pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
+          let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
           let pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
           
           // Если не нашли с параметрами, пробуем без них (для обратной совместимости)
           // ВАЖНО: Ищем по userText, а не по text
-          if (!pregenText || !pregenPath) {
-            pregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
-            pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+          if (!foundPregenText || !pregenPath) {
+            if (!foundPregenText) {
+              foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+            }
+            if (!pregenPath) {
+              pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator');
+            }
           }
           
           // КРИТИЧЕСКИ ВАЖНО: Проверяем наличие ОБОИХ файлов
           // Если нашли аудио, проверяем наличие текста рядом с ним
-          if (pregenPath && !pregenText) {
+          if (pregenPath && !foundPregenText) {
             try {
               const textPath = pregenPath.replace(/\.wav$/, '.txt');
               if (fs.existsSync(textPath)) {
-                pregenText = fs.readFileSync(textPath, 'utf-8');
+                foundPregenText = fs.readFileSync(textPath, 'utf-8');
                 console.log('[REPLY] ✅ Loaded pre-generated text from file:', textPath);
               } else {
                 // Если текста нет - удаляем аудио и генерируем заново
@@ -5643,7 +5582,7 @@ app.post('/api/chat/reply', async (req, res) => {
           }
           
           // Если нашли текст, проверяем наличие аудио рядом с ним
-          if (pregenText && !pregenPath) {
+          if (foundPregenText && !pregenPath) {
             try {
               const textPath = getPregenTextPath(scenarioGameIdForPregen, userText || '', locationId, characterId, 'narrator', depth, choiceIndex, parentHash);
               if (fs.existsSync(textPath)) {
@@ -5659,16 +5598,16 @@ app.post('/api/chat/reply', async (req, res) => {
                   } catch (e) {
                     console.warn('[REPLY] Failed to delete incomplete text:', e);
                   }
-                  pregenText = null;
+                  foundPregenText = null;
                 }
               }
             } catch (e) {
               console.warn('[REPLY] Failed to check audio file:', e);
-              pregenText = null;
+              foundPregenText = null;
             }
           }
           
-          if (pregenText && pregenPath) {
+          if (foundPregenText && pregenPath) {
             try {
               // Проверяем, что оба файла действительно существуют
               if (!fs.existsSync(pregenPath) || !fs.existsSync(pregenPath.replace(/\.wav$/, '.txt'))) {
@@ -5678,15 +5617,13 @@ app.post('/api/chat/reply', async (req, res) => {
                   const textPath = pregenPath.replace(/\.wav$/, '.txt');
                   if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
                 } catch {}
-                pregenText = null;
+                foundPregenText = null;
                 pregenPath = null;
               } else {
-              // Используем предгенерированный текст (только если он еще не был найден ранее)
-              if (!pregenTextFound) {
-                pregenTextFound = pregenText;
-                console.log('[REPLY] ✅ Found pre-generated text in TTS block');
-              } else {
-                console.log('[REPLY] ✅ Pre-generated text already found before TTS block, using it');
+              // Используем предгенерированный текст (если он был найден)
+              if (foundPregenText && foundPregenText !== text) {
+                text = foundPregenText;
+                console.log('[REPLY] ✅ Using pre-generated text from file');
               }
               
               // Используем предгенерированное аудио
@@ -5697,7 +5634,7 @@ app.post('/api/chat/reply', async (req, res) => {
               }
             } catch (e) {
               console.warn('[REPLY] Failed to read pre-generated materials:', e);
-              pregenText = null;
+              foundPregenText = null;
               pregenPath = null;
             }
           } else {
