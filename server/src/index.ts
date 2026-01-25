@@ -10684,7 +10684,14 @@ app.post('/api/chat/dice', async (req, res) => {
     let narr: { text: string; fallback: boolean } | null = null;
     if (scenarioGameIdForPregen && hasPregenMaterials(scenarioGameIdForPregen)) {
       // Ищем по outcome (diceKey), depth, parentHash
+      // КРИТИЧЕСКИ ВАЖНО: parentHash учитывает контекст игры (последнее сообщение бота перед броском)
       const searchText = diceKey; // Используем outcome как ключ
+      console.log('[DICE] Searching for pre-generated content:', {
+        diceKey,
+        depth: depthForPregen,
+        parentHash: parentHashForPregen?.slice(0, 8),
+        locationId: locationIdForPregen
+      });
       const foundText = findPregenText(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
       if (foundText) {
         narr = { text: foundText, fallback: false };
