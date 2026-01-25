@@ -8791,7 +8791,7 @@ app.post('/api/tts', async (req, res) => {
             }
           }
           }),
-          signal: AbortSignal.timeout(1000) // Быстрая проверка - 1 секунда
+          signal: AbortSignal.timeout(5000) // Быстрая проверка - 5 секунд (увеличено для прокси)
         });
         
         if (testResponse.status === 429) {
@@ -8804,9 +8804,14 @@ app.post('/api/tts', async (req, res) => {
         } else if (testResponse.ok) {
           console.log('[GEMINI-TTS] ✅ TTS quota available, proceeding with Gemini TTS');
         }
-      } catch (testErr) {
+      } catch (testErr: any) {
         // Игнорируем ошибки тестового запроса, продолжаем с обычной логикой
-        console.log('[GEMINI-TTS] Quick TTS check failed, proceeding with normal flow:', testErr);
+        const isTimeout = testErr?.name === 'TimeoutError' || testErr?.message?.includes('timeout') || testErr?.message?.includes('aborted');
+        if (isTimeout) {
+          console.log('[GEMINI-TTS] Quick TTS check timed out (this is normal), proceeding with normal flow');
+        } else {
+          console.log('[GEMINI-TTS] Quick TTS check failed, proceeding with normal flow:', testErr?.message || String(testErr));
+        }
       }
       
       // Если квота недоступна - сразу используем Google TTS
