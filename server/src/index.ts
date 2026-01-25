@@ -5999,6 +5999,7 @@ app.post('/api/chat/reply', async (req, res) => {
     const parentHash = parentHashForPregen;
     const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
     const characterId = undefined; // Для narrator всегда undefined
+    const choiceIndexFromAIFlag = choiceIndexFromAI; // Копируем флаг для использования в блоке TTS
     
     try {
       // КРИТИЧЕСКИ ВАЖНО: Используем уже определенные переменные из верхнего блока поиска текста!
