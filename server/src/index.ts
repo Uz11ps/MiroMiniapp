@@ -4594,7 +4594,7 @@ app.post('/api/chat/welcome', async (req, res) => {
                   // Используем предгенерированное аудио
                   console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
                   const audioBuffer = fs.readFileSync(pregenPath);
-                    const MIN_AUDIO_SIZE = 256 * 256;
+                    const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
                     if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
                       console.warn(`[WELCOME] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
                       // Удаляем невалидные файлы
@@ -4647,7 +4647,7 @@ app.post('/api/chat/welcome', async (req, res) => {
             if (ttsResponse.ok) {
               const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
               const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-              const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+              const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
               if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
                 console.error(`[WELCOME] ❌ Generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
                 audioData = null;
@@ -4803,7 +4803,7 @@ app.post('/api/chat/welcome', async (req, res) => {
             try {
               console.log('[WELCOME] ✅ Using pre-generated audio from (SOLO):', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
-              const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+              const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
               if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
                 console.warn(`[WELCOME] ⚠️ Pre-generated audio too small (SOLO): ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
                 // Удаляем невалидные файлы
@@ -4953,7 +4953,7 @@ app.post('/api/chat/welcome', async (req, res) => {
           if (ttsResponse.ok) {
             const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
             const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-            const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+            const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
             if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
               console.error(`[WELCOME] ❌ Generated audio too small (SOLO): ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
               audioData = null;
@@ -5430,7 +5430,16 @@ app.post('/api/chat/reply', async (req, res) => {
           
           // Определяем depth, choiceIndex и parentHash из истории
           if (baseHistory && baseHistory.length > 0) {
-            const botMessages = baseHistory.filter(m => m.from === 'bot');
+            // КРИТИЧЕСКИ ВАЖНО: Исключаем сообщения об ошибке из подсчета depth
+            // Сообщения об ошибке не должны увеличивать depth, так как они не являются частью диалога
+            const botMessages = baseHistory.filter(m => {
+              if (m.from !== 'bot') return false;
+              const text = m.text || '';
+              // Исключаем сообщения об ошибке
+              if (text.trim() === 'Не распознали ваш ответ, выберите вариант корректно!') return false;
+              if (text.trim().startsWith('Техническая ошибка')) return false;
+              return true;
+            });
             depthForPregen = botMessages.length;
             
             // КРИТИЧЕСКИ ВАЖНО: choiceIndex определяем из ТЕКУЩЕГО userText (ответ пользователя)
@@ -5593,19 +5602,23 @@ app.post('/api/chat/reply', async (req, res) => {
     // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
     if (scenarioGameIdForPregen) {
       const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
-      console.log('[REPLY] Searching for pre-generated content:', {
-        scenarioGameId: scenarioGameIdForPregen,
-        locationId: locationIdForPregen,
-        userText: userText?.slice(0, 50),
-        depth: depthForPregen,
-        choiceIndex: choiceIndexForPregen,
-        parentHash: parentHashForPregen?.slice(0, 8),
-        hasMaterials
-      });
       if (hasMaterials) {
-        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен через AI, то userText НЕ используется для поиска!
+        // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для поиска!
         // AI уже подставил индекс выбора, поэтому ищем только по choiceIndex, depth, parentHash
+        // Если choiceIndex определен (независимо от того, через AI или нет), то searchText всегда пустая строка
         const searchText = choiceIndexForPregen !== undefined ? '' : (userText || '');
+        
+        console.log('[REPLY] Searching for pre-generated content:', {
+          scenarioGameId: scenarioGameIdForPregen,
+          locationId: locationIdForPregen,
+          searchText: searchText ? searchText.slice(0, 50) : '(empty - using choiceIndex)',
+          userText: userText?.slice(0, 50),
+          depth: depthForPregen,
+          choiceIndex: choiceIndexForPregen,
+          parentHash: parentHashForPregen?.slice(0, 8),
+          hasMaterials,
+          choiceIndexFromAI
+        });
         
         // Ищем по choiceIndex (если определен) или по userText (если choiceIndex не определен)
         let foundText = findPregenText(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
@@ -6191,7 +6204,7 @@ app.post('/api/chat/reply', async (req, res) => {
               // Используем предгенерированное аудио
               console.log('[REPLY] ✅ Found pre-generated audio from:', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
-              const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+              const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
               if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
                 console.warn(`[REPLY] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
                 // Удаляем невалидные файлы
@@ -6259,7 +6272,7 @@ app.post('/api/chat/reply', async (req, res) => {
         if (ttsResponse.ok) {
           const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
           const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+          const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
           const ttsDuration = Date.now() - ttsStartTime;
           if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
             console.error(`[REPLY] ❌ Generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
@@ -6328,8 +6341,8 @@ app.post('/api/chat/reply', async (req, res) => {
         create: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown', history: [] as any },
       });
       const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
-      // Не сохраняем "технические ошибки" в историю
-      const shouldSaveBotMessage = !text || !text.trim().startsWith('Техническая ошибка');
+      // Не сохраняем "технические ошибки" и сообщения об ошибке распознавания в историю
+      const shouldSaveBotMessage = !text || (!text.trim().startsWith('Техническая ошибка') && text.trim() !== 'Не распознали ваш ответ, выберите вариант корректно!');
       const newHist = prev.concat([
         (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)),
         ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
@@ -8335,7 +8348,7 @@ app.post('/api/tts', async (req, res) => {
       if (!scenarioGameId) return;
       
       // Проверяем размер аудио - если меньше 1 МБ, не сохраняем
-      const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+      const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
       if (audioBuffer.length < MIN_AUDIO_SIZE) {
         console.warn(`[TTS] ⚠️ Audio buffer too small to save: ${audioBuffer.length} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Skipping save.`);
         return;
@@ -8686,7 +8699,7 @@ app.post('/api/tts', async (req, res) => {
           if (audioBuffer) {
             // КРИТИЧЕСКИ ВАЖНО: Проверяем размер аудио - если меньше 1 МБ, это явно ошибка
             // Все ответы достаточно большие и массивные, поэтому аудио должно быть минимум 1 МБ
-            const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+            const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
             if (audioBuffer.length < MIN_AUDIO_SIZE) {
               console.error('[GOOGLE-TTS] ❌ Generated audio too small:', audioBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes). This is likely an error!');
               console.error('[GOOGLE-TTS] Input text length:', text.length, 'chars');
@@ -8721,7 +8734,7 @@ app.post('/api/tts', async (req, res) => {
           
           // КРИТИЧЕСКИ ВАЖНО: Проверяем размер ТОЛЬКО для финального объединенного аудио
           // Для отдельных чанков не проверяем, так как короткие чанки могут быть меньше 1 МБ
-          const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+          const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
           if (combinedBuffer.length < MIN_AUDIO_SIZE) {
             console.error('[GOOGLE-TTS] ❌ Combined audio too small:', combinedBuffer.length, 'bytes (expected at least', MIN_AUDIO_SIZE, 'bytes)');
             return null;
@@ -10667,7 +10680,7 @@ app.post('/api/chat/dice', async (req, res) => {
         if (ttsResponse.ok) {
           const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
           const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          const MIN_AUDIO_SIZE = 1024 * 1024; // 1 МБ
+          const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
           if (audioBuffer.byteLength >= MIN_AUDIO_SIZE) {
             audioData = { buffer: audioBuffer, contentType };
             console.log('[DICE] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
