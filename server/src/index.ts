@@ -4604,10 +4604,10 @@ app.post('/api/chat/welcome', async (req, res) => {
                       text = foundPregenText;
                       console.log('[WELCOME] ✅ Using pre-generated text from file');
                     }
-                    
-                    // Используем предгенерированное аудио
-                    console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
-                    const audioBuffer = fs.readFileSync(pregenPath);
+                  
+                  // Используем предгенерированное аудио
+                  console.log('[WELCOME] ✅ Using pre-generated audio from:', pregenPath);
+                  const audioBuffer = fs.readFileSync(pregenPath);
                     const MIN_AUDIO_SIZE = 256 * 256;
                     if (audioBuffer.byteLength < MIN_AUDIO_SIZE) {
                       console.warn(`[WELCOME] ⚠️ Pre-generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). Regenerating...`);
@@ -4622,8 +4622,8 @@ app.post('/api/chat/welcome', async (req, res) => {
                       pregenText = null;
                       pregenPath = null;
                     } else {
-                      audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-                      console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+                  audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                  console.log(`[WELCOME] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
                     }
                   }
                 } catch (e) {
@@ -4666,8 +4666,8 @@ app.post('/api/chat/welcome', async (req, res) => {
                 console.error(`[WELCOME] ❌ Generated audio too small: ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
                 audioData = null;
               } else {
-                audioData = { buffer: audioBuffer, contentType };
-                console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+              audioData = { buffer: audioBuffer, contentType };
+              console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
               }
               
               // КРИТИЧЕСКИ ВАЖНО: Сохраняем ОБА файла (текст и аудио) всегда, но только если аудио валидное
@@ -4871,8 +4871,8 @@ app.post('/api/chat/welcome', async (req, res) => {
                 }
                 pregenPath = null;
               } else {
-                audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-                console.log(`[WELCOME] ✅ Pre-generated audio loaded (SOLO), size: ${audioBuffer.byteLength} bytes`);
+              audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+              console.log(`[WELCOME] ✅ Pre-generated audio loaded (SOLO), size: ${audioBuffer.byteLength} bytes`);
               }
               
               // КРИТИЧЕСКИ ВАЖНО: Ищем и загружаем соответствующий текст
@@ -4953,8 +4953,8 @@ app.post('/api/chat/welcome', async (req, res) => {
               console.error(`[WELCOME] ❌ Generated audio too small (SOLO): ${audioBuffer.byteLength} bytes (expected at least ${MIN_AUDIO_SIZE} bytes). This is likely an error!`);
               audioData = null;
             } else {
-              audioData = { buffer: audioBuffer, contentType };
-              console.log('[WELCOME] ✅ TTS generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
+            audioData = { buffer: audioBuffer, contentType };
+            console.log('[WELCOME] ✅ TTS generation successful (SOLO), audio size:', audioBuffer.byteLength, 'bytes');
             }
             
             // Сохраняем сгенерированное аудио для будущего использования, но только если аудио валидное
@@ -5383,6 +5383,10 @@ app.post('/api/chat/reply', async (req, res) => {
       crit_fail: 'Результат D&D: Критический провал! Опиши катастрофическое последствие или досадную помеху.',
     };
 
+    // КРИТИЧЕСКИ ВАЖНО: Определяем choiceIndex ДО создания userPrompt, чтобы передать его в промпт
+    // Это нужно, чтобы AI знал, какой вариант выбрал пользователь, даже если прегенерированного контента нет
+    let detectedChoiceIndexForPrompt: number | undefined = undefined;
+    
     const userPrompt = [
       'Контекст игры:\n' + context.filter(Boolean).join('\n\n'),
       sc ? 'Контекст сцены:\n' + sc : '',
@@ -5423,20 +5427,23 @@ app.post('/api/chat/reply', async (req, res) => {
             
             // КРИТИЧЕСКИ ВАЖНО: choiceIndex определяем из ТЕКУЩЕГО userText (ответ пользователя)
             // А не из истории, так как для первого ответа на welcome сообщение это еще не в истории
-            // Используем AI для определения choiceIndex
+            // КРИТИЧЕСКИ ВАЖНО: Всегда используем AI для определения choiceIndex, если есть варианты выбора
             if (userText) {
               const lastBotMessage = botMessages.length > 0 ? botMessages[botMessages.length - 1] : null;
               try {
                 const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
-                if (detectedChoiceIndex !== undefined) {
-                  if (detectedChoiceIndex === -1) {
-                    // AI не смог определить выбор - отправляем сообщение пользователю
-                    console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
-                    return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-                  }
+                if (detectedChoiceIndex === -1) {
+                  // AI не смог определить выбор - отправляем сообщение пользователю
+                  console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
+                  return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
+                } else if (detectedChoiceIndex !== undefined) {
+                  // AI успешно определил choiceIndex
                   choiceIndexForPregen = detectedChoiceIndex;
                   choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
                   console.log('[REPLY] ✅ Detected choiceIndex from current userText (AI):', choiceIndexForPregen, 'for userText:', userText);
+                } else {
+                  // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
+                  console.log('[REPLY] ⚠️ AI returned undefined - no choices found in bot message, continuing without choiceIndex');
                 }
               } catch (e) {
                 console.warn('[REPLY] Failed to detect choiceIndex with AI:', e);
@@ -5476,18 +5483,22 @@ app.post('/api/chat/reply', async (req, res) => {
                 // Игнорируем ошибки
               }
               
-              // Используем AI для определения choiceIndex
+              // КРИТИЧЕСКИ ВАЖНО: Всегда используем AI для определения choiceIndex, если есть варианты выбора
               try {
                 const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, welcomeMessageText);
-                if (detectedChoiceIndex !== undefined) {
-                  if (detectedChoiceIndex === -1) {
-                    // AI не смог определить выбор - отправляем сообщение пользователю
-                    console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
-                    return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-                  }
+                if (detectedChoiceIndex === -1) {
+                  // AI не смог определить выбор - отправляем сообщение пользователю
+                  console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
+                  return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
+                } else if (detectedChoiceIndex !== undefined) {
+                  // AI успешно определил choiceIndex
                   choiceIndexForPregen = detectedChoiceIndex;
                   choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
+                  detectedChoiceIndexForPrompt = detectedChoiceIndex; // Сохраняем для использования в промпте
                   console.log('[REPLY] ✅ First reply: detected choiceIndex from userText (AI):', choiceIndexForPregen, 'for userText:', userText);
+                } else {
+                  // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
+                  console.log('[REPLY] ⚠️ AI returned undefined - no choices found in welcome message, continuing without choiceIndex');
                 }
               } catch (e) {
                 console.warn('[REPLY] Failed to detect choiceIndex with AI:', e);
@@ -5554,17 +5565,20 @@ app.post('/api/chat/reply', async (req, res) => {
           }
         }
         
-        // Используем AI для определения choiceIndex
+        // КРИТИЧЕСКИ ВАЖНО: Всегда используем AI для определения choiceIndex, если есть варианты выбора
         const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessageText);
-        if (detectedChoiceIndex !== undefined) {
-          if (detectedChoiceIndex === -1) {
-            // AI не смог определить выбор - отправляем сообщение пользователю
-            console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
-            return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-          }
+        if (detectedChoiceIndex === -1) {
+          // AI не смог определить выбор - отправляем сообщение пользователю
+          console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
+          return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
+        } else if (detectedChoiceIndex !== undefined) {
+          // AI успешно определил choiceIndex
           choiceIndexForPregen = detectedChoiceIndex;
           choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
           console.log('[REPLY] ✅ Detected choiceIndex with AI BEFORE pregen search:', choiceIndexForPregen, 'for userText:', userText);
+        } else {
+          // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
+          console.log('[REPLY] ⚠️ AI returned undefined - no choices found in bot message, continuing without choiceIndex');
         }
       } catch (e) {
         console.warn('[REPLY] Failed to detect choiceIndex with AI before pregen search:', e);
@@ -5628,37 +5642,52 @@ app.post('/api/chat/reply', async (req, res) => {
       console.log('[REPLY] ✅ Using pre-generated text from file (BEFORE generation)');
     } else {
       // Если включено использование прегенерированных материалов - ищем прегенерированный текст (старая логика для обратной совместимости)
-      if (game?.usePregenMaterials && gameId) {
-        let locationId: string | undefined = undefined;
-        try {
-          const sess = await getGameSession();
-          if (sess) {
-            locationId = sess.currentLocationId || undefined;
-          }
-        } catch (e) {
-          console.warn('[REPLY] Failed to get location for pregen text:', e);
+    if (game?.usePregenMaterials && gameId) {
+      let locationId: string | undefined = undefined;
+      try {
+        const sess = await getGameSession();
+        if (sess) {
+          locationId = sess.currentLocationId || undefined;
         }
-        
-        // Ищем прегенерированный текст по действию игрока и контексту
-        const pregenText = findPregenText(gameId, userText || userPrompt, locationId, undefined, 'narrator');
-        if (pregenText) {
-          text = pregenText;
-          console.log('[REPLY] ✅ Using pre-generated text (usePregenMaterials=true)');
-        } else {
-          console.warn('[REPLY] ⚠️ Pre-generated text not found, using fallback (usePregenMaterials=true)');
+      } catch (e) {
+        console.warn('[REPLY] Failed to get location for pregen text:', e);
+      }
+      
+      // Ищем прегенерированный текст по действию игрока и контексту
+      const pregenText = findPregenText(gameId, userText || userPrompt, locationId, undefined, 'narrator');
+      if (pregenText) {
+        text = pregenText;
+        console.log('[REPLY] ✅ Using pre-generated text (usePregenMaterials=true)');
+      } else {
+        console.warn('[REPLY] ⚠️ Pre-generated text not found, using fallback (usePregenMaterials=true)');
+      }
+    }
+    
+    // Если не включено использование прегенерированных материалов или текст не найден - генерируем в реальном времени
+    if (!text && (!game?.usePregenMaterials || !gameId)) {
+      // КРИТИЧЕСКИ ВАЖНО: Если AI определил choiceIndex, добавляем информацию о выбранном варианте в промпт
+      let enhancedUserPrompt = userPrompt;
+      if (choiceIndexForPregen !== undefined && baseHistory && baseHistory.length > 0) {
+        const botMessages = baseHistory.filter(m => m.from === 'bot');
+        const lastBotMessage = botMessages.length > 0 ? botMessages[botMessages.length - 1] : null;
+        if (lastBotMessage?.text) {
+          const choices = parseChoiceOptions(lastBotMessage.text);
+          if (choices.length > 0 && choiceIndexForPregen >= 0 && choiceIndexForPregen < choices.length) {
+            const selectedChoice = choices[choiceIndexForPregen];
+            enhancedUserPrompt = userPrompt + `\n\nКРИТИЧЕСКИ ВАЖНО: Пользователь выбрал вариант ${choiceIndexForPregen + 1}: "${selectedChoice}". Генерируй ответ на основе ЭТОГО выбора, а не на основе исходного текста пользователя.`;
+            console.log(`[REPLY] 🎯 Enhanced prompt with selected choice: ${choiceIndexForPregen + 1} - "${selectedChoice}"`);
+          }
         }
       }
       
-      // Если не включено использование прегенерированных материалов или текст не найден - генерируем в реальном времени
-      if (!text && (!game?.usePregenMaterials || !gameId)) {
-        const { text: generatedText } = await generateChatCompletion({
-          systemPrompt: sys,
-          userPrompt: userPrompt,
-          history: baseHistory
-        });
-        text = generatedText;
+      const { text: generatedText } = await generateChatCompletion({
+        systemPrompt: sys,
+        userPrompt: enhancedUserPrompt,
+        history: baseHistory
+      });
+      text = generatedText;
         console.log('[REPLY] ⚠️ Generated NEW text (pre-generated not found)');
-      }
+    }
     }
     
     // КРИТИЧЕСКИ ВАЖНО: Fallback текст тоже должен пройти через блок TTS
@@ -5675,7 +5704,7 @@ app.post('/api/chat/reply', async (req, res) => {
     // ВАЖНО: Применяем форматирование только если текст был сгенерирован, а не взят из файла
     // Если текст из файла - он уже должен быть отформатирован
     if (!pregenTextFound) {
-      text = formatChoiceOptions(text);
+    text = formatChoiceOptions(text);
     } else {
       // Для прегенерированного текста проверяем, нужно ли форматирование
       const hasChoices = text.includes('**') || text.includes('*');
@@ -6019,7 +6048,7 @@ app.post('/api/chat/reply', async (req, res) => {
           // КРИТИЧЕСКИ ВАЖНО: Если choiceIndex определен, то userText НЕ используется для поиска!
           // AI уже подставил индекс выбора, поэтому ищем только по choiceIndex, depth, parentHash
           const searchText = choiceIndex !== undefined ? '' : (userText || '');
-          
+        
           // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации locationId не обязателен в хеше!
           // Пробуем найти с учетом depth и choiceIndex, но БЕЗ locationId в хеше (для диалогов внутри локации)
           console.log('[REPLY] Searching pregen audio with params:', {
@@ -6181,7 +6210,7 @@ app.post('/api/chat/reply', async (req, res) => {
                 pregenPath = null;
               } else {
                 pregenAudioData = { buffer: audioBuffer, contentType: 'audio/wav' };
-                console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
+              console.log(`[REPLY] ✅ Pre-generated audio loaded, size: ${audioBuffer.byteLength} bytes`);
               }
               }
             } catch (e) {
@@ -6241,7 +6270,7 @@ app.post('/api/chat/reply', async (req, res) => {
             audioData = null;
           } else {
             audioData = { buffer: audioBuffer, contentType };
-            console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
+          console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
           }
           
           // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов, но только если аудио валидное
@@ -7985,7 +8014,7 @@ app.post('/api/tts', async (req, res) => {
     
     // ПРОВЕРКА ПРЕГЕНЕРИРОВАННОГО АУДИО ДЛЯ ВСЕХ СООБЩЕНИЙ
     // ИСПРАВЛЕНИЕ: Используем scenarioGameId из сессии, а не gameId из запроса!
-    let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
+      let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
     if (gameId) {
       
       // Пытаемся найти сессию по gameId и locationId, чтобы получить scenarioGameId
@@ -8275,24 +8304,24 @@ app.post('/api/tts', async (req, res) => {
         };
       } else {
         // Для длинных текстов - используем AI анализ
-        try {
-          speechContext = await analyzeSpeechContext({
-            text,
-            gameId,
-            availableCharacters
-          });
-        } catch (e) {
+    try {
+      speechContext = await analyzeSpeechContext({
+        text,
+        gameId,
+        availableCharacters
+      });
+    } catch (e) {
           // Fallback на паттерн-бейзированное определение
-          const emotion = detectEmotion(text);
+      const emotion = detectEmotion(text);
           const hasQuotes = text.includes('"') || text.includes('«') || text.includes('»');
-          speechContext = {
+      speechContext = {
             isNarrator: !hasQuotes,
-            characterId: characterId,
-            characterName: characterName || undefined,
-            gender: gender || characterGender,
-            emotion: emotion.emotion,
-            intensity: emotion.intensity
-          };
+        characterId: characterId,
+        characterName: characterName || undefined,
+        gender: gender || characterGender,
+        emotion: emotion.emotion,
+        intensity: emotion.intensity
+      };
         }
       }
     }
@@ -8596,53 +8625,53 @@ app.post('/api/tts', async (req, res) => {
         
         // Функция для генерации одной части аудио
         const generateChunk = async (chunkText: string): Promise<Buffer | null> => {
-          const requestBody = {
-            input: {
+        const requestBody = {
+          input: {
               ssml: chunkText
-            },
-            voice: {
-              languageCode: 'ru-RU',
-              name: voiceName,
-              ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
-            },
-            audioConfig: {
-              audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
-              sampleRateHertz: 24000,
-              speakingRate: finalSpeed,
-              pitch: finalPitch,
-              volumeGainDb: 0.0,
+          },
+          voice: {
+            languageCode: 'ru-RU',
+            name: voiceName,
+            ssmlGender: finalIsNarrator || isFemale ? 'FEMALE' : 'MALE'
+          },
+          audioConfig: {
+            audioEncoding: format === 'wav' ? 'LINEAR16' : 'MP3',
+            sampleRateHertz: 24000,
+            speakingRate: finalSpeed,
+            pitch: finalPitch,
+            volumeGainDb: 0.0,
               effectsProfileId: ['headphone-class-device']
-            }
-          };
-          
-          const googleResponse = await undiciFetch(googleTtsUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
+          }
+        };
+        
+        const googleResponse = await undiciFetch(googleTtsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
             signal: AbortSignal.timeout(20000)
-          });
-          
-          if (googleResponse.ok) {
-            const googleData = await googleResponse.json() as any;
+        });
+        
+        if (googleResponse.ok) {
+          const googleData = await googleResponse.json() as any;
             
-            if (googleData.audioContent) {
+          if (googleData.audioContent) {
               try {
-                const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
+            const audioBuffer = Buffer.from(googleData.audioContent, 'base64');
                 
                 // Для отдельных чанков НЕ проверяем минимальный размер - проверяем только финальное объединенное аудио
                 // Короткие чанки (например, последний из нескольких) могут быть меньше 1 МБ, это нормально
-                return audioBuffer;
+            return audioBuffer;
               } catch (decodeErr) {
                 console.error('[GOOGLE-TTS] ⚠️ Failed to decode base64 audioContent:', decodeErr);
                 return null;
               }
             } else {
               console.error('[GOOGLE-TTS] ⚠️ No audioContent in response');
-            }
-          } else {
-            const errorText = await googleResponse.text().catch(() => '');
+          }
+        } else {
+          const errorText = await googleResponse.text().catch(() => '');
             console.error('[GOOGLE-TTS] Chunk failed:', googleResponse.status, errorText.slice(0, 200));
           }
           return null;
@@ -8738,20 +8767,20 @@ app.post('/api/tts', async (req, res) => {
             'X-Goog-Api-Key': geminiApiKey
           },
           body: JSON.stringify({
-            contents: [{
-              role: 'user',
+          contents: [{
+            role: 'user',
               parts: [{ text: 'а' }] // Минимальный текст - одна буква для быстрой проверки
-            }],
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: 'Aoede'
-                  }
+          }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: 'Aoede'
                 }
               }
             }
+          }
           }),
           signal: AbortSignal.timeout(1000) // Быстрая проверка - 1 секунда
         });
@@ -8965,9 +8994,9 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                 console.log(`[GEMINI-TTS] ✅ Success (direct audio via ${modelName}), audio size: ${audioBuffer.length} bytes`);
                 // Сохраняем сгенерированное аудио
                 saveGeneratedAudio(audioBuffer, scenarioGameIdForPregen);
-                res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
-                res.setHeader('Content-Length', String(audioBuffer.length));
-                return res.send(audioBuffer);
+              res.setHeader('Content-Type', format === 'oggopus' ? 'audio/ogg; codecs=opus' : 'audio/mpeg');
+              res.setHeader('Content-Length', String(audioBuffer.length));
+              return res.send(audioBuffer);
               }
               
               // Проверяем JSON ответ с аудио в inlineData
