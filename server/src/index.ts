@@ -5715,9 +5715,33 @@ app.post('/api/chat/reply', async (req, res) => {
         }
       }
       
+      // КРИТИЧЕСКИ ВАЖНО: Получаем реальные exits из базы данных и передаем их AI
+      // Это нужно, чтобы AI знал о реальных exits и не предлагал варианты, которых нет в базе данных
+      // Но AI может генерировать диалоговые варианты, которые не являются exits
+      let realExitsInfo = '';
+      if (gameId) {
+        try {
+          const sess = await getGameSession();
+          if (sess?.currentLocationId) {
+            const exits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+            const btns = exits.filter((e: any) => e.type === 'BUTTON');
+            if (btns.length > 0) {
+              const exitsList = btns.map((exit, idx) => {
+                const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
+                return `${idx + 1}. ${choiceText}`;
+              }).join('\n');
+              realExitsInfo = `\n\nДОСТУПНЫЕ ВАРИАНТЫ ДЕЙСТВИЙ (реальные кнопки из игры):\n${exitsList}\n\nВАЖНО: Ты можешь генерировать диалоговые варианты выбора (которые не являются кнопками), но НЕ предлагай варианты действий, которые выглядят как кнопки, но которых нет в списке выше. Например, если в списке нет "Спуститься в грот", не предлагай этот вариант. Диалоговые варианты (например, "Спросить о чем-то", "Осмотреть детальнее") - это нормально.`;
+              console.log(`[REPLY] 📋 Added real exits context to AI prompt: ${btns.length} exits`);
+            }
+          }
+        } catch (e) {
+          console.warn('[REPLY] Failed to get real exits for AI prompt:', e);
+        }
+      }
+      
       const { text: generatedText } = await generateChatCompletion({
         systemPrompt: sys,
-        userPrompt: enhancedUserPrompt,
+        userPrompt: enhancedUserPrompt + realExitsInfo,
         history: baseHistory
       });
       text = generatedText;
