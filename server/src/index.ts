@@ -364,16 +364,20 @@ ${choices.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
 Верни ТОЛЬКО номер варианта (1-${choices.length}) или "0" если не можешь определить. Никаких объяснений, только число.`;
 
+    console.log('[AI-CHOICE] Calling AI to detect choiceIndex for userText:', userText?.slice(0, 50), 'choices count:', choices.length);
     const { text: aiResponse } = await generateChatCompletion({
       systemPrompt,
       userPrompt: `Определи, какой вариант выбора имел в виду пользователь в ответе: "${userText}"`,
       history: []
     });
     
+    console.log('[AI-CHOICE] AI response:', aiResponse?.slice(0, 100));
     const choiceNum = parseInt(aiResponse.trim(), 10);
     if (choiceNum >= 1 && choiceNum <= choices.length) {
       console.log('[AI-CHOICE] ✅ Detected choiceIndex:', choiceNum - 1, 'from userText:', userText);
       return choiceNum - 1;
+    } else {
+      console.warn('[AI-CHOICE] ⚠️ AI returned invalid choice number:', choiceNum, 'expected 1-', choices.length);
     }
   } catch (e) {
     console.warn('[AI-CHOICE] Failed to detect choice with AI, falling back to simple matching:', e);
@@ -5416,6 +5420,53 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
     
+    // КРИТИЧЕСКИ ВАЖНО: Определяем choiceIndex через AI ПЕРЕД поиском прегенерации
+    // Это нужно, чтобы использовать правильный choiceIndex при поиске
+    if (scenarioGameIdForPregen && userText && choiceIndexForPregen === undefined) {
+      try {
+        // Получаем последнее сообщение бота для AI-обработки
+        let lastBotMessageText: string | undefined = undefined;
+        if (baseHistory && baseHistory.length > 0) {
+          const botMessages = baseHistory.filter(m => m.from === 'bot');
+          if (botMessages.length > 0) {
+            lastBotMessageText = botMessages[botMessages.length - 1]?.text;
+          }
+        } else {
+          // Если истории нет, получаем welcome сообщение из chatSession
+          try {
+            const uid = lobbyId ? undefined : await resolveUserIdFromQueryOrBody(req, prisma);
+            const chatSess = lobbyId 
+              ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } })
+              : uid ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } } }) : null;
+            if (chatSess?.history) {
+              const hist = (chatSess.history as any) as Array<{ from: 'bot' | 'me'; text: string }>;
+              const welcomeMsg = hist.find(m => m.from === 'bot');
+              if (welcomeMsg?.text) {
+                lastBotMessageText = welcomeMsg.text;
+              }
+            }
+          } catch (e) {
+            // Игнорируем ошибки
+          }
+        }
+        
+        // Используем AI для определения choiceIndex
+        const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessageText);
+        if (detectedChoiceIndex !== undefined) {
+          choiceIndexForPregen = detectedChoiceIndex;
+          console.log('[REPLY] ✅ Detected choiceIndex with AI BEFORE pregen search:', choiceIndexForPregen, 'for userText:', userText);
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to detect choiceIndex with AI before pregen search, using fallback:', e);
+        // Fallback на простое определение
+        const lastBotMessage = baseHistory ? baseHistory.filter(m => m.from === 'bot').pop() : null;
+        const fallbackChoiceIndex = detectChoiceIndex(userText, lastBotMessage?.text);
+        if (fallbackChoiceIndex !== undefined) {
+          choiceIndexForPregen = fallbackChoiceIndex;
+        }
+      }
+    }
+    
     // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
     if (scenarioGameIdForPregen) {
       const hasMaterials = hasPregenMaterials(scenarioGameIdForPregen);
@@ -5429,43 +5480,20 @@ app.post('/api/chat/reply', async (req, res) => {
         hasMaterials
       });
       if (hasMaterials) {
-        // Ищем по userText (действие игрока)
+        // Ищем по userText (действие игрока) с УЖЕ ОПРЕДЕЛЕННЫМ choiceIndex (через AI)
         let foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, choiceIndexForPregen, parentHashForPregen);
         
-        // Если не нашли и choiceIndex не определен, пробуем найти по всем возможным choiceIndex (0-9)
-        // Это нужно для случаев, когда пользователь написал "второй", "два" и т.д., но choiceIndex еще не определен
-        if (!foundText && choiceIndexForPregen === undefined && userText) {
-          // Пробуем определить choiceIndex с помощью AI
-          const lastBotMessage = baseHistory ? baseHistory.filter(m => m.from === 'bot').pop() : null;
-          try {
-            const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
-            if (detectedChoiceIndex !== undefined) {
-              foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, detectedChoiceIndex, parentHashForPregen);
-              if (foundText) {
-                choiceIndexForPregen = detectedChoiceIndex;
-                console.log('[REPLY] ✅ Found pre-generated text with AI choiceIndex:', detectedChoiceIndex);
-              }
-            }
-          } catch (e) {
-            // Fallback на простое определение
-            const fallbackChoiceIndex = detectChoiceIndex(userText, lastBotMessage?.text);
-            if (fallbackChoiceIndex !== undefined) {
-              foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, fallbackChoiceIndex, parentHashForPregen);
-              if (foundText) {
-                choiceIndexForPregen = fallbackChoiceIndex;
-              }
-            }
-          }
-          
-          // Если все еще не нашли, пробуем поиск по всем возможным choiceIndex (0-9)
-          if (!foundText) {
-            for (let ci = 0; ci < 10; ci++) {
-              foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, ci, parentHashForPregen);
-              if (foundText) {
-                choiceIndexForPregen = ci;
-                console.log('[REPLY] ✅ Found pre-generated text with choiceIndex:', ci);
-                break;
-              }
+        // Если не нашли с определенным choiceIndex, пробуем поиск по всем возможным choiceIndex (0-9) как fallback
+        // Это нужно на случай, если AI неправильно определил choiceIndex или файлы сохранены с другим choiceIndex
+        if (!foundText && userText) {
+          for (let ci = 0; ci < 10; ci++) {
+            // Пропускаем уже проверенный choiceIndex
+            if (ci === choiceIndexForPregen) continue;
+            foundText = findPregenText(scenarioGameIdForPregen, userText || '', locationIdForPregen, undefined, 'narrator', depthForPregen, ci, parentHashForPregen);
+            if (foundText) {
+              choiceIndexForPregen = ci;
+              console.log('[REPLY] ✅ Found pre-generated text with different choiceIndex:', ci);
+              break;
             }
           }
         }
@@ -5876,50 +5904,34 @@ app.post('/api/chat/reply', async (req, res) => {
           // ВАЖНО: Ищем по userText (действие игрока), а не по text (ответ бота), так как текст может быть уже сгенерирован
           // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации locationId не обязателен в хеше!
           // Пробуем найти с учетом depth и choiceIndex, но БЕЗ locationId в хеше (для диалогов внутри локации)
+          console.log('[REPLY] Searching pregen audio with params:', {
+            userText: userText?.slice(0, 50),
+            depth,
+            choiceIndex,
+            parentHash: parentHash?.slice(0, 8),
+            locationId: locationId || 'none'
+          });
           let foundPregenText = pregenTextFound || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
           let pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, choiceIndex, parentHash);
+          console.log('[REPLY] Pregen search result:', { foundText: !!foundPregenText, foundAudio: !!pregenPath });
           
-          // Если не нашли и choiceIndex не определен, пробуем определить его с помощью AI и найти по всем возможным choiceIndex
-          if ((!foundPregenText || !pregenPath) && choiceIndex === undefined && userText) {
-            const lastBotMessage = baseHistory ? baseHistory.filter(m => m.from === 'bot').pop() : null;
-            try {
-              const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
-              if (detectedChoiceIndex !== undefined) {
-                foundPregenText = foundPregenText || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, detectedChoiceIndex, parentHash);
-                pregenPath = pregenPath || findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, detectedChoiceIndex, parentHash);
-                if (foundPregenText || pregenPath) {
-                  console.log('[REPLY] ✅ Found pre-generated content with AI choiceIndex:', detectedChoiceIndex);
-                  // Обновляем choiceIndex для дальнейшего использования
-                  choiceIndex = detectedChoiceIndex;
-                }
+          // Если не нашли с определенным choiceIndex, пробуем поиск по всем возможным choiceIndex (0-9) как fallback
+          // choiceIndex уже должен быть определен через AI выше, но на случай если файлы сохранены с другим choiceIndex
+          if (!foundPregenText || !pregenPath) {
+            for (let ci = 0; ci < 10; ci++) {
+              // Пропускаем уже проверенный choiceIndex
+              if (ci === choiceIndex) continue;
+              if (!foundPregenText) {
+                foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
               }
-            } catch (e) {
-              // Fallback на простое определение
-              const fallbackChoiceIndex = detectChoiceIndex(userText, lastBotMessage?.text);
-              if (fallbackChoiceIndex !== undefined) {
-                foundPregenText = foundPregenText || findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, fallbackChoiceIndex, parentHash);
-                pregenPath = pregenPath || findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, fallbackChoiceIndex, parentHash);
-                if (foundPregenText || pregenPath) {
-                  choiceIndex = fallbackChoiceIndex;
-                }
+              if (!pregenPath) {
+                pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
               }
-            }
-            
-            // Если все еще не нашли, пробуем поиск по всем возможным choiceIndex (0-9)
-            if (!foundPregenText || !pregenPath) {
-              for (let ci = 0; ci < 10; ci++) {
-                if (!foundPregenText) {
-                  foundPregenText = findPregenText(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
-                }
-                if (!pregenPath) {
-                  pregenPath = findPregenAudio(scenarioGameIdForPregen, userText || '', undefined, characterId, 'narrator', depth, ci, parentHash);
-                }
-                if (foundPregenText && pregenPath) {
-                  console.log('[REPLY] ✅ Found pre-generated content with choiceIndex:', ci);
-                  // Обновляем choiceIndex для дальнейшего использования
-                  choiceIndex = ci;
-                  break;
-                }
+              if (foundPregenText && pregenPath) {
+                console.log('[REPLY] ✅ Found pre-generated content with different choiceIndex:', ci);
+                // Обновляем choiceIndex для дальнейшего использования
+                choiceIndex = ci;
+                break;
               }
             }
           }
