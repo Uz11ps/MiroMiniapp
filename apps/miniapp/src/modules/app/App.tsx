@@ -892,6 +892,27 @@ const GameChat: React.FC = () => {
   const sendText = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+    
+    // КРИТИЧЕСКИ ВАЖНО: Останавливаем текущее воспроизведение TTS при отправке нового сообщения
+    try {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+        audioRef.current.load();
+        audioRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+      // Сбрасываем флаги воспроизведения
+      speakingInFlightRef.current = false;
+      activeSpeakSeqRef.current = 0;
+      console.log('[TTS-CLIENT] Stopped audio playback due to new user message');
+    } catch (e) {
+      console.warn('[TTS-CLIENT] Error stopping audio:', e);
+    }
+    
     // блок по очереди
     if (lobbyId) {
       const myId = self.userId || self.tgId || '';
