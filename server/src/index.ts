@@ -4775,17 +4775,17 @@ app.post('/api/chat/welcome', async (req, res) => {
     let audioData: { buffer: Buffer; contentType: string } | null = null;
     let text: string | null = null;
     
-    if (gameId && first?.id) {
-      let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
-      try {
-        const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-        if (gsess?.scenarioGameId) {
-          scenarioGameIdForPregen = gsess.scenarioGameId;
-        }
-      } catch (e) {
-        console.warn('[WELCOME] Failed to get scenarioGameId (SOLO), using gameId:', e);
-      }
-      
+        if (gameId && first?.id) {
+          let scenarioGameIdForPregen: string | undefined = gameId; // Fallback на gameId
+          try {
+            const gsess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+            if (gsess?.scenarioGameId) {
+              scenarioGameIdForPregen = gsess.scenarioGameId;
+            }
+          } catch (e) {
+            console.warn('[WELCOME] Failed to get scenarioGameId (SOLO), using gameId:', e);
+          }
+          
       // КРИТИЧЕСКИ ВАЖНО: Ищем прегенерированный текст и аудио по фиксированному ключу welcomeKey
       // WELCOME сообщение имеет depth=0, choiceIndex=undefined, parentHash=undefined
       let pregenPath = findPregenAudio(scenarioGameIdForPregen, welcomeKey, undefined, undefined, 'narrator', 0);
@@ -4798,8 +4798,8 @@ app.post('/api/chat/welcome', async (req, res) => {
       // КРИТИЧЕСКИ ВАЖНО: НЕ ищем "любой файл" по локации, так как это может привести к загрузке середины игры
       // Ищем только файлы с depth=0, choiceIndex=undefined, parentHash=undefined (welcome сообщения)
       // Если не нашли по точному тексту - не используем файлы из середины игры
-      
-      if (pregenPath) {
+          
+          if (pregenPath) {
             try {
               console.log('[WELCOME] ✅ Using pre-generated audio from (SOLO):', pregenPath);
               const audioBuffer = fs.readFileSync(pregenPath);
@@ -4925,12 +4925,12 @@ app.post('/api/chat/welcome', async (req, res) => {
               }
             }
             text = (text || '').trim();
-          }
-          
-          // Если прегенерированного аудио нет, генерируем новое
+        }
+        
+        // Если прегенерированного аудио нет, генерируем новое
           if (!audioData && text) {
             try {
-              const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
           const ttsUrl = `${apiBase}/api/tts`;
           console.log('[WELCOME] 🎤 Generating TTS for welcome message (SOLO), text length:', text.length);
           
@@ -4985,16 +4985,16 @@ app.post('/api/chat/welcome', async (req, res) => {
                 console.warn('[WELCOME] Failed to save generated audio (SOLO):', e);
               }
             }
-            } else {
-              console.warn('[WELCOME] TTS generation failed (SOLO):', ttsResponse.status);
-            }
-            } catch (ttsErr: any) {
-              console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
+          } else {
+            console.warn('[WELCOME] TTS generation failed (SOLO):', ttsResponse.status);
+        }
+      } catch (ttsErr: any) {
+        console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
               // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
               // Ответ все равно отправляется, но без аудио (после завершения попытки генерации)
             }
-          }
-        }
+      }
+    }
     
     // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS (успешного или с ошибкой)
     // Не сохраняем "технические ошибки" в историю
@@ -10621,7 +10621,7 @@ app.post('/api/chat/dice', async (req, res) => {
       : rollDiceDnd({ expr, count, sides, mod, adv, dis }));
     const kindLabel = formatKindLabel(kind);
     const dcLabel = kindNorm === 'attack' ? 'AC' : 'DC';
-    const { outcome } = evaluateDndOutcome({ roll: r, dc, kind });
+    const { outcome, outcomeCode } = evaluateDndOutcome({ roll: r, dc, kind });
     const fmt = (() => {
       const headLines = [
         kindLabel ? `Тип: ${kindLabel}` : '',
@@ -10636,9 +10636,70 @@ app.post('/api/chat/dice', async (req, res) => {
     })();
     const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
     const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+    
+    // КРИТИЧЕСКИ ВАЖНО: Определяем depth и parentHash для прегенерации
+    // Исключаем сообщения об ошибке из подсчета depth
+    const botMessages = history.filter(m => {
+      if (m.from !== 'bot') return false;
+      const text = m.text || '';
+      if (text.trim() === 'Не распознали ваш ответ, выберите вариант корректно!') return false;
+      if (text.trim().startsWith('Техническая ошибка')) return false;
+      return true;
+    });
+    const depthForPregen = botMessages.length;
+    let parentHashForPregen: string | undefined = undefined;
+    if (botMessages.length > 0) {
+      const lastBotMessage = botMessages[botMessages.length - 1];
+      if (lastBotMessage && lastBotMessage.text) {
+        parentHashForPregen = createAudioHash(lastBotMessage.text, undefined, undefined, 'narrator', depthForPregen - 1);
+        console.log('[DICE] ✅ Created parentHash from last bot message (game context), depth:', depthForPregen - 1, 'hash:', parentHashForPregen?.slice(0, 8), 'message preview:', lastBotMessage.text.slice(0, 100));
+      }
+    }
+    
+    // КРИТИЧЕСКИ ВАЖНО: Используем outcomeCode + контекст броска как ключ для прегенерации
+    // outcomeCode может быть: 'crit_success', 'crit_fail', 'success', 'partial', 'fail' или ''
+    // Включаем контекст броска (context, kind, stat, dc) в ключ, чтобы разные броски с одинаковым outcome имели разные ответы
+    const contextParts: string[] = [];
+    if (context) contextParts.push(`ctx_${context.slice(0, 50).replace(/\s+/g, '_')}`);
+    if (kind) contextParts.push(`kind_${kind}`);
+    if (stat) contextParts.push(`stat_${stat}`);
+    if (dc !== undefined) contextParts.push(`dc_${dc}`);
+    const contextKey = contextParts.length > 0 ? `_${contextParts.join('_')}` : '';
+    const diceKey = outcomeCode ? `dice_${outcomeCode}${contextKey}` : `dice_no_outcome${contextKey}`;
+    
+    // Получаем scenarioGameId и locationId для прегенерации
+    let scenarioGameIdForPregen: string | undefined = gameId;
+    let locationIdForPregen: string | undefined = undefined;
+    try {
+      const gameSess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+      if (gameSess) {
+        scenarioGameIdForPregen = gameSess.scenarioGameId;
+        locationIdForPregen = gameSess.currentLocationId || undefined;
+      }
+    } catch (e) {
+      console.warn('[DICE] Failed to get session for pregen:', e);
+    }
+    
+    // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
+    let narr: { text: string; fallback: boolean } | null = null;
+    if (scenarioGameIdForPregen && hasPregenMaterials(scenarioGameIdForPregen)) {
+      // Ищем по outcome (diceKey), depth, parentHash
+      const searchText = diceKey; // Используем outcome как ключ
+      const foundText = findPregenText(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
+      if (foundText) {
+        narr = { text: foundText, fallback: false };
+        console.log('[DICE] ✅ Found pre-generated text for outcome:', outcomeCode || outcome);
+      }
+    }
+    
+    // Если прегенерированного текста нет - генерируем через AI
+    if (!narr) {
     history.push({ from: 'bot', text: fmt });
     const gptContext = await buildGptSceneContext(prisma, { gameId, userId: uid, history });
-    const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt);
+      narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt);
+      console.log('[DICE] ⚠️ Generated NEW text (pre-generated not found) for outcome:', outcomeCode || outcome);
+    }
+    
     history.push({ from: 'bot', text: narr.text });
     await prisma.chatSession.upsert({
       where: { userId_gameId: { userId: uid, gameId } },
@@ -10650,32 +10711,52 @@ app.post('/api/chat/dice', async (req, res) => {
     let audioData: { buffer: Buffer; contentType: string } | null = null;
     if (narr.text) {
       try {
-        // Получаем locationId из сессии игры
-        let locationId: string | undefined = undefined;
-        try {
-          const gameSess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-          locationId = gameSess?.currentLocationId || undefined;
-        } catch (e) {
-          console.warn('[DICE] Failed to get locationId:', e);
+        // Сначала ищем прегенерированное аудио
+        if (scenarioGameIdForPregen && hasPregenMaterials(scenarioGameIdForPregen)) {
+          const searchText = diceKey; // Используем outcome как ключ
+          const pregenPath = findPregenAudio(scenarioGameIdForPregen, searchText, locationIdForPregen, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
+          if (pregenPath) {
+            try {
+              const audioBuffer = fs.readFileSync(pregenPath);
+              const MIN_AUDIO_SIZE = 250 * 1024; // 250 КБ
+              if (audioBuffer.byteLength >= MIN_AUDIO_SIZE) {
+                audioData = { buffer: audioBuffer, contentType: 'audio/wav' };
+                console.log('[DICE] ✅ Using pre-generated audio for outcome:', outcomeCode || outcome, 'size:', audioBuffer.byteLength, 'bytes');
+              } else {
+                console.warn('[DICE] ⚠️ Pre-generated audio too small:', audioBuffer.byteLength, 'bytes, regenerating...');
+                try {
+                  fs.unlinkSync(pregenPath);
+                  const textPath = pregenPath.replace(/\.wav$/, '.txt');
+                  if (fs.existsSync(textPath)) fs.unlinkSync(textPath);
+                } catch (e) {
+                  console.warn('[DICE] Failed to delete invalid audio:', e);
+                }
+              }
+            } catch (e) {
+              console.warn('[DICE] Failed to read pre-generated audio:', e);
+            }
+          }
         }
         
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const ttsUrl = `${apiBase}/api/tts`;
-        const ttsResponse = await undiciFetch(ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: narr.text,
-            gameId,
-            locationId,
-            format: 'wav',
-            isNarrator: true,
-            depth: undefined,
-            choiceIndex: undefined,
-            parentHash: undefined
-          }),
-          signal: AbortSignal.timeout(60000)
-        });
+        // Если прегенерированного аудио нет - генерируем новое
+        if (!audioData) {
+          const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+          const ttsUrl = `${apiBase}/api/tts`;
+          const ttsResponse = await undiciFetch(ttsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: narr.text,
+              gameId,
+              locationId: locationIdForPregen,
+              format: 'wav',
+              isNarrator: true,
+              depth: depthForPregen,
+              choiceIndex: undefined,
+              parentHash: parentHashForPregen
+            }),
+            signal: AbortSignal.timeout(60000)
+          });
         
         if (ttsResponse.ok) {
           const contentType = ttsResponse.headers.get('content-type') || 'audio/wav';
@@ -10684,11 +10765,34 @@ app.post('/api/chat/dice', async (req, res) => {
           if (audioBuffer.byteLength >= MIN_AUDIO_SIZE) {
             audioData = { buffer: audioBuffer, contentType };
             console.log('[DICE] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
+            
+            // КРИТИЧЕСКИ ВАЖНО: Сохраняем аудио с правильным ключом (diceKey) для прегенерации
+            if (scenarioGameIdForPregen && narr.text) {
+              try {
+                // Используем diceKey для создания хеша, чтобы успех и неудача сохранялись отдельно
+                const hashWithoutLoc = createAudioHash(diceKey, undefined, undefined, 'narrator', depthForPregen, undefined, parentHashForPregen);
+                const subDir = locationIdForPregen || 'general';
+                const audioPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.wav`);
+                const audioDir = path.dirname(audioPath);
+                try { fs.mkdirSync(audioDir, { recursive: true }); } catch {}
+                fs.writeFileSync(audioPath, audioBuffer);
+                
+                // Сохраняем также текст
+                const textPath = path.join(PRAGEN_DIR, scenarioGameIdForPregen, subDir, `narrator_${hashWithoutLoc}.txt`);
+                try { fs.mkdirSync(path.dirname(textPath), { recursive: true }); } catch {}
+                fs.writeFileSync(textPath, narr.text, 'utf-8');
+                
+                console.log('[DICE] 💾 Saved generated audio and text for outcome:', outcomeCode || outcome, 'hash:', hashWithoutLoc);
+              } catch (e) {
+                console.warn('[DICE] Failed to save generated audio:', e);
+              }
+            }
           } else {
             console.warn('[DICE] ⚠️ Generated audio too small:', audioBuffer.byteLength, 'bytes');
           }
-        } else {
-          console.warn('[DICE] TTS generation failed:', ttsResponse.status);
+          } else {
+            console.warn('[DICE] TTS generation failed:', ttsResponse.status);
+          }
         }
       } catch (ttsErr) {
         console.warn('[DICE] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
