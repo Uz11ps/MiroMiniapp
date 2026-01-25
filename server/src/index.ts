@@ -9969,7 +9969,7 @@ async function generateChatCompletion(params: {
 }
 
 
-async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameId: string, context: string, outcomeText: string): Promise<{ text: string; fallback: boolean }> {
+async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameId: string, context: string, outcomeText: string, rollValue?: number): Promise<{ text: string; fallback: boolean }> {
   const game = await prisma.game.findUnique({ where: { id: gameId }, include: { characters: true } }).catch(() => null);
   const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
   const baseLines: string[] = [];
@@ -9990,11 +9990,14 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
       'Учитывай исход проверки d20: модификаторы, бонусы мастерства и сложность (DC). ' +
       'Если в сцене есть NPC — отыгрывай их согласно их persona. ' +
       'В конце каждого ответа дай 2–3 действия (1) ..., 2) ...). ' +
+      'КРИТИЧЕСКИ ВАЖНО: НИКОГДА не упоминай конкретные значения бросков кубиков в тексте (например, "ваша инициатива (13)", "вы выбросили 9"). ' +
+      'Описывай результат качественно (высокий/низкий, успех/неудача), но без конкретных чисел. ' +
       'Отвечай только текстом.';
   const user = [
     baseLines.length ? ('Контекст игры:\n' + baseLines.join('\n')) : '',
     context ? `Действие игрока: ${context}` : '',
     outcomeText ? `Исход проверки: ${outcomeText}` : '',
+    rollValue !== undefined ? `КРИТИЧЕСКИ ВАЖНО: Результат броска кубика = ${rollValue}. Учитывай это значение для определения успеха/неудачи, но НЕ упоминай конкретное число в тексте. Описывай результат качественно (высокий/низкий, успех/неудача), без указания чисел.` : '',
     'Продолжи сцену согласно исходу. Опиши обнаруженное/последствия/альтернативы. В конце задай, что герой делает дальше.'
   ].filter(Boolean).join('\n\n');
 
@@ -10627,7 +10630,7 @@ app.post('/api/lobbies/:id/dice', async (req, res) => {
     history.push({ from: 'bot', text: fmt });
 
     const gptContext = await buildGptSceneContext(prisma, { gameId, lobbyId, history });
-    const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt);
+    const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
     history.push({ from: 'bot', text: narr.text });
     await prisma.chatSession.upsert({
       where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } },
@@ -10816,7 +10819,7 @@ app.post('/api/chat/dice', async (req, res) => {
     if (!narr) {
     history.push({ from: 'bot', text: fmt });
     const gptContext = await buildGptSceneContext(prisma, { gameId, userId: uid, history });
-      narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt);
+      narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
       console.log('[DICE] ⚠️ Generated NEW text (pre-generated not found) for outcome:', outcomeCode || outcome);
     }
     
