@@ -263,8 +263,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     
     // Очистка
     // AudioContext и BufferSource автоматически очищаются после завершения воспроизведения
-    // Закрываем контекст только если нужно освободить ресурсы
-    // audioContext.close(); // Раскомментируйте, если нужно закрыть контекст
+    // НЕ закрываем audioContext, так как он глобальный
     
   } catch (error) {
     console.error('[STREAMING-TTS] Error:', error);
