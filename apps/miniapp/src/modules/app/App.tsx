@@ -706,8 +706,7 @@ const GameChat: React.FC = () => {
 
       const decoder = new TextDecoder();
       let buffer = '';
-      const audioContext = initAudioContext();
-      const audioQueue = getAudioQueue(audioContext);
+      // УБРАНО: audioContext и audioQueue не нужны - используем только streaming TTS через speak()
 
       while (true) {
         const { done, value } = await reader.read();
@@ -745,17 +744,32 @@ const GameChat: React.FC = () => {
                 return [...m, { from: 'bot', text: fullText }];
               });
               try { applyBgFromText(fullText); } catch {}
+              // КРИТИЧЕСКИ ВАЖНО: Используем ТОЛЬКО streaming TTS через speak()
+              // Игнорируем прегенерированное аудио - нужен только streaming режим
+              try { 
+                speak(fullText); 
+                console.log('[REPLY-STREAM] Started streaming TTS for reply message');
+              } catch (e) {
+                console.error('[REPLY-STREAM] Failed to start streaming TTS:', e);
+              }
             }
+          } else if (event === 'audio_ready') {
+            // ИГНОРИРУЕМ прегенерированное аудио - используем только streaming режим
+            console.log('[REPLY-STREAM] Ignoring audio_ready - using streaming TTS only');
           } else if (event === 'audio_chunk') {
-            // Превращаем base64 в Uint8Array и пушим в очередь с индексом сегмента
-            const binary = atob(data.data);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-              bytes[i] = binary.charCodeAt(i);
-            }
-            audioQueue.push(data.index, bytes);
-          } else if (event === 'error') {
+            // ИГНОРИРУЕМ audio_chunk - используем только streaming TTS через speak()
+            console.log('[REPLY-STREAM] Ignoring audio_chunk - using streaming TTS only');
+          } else if (event === 'error' || event === 'audio_error') {
             console.error('[STREAM] Server error:', data.error);
+            // При ошибке аудио все равно вызываем speak() как fallback
+            if (fullText && event === 'audio_error') {
+              try { 
+                speak(fullText); 
+                console.log('[REPLY-STREAM] Fallback to streaming TTS after audio_error');
+              } catch (e) {
+                console.error('[REPLY-STREAM] Fallback speak() also failed:', e);
+              }
+            }
           }
         }
       }
