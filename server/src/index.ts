@@ -5241,7 +5241,7 @@ app.post('/api/chat/reply-stream', async (req, res) => {
                 }
               },
               system_instruction: {
-                parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
+                parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words. READ THE ENTIRE TEXT FROM BEGINNING TO END WITHOUT SKIPPING ANY PART.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- READ EVERY SINGLE WORD FROM START TO FINISH - DO NOT SKIP ANY PART OF THE TEXT\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
               }
             }
           }));
@@ -5251,61 +5251,26 @@ app.post('/api/chat/reply-stream', async (req, res) => {
           try {
             const msg = JSON.parse(data.toString());
             if (msg.setupComplete) {
-              // Логируем длину текста для отладки
-              console.log(`[GEMINI-TTS-LIVE] 📝 Sending text to TTS, length: ${fullText.length} chars`);
+              // Отправляем текст частями по 500 символов АСИНХРОННО для настоящего streaming
+              console.log(`[GEMINI-TTS-LIVE] 📤 Sending text to Gemini in streaming chunks, total length: ${fullText.length} chars`);
               
-              // Для длинных текстов (>3000 символов) разбиваем на части по предложениям
-              if (fullText.length > 3000) {
-                console.log('[GEMINI-TTS-LIVE] ⚠️ Long text detected, splitting into parts');
-                const sentences = fullText.match(/[^.!?\n]+[.!?\n]+/g) || [fullText];
-                let currentPart = '';
-                let partCount = 0;
+              const chunkSize = 500;
+              let offset = 0;
+              
+              // Отправляем все чанки асинхронно без await - они будут обрабатываться параллельно
+              while (offset < fullText.length) {
+                const chunk = fullText.slice(offset, offset + chunkSize);
+                const isLast = offset + chunkSize >= fullText.length;
                 
-                // Асинхронная отправка частей
-                (async () => {
-                  const sendPart = async (partText: string, isLast: boolean) => {
-                    partCount++;
-                    console.log(`[GEMINI-TTS-LIVE] 📤 Sending part ${partCount} (${partText.length} chars), isLast: ${isLast}`);
-                    
-                    ws.send(JSON.stringify({
-                      client_content: {
-                        turns: [{
-                          role: "user",
-                          parts: [{ text: partText }]
-                        }],
-                        turn_complete: isLast
-                      }
-                    }));
-                    
-                    // Небольшая пауза между частями для стабильности
-                    if (!isLast) {
-                      await new Promise(resolve => setTimeout(resolve, 50));
-                    }
-                  };
-                  
-                  // Собираем части по ~2500 символов
-                  for (const sentence of sentences) {
-                    if ((currentPart + sentence).length > 2500 && currentPart) {
-                      await sendPart(currentPart.trim(), false);
-                      currentPart = sentence;
-                    } else {
-                      currentPart += sentence;
-                    }
-                  }
-                  
-                  // Отправляем последнюю часть
-                  if (currentPart.trim()) {
-                    await sendPart(currentPart.trim(), true);
-                  }
-                })().catch(err => console.error('[GEMINI-TTS-LIVE] Error sending parts:', err));
-              } else {
-                // Для коротких текстов отправляем как есть
+                // Отправляем чанк сразу, не ждем обработки
                 ws.send(JSON.stringify({
                   client_content: { 
-                    turns: [{ role: "user", parts: [{ text: fullText }] }], 
-                    turn_complete: true 
+                    turns: [{ role: "user", parts: [{ text: chunk }] }], 
+                    turn_complete: isLast 
                   }
                 }));
+                
+                offset += chunkSize;
               }
             } else if (msg.serverContent?.modelTurn?.parts) {
               for (const part of msg.serverContent.modelTurn.parts) {
@@ -8114,65 +8079,18 @@ app.post('/api/tts-stream', async (req, res) => {
             // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
             if (message.setupComplete) {
               isConnected = true;
-              console.log(`[GEMINI-TTS-LIVE] ✅ Setup complete, sending text (${text.length} chars)...`);
+              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
               
-              // Для длинных текстов (>3000 символов) разбиваем на части по предложениям
-              // и отправляем последовательно через streaming turns
-              if (text.length > 3000) {
-                console.log('[GEMINI-TTS-LIVE] ⚠️ Long text detected, splitting into parts');
-                const sentences = text.match(/[^.!?\n]+[.!?\n]+/g) || [text];
-                let currentPart = '';
-                let partCount = 0;
-                
-                // Асинхронная отправка частей
-                (async () => {
-                  const sendPart = async (partText: string, isLast: boolean) => {
-                    partCount++;
-                    console.log(`[GEMINI-TTS-LIVE] 📤 Sending part ${partCount} (${partText.length} chars), isLast: ${isLast}`);
-                    
-                    ws.send(JSON.stringify({
-                      client_content: {
-                        turns: [{
-                          role: "user",
-                          parts: [{ text: partText }]
-                        }],
-                        turn_complete: isLast
-                      }
-                    }));
-                    
-                    // Небольшая пауза между частями для стабильности
-                    if (!isLast) {
-                      await new Promise(resolve => setTimeout(resolve, 50));
-                    }
-                  };
-                  
-                  // Собираем части по ~2500 символов
-                  for (const sentence of sentences) {
-                    if ((currentPart + sentence).length > 2500 && currentPart) {
-                      await sendPart(currentPart.trim(), false);
-                      currentPart = sentence;
-                    } else {
-                      currentPart += sentence;
-                    }
-                  }
-                  
-                  // Отправляем последнюю часть
-                  if (currentPart.trim()) {
-                    await sendPart(currentPart.trim(), true);
-                  }
-                })().catch(err => console.error('[GEMINI-TTS-LIVE] Error sending parts:', err));
-              } else {
-                // Для коротких текстов отправляем как есть
-                ws.send(JSON.stringify({
-                  client_content: {
-                    turns: [{
-                      role: "user",
-                      parts: [{ text: text }]
-                    }],
-                    turn_complete: true
-                  }
-                }));
-              }
+              // Отправляем СТРОГО оригинальный текст
+              ws.send(JSON.stringify({
+                client_content: {
+                  turns: [{
+                    role: "user",
+                    parts: [{ text: text }]
+                  }],
+                  turn_complete: true
+                }
+              }));
               
               return;
             }
@@ -8262,7 +8180,7 @@ app.post('/api/tts-stream', async (req, res) => {
                   }
                 },
                 system_instruction: {
-                  parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
+                  parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words. READ THE ENTIRE TEXT FROM BEGINNING TO END WITHOUT SKIPPING ANY PART.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- READ EVERY SINGLE WORD FROM START TO FINISH - DO NOT SKIP ANY PART OF THE TEXT\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
                 }
               }
             }));
