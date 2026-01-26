@@ -15,9 +15,8 @@ export interface StreamingTTSOptions {
 export function initAudioContext(): AudioContext {
   if (!globalAudioContext) {
     const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
-    const ctx = new AudioContextClass({ sampleRate: 24000 });
-    globalAudioContext = ctx;
-    console.log('[STREAMING-TTS] AudioContext created, state:', ctx.state);
+    globalAudioContext = new AudioContextClass({ sampleRate: 24000 });
+    console.log('[STREAMING-TTS] AudioContext created, state:', globalAudioContext?.state);
   }
   
   const ctx = globalAudioContext;
@@ -29,15 +28,28 @@ export function initAudioContext(): AudioContext {
   return ctx;
 }
 
-// Разблокировка при первом тапе
+// Разблокировка при первом тапе (с хаком тишины для iOS/Telegram)
 if (typeof window !== 'undefined') {
   const unlock = () => {
-    initAudioContext();
-    window.removeEventListener('click', unlock);
-    window.removeEventListener('touchstart', unlock);
+    try {
+      const ctx = initAudioContext();
+      
+      // Хак для iOS/Telegram: проигрываем пустой буфер
+      const dummy = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = dummy;
+      source.connect(ctx.destination);
+      source.start(0);
+      
+      console.log('[STREAMING-TTS] Audio Unlocked via dummy sound');
+      window.removeEventListener('click', unlock);
+      window.removeEventListener('touchstart', unlock);
+    } catch (e) {
+      console.error('[STREAMING-TTS] Unlock failed:', e);
+    }
   };
-  window.addEventListener('click', unlock, { once: true });
-  window.addEventListener('touchstart', unlock, { once: true });
+  window.addEventListener('click', unlock);
+  window.addEventListener('touchstart', unlock);
 }
 
 export async function playStreamingTTS(options: StreamingTTSOptions): Promise<void> {
@@ -53,49 +65,65 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
   
   try {
     const audioContext = initAudioContext();
-    const sampleRate = audioContext.sampleRate;
+    const sampleRate = 24000; // Gemini Live по умолчанию шлет 24кГц
     
-    // GainNode для контроля громкости
     const gainNode = audioContext.createGain();
     gainNode.gain.value = 1.0;
     gainNode.connect(audioContext.destination);
     
-    // Планировщик времени
     let nextStartTime = audioContext.currentTime;
     let bytesReceived = 0;
+    let leftover: Uint8Array | null = null;
     
-    // Функция проигрывания сырого PCM куска
-    const playPCM = (pcmBuffer: ArrayBuffer) => {
-      if (pcmBuffer.byteLength < 2) return;
-      
-      // КРИТИЧНО: Убеждаемся, что длина кратна 2 для Int16
-      const safeLength = pcmBuffer.byteLength - (pcmBuffer.byteLength % 2);
-      const int16Array = new Int16Array(pcmBuffer, 0, safeLength / 2);
+    // Функция проигрывания сырого PCM куска (Шаг 1)
+    const playPCM = (value: Uint8Array) => {
+      // 1. Соединяем с остатком от прошлого чанка
+      let combined = value;
+      if (leftover) {
+        const newCombined = new Uint8Array(leftover.length + value.length);
+        newCombined.set(leftover);
+        newCombined.set(value, leftover.length);
+        combined = newCombined;
+        leftover = null;
+      }
+
+      // 2. PCM 16-bit требует 2 байта на семпл. Если байт нечетный — сохраняем в остаток
+      if (combined.length % 2 !== 0) {
+        leftover = combined.slice(combined.length - 1);
+        combined = combined.slice(0, combined.length - 1);
+      }
+
+      if (combined.length === 0) return;
+
+      // 3. КРИТИЧНО: Используем byteOffset и длину в конструкторе
+      const int16Array = new Int16Array(
+        combined.buffer,
+        combined.byteOffset,
+        combined.length / 2
+      );
+
       const float32Array = new Float32Array(int16Array.length);
-      
-      // Конвертация Int16 -> Float32
       for (let i = 0; i < int16Array.length; i++) {
         const val = int16Array[i];
         float32Array[i] = val !== undefined ? val / 32768.0 : 0;
       }
-      
+
       const audioBuffer = audioContext.createBuffer(1, float32Array.length, sampleRate);
       audioBuffer.getChannelData(0).set(float32Array);
-      
+
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(gainNode);
-      
+
       const now = audioContext.currentTime;
-      // Если мы отстали (или это первый чанк), начинаем от "сейчас" + небольшой буфер
       if (nextStartTime < now) {
         nextStartTime = now + 0.05; 
       }
-      
+
       source.start(nextStartTime);
       nextStartTime += audioBuffer.duration;
       
-      bytesReceived += pcmBuffer.byteLength;
+      bytesReceived += combined.length;
       onProgress?.(bytesReceived);
     };
 
@@ -121,26 +149,24 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       
       if (done) {
         console.log('[STREAMING-TTS] Stream complete');
-        // Ждем завершения последнего звука
         const wait = (nextStartTime - audioContext.currentTime) * 1000 + 100;
         setTimeout(() => onComplete?.(), Math.max(0, wait));
         break;
       }
       
-      // Если пришел пустой кусок - пропускаем
       if (!value || value.length === 0) continue;
 
-      // Проверка на JSON (если сервер прислал ошибку текстом вместо бинарных данных)
-      if (value[0] === 123) { // 123 это '{'
-        const text = new TextDecoder().decode(value);
-        if (text.startsWith('{"error"')) {
-          console.error('[STREAMING-TTS] Server returned error JSON:', text);
-          throw new Error(text);
+      // Проверка на JSON
+      if (value[0] === 123) {
+        const textErr = new TextDecoder().decode(value);
+        if (textErr.startsWith('{"error"')) {
+          console.error('[STREAMING-TTS] Server error:', textErr);
+          throw new Error(textErr);
         }
       }
 
-      // Проигрываем кусок сразу, как только он пришел
-      playPCM(value.buffer);
+      // Передаем весь объект Uint8Array (Шаг 2)
+      playPCM(value);
     }
     
   } catch (error) {
@@ -150,7 +176,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
 }
 
 /**
- * Вспомогательная функция для проигрывания длинных текстов частями
+ * Разбивает текст на части и проигрывает последовательно.
  */
 export async function playStreamingTTSChunked(options: StreamingTTSOptions & { wordsPerChunk?: number }): Promise<void> {
   const { text, wordsPerChunk = 50, ...rest } = options;
