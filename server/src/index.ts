@@ -5146,57 +5146,6 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
 
-    // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ - генерируем аудио перед отправкой текста
-    // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
-    // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем ответ до завершения TTS
-    console.log('[REPLY] 🎤 Generating TTS for text length:', text.length);
-    let audioData: { buffer: Buffer; contentType: string } | null = null;
-    
-    // Определяем переменные для TTS ДО блока try, чтобы они были доступны везде
-    const depth = depthForPregen;
-    let choiceIndex = choiceIndexForPregen; // Используем let, так как может быть обновлен при семантическом поиске
-    const parentHash = parentHashForPregen;
-    const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
-    const characterId = undefined; // Для narrator всегда undefined
-    
-    // КРИТИЧЕСКИ ВАЖНО: НЕ ждем TTS - отправляем текст сразу
-    // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
-    // Удаляем весь блок ожидания TTS
-              const pcmAudio = Buffer.concat(audioChunks);
-              const sampleRate = 24000;
-              const channels = 1;
-              const bitsPerSample = 16;
-              const byteRate = sampleRate * channels * (bitsPerSample / 8);
-              const blockAlign = channels * (bitsPerSample / 8);
-              const dataSize = pcmAudio.length;
-              const fileSize = 36 + dataSize;
-              
-              const wavHeader = Buffer.alloc(44);
-              wavHeader.write('RIFF', 0);
-              wavHeader.writeUInt32LE(fileSize, 4);
-              wavHeader.write('WAVE', 8);
-              wavHeader.write('fmt ', 12);
-              wavHeader.writeUInt32LE(16, 16);
-              wavHeader.writeUInt16LE(1, 20);
-              wavHeader.writeUInt16LE(channels, 22);
-              wavHeader.writeUInt32LE(sampleRate, 24);
-              wavHeader.writeUInt32LE(byteRate, 28);
-              wavHeader.writeUInt16LE(blockAlign, 32);
-              wavHeader.writeUInt16LE(bitsPerSample, 34);
-              wavHeader.write('data', 36);
-              wavHeader.writeUInt32LE(dataSize, 40);
-              
-              const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
-              const contentType = 'audio/wav';
-          const ttsDuration = Date.now() - ttsStartTime;
-              audioData = { buffer: audioBuffer, contentType };
-          console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
-          
-              // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов, но только если аудио валидное
-              // ВАЖНО: Сохраняем по userText (действие игрока), а не по text (ответ бота)
-              // Это нужно, чтобы потом можно было найти ответ бота по действию игрока
-              // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации сохраняем БЕЗ locationId в хеше!
-              // locationId используется только для папки, но НЕ в хеше (чтобы диалоги внутри локации находились)
     // КРИТИЧЕСКИ ВАЖНО: НЕ ждем TTS - отправляем текст сразу
     // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
     console.log('[REPLY] ✅ Text ready, sending response immediately (audio will stream separately)');
