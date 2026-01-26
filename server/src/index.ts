@@ -9309,10 +9309,38 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Настройка для streaming
-    const genAI = new GoogleGenerativeAI(geminiApiKey);
+    // Получаем прокси для Gemini
+    const proxies = parseGeminiProxies();
+    const proxyUrl = proxies.length > 0 ? proxies[0] : null;
+    
+    // Создаем custom fetch с прокси для SDK
+    let customFetch: typeof fetch | undefined;
+    if (proxyUrl && proxyUrl !== '__direct__') {
+      const { ProxyAgent } = await import('undici');
+      const dispatcher = new ProxyAgent(proxyUrl);
+      
+      // Создаем fetch с прокси
+      customFetch = async (url: string | URL | Request, init?: RequestInit) => {
+        const response = await undiciFetch(url, {
+          ...init,
+          dispatcher,
+        } as any);
+        return response as any;
+      };
+      
+      console.log('[GEMINI-TTS-STREAM] 🔄 Using proxy:', proxyUrl);
+    } else {
+      console.log('[GEMINI-TTS-STREAM] 🌐 Using direct connection (no proxy)');
+    }
+    
+    // Настройка для streaming с прокси
+    // Передаем custom fetch в конструктор, если SDK поддерживает
+    const genAI = customFetch 
+      ? new (GoogleGenerativeAI as any)(geminiApiKey, { fetch: customFetch })
+      : new GoogleGenerativeAI(geminiApiKey);
+      
     const model = genAI.getGenerativeModel({ 
-      model: modelName || 'gemini-2.5-flash-preview-tts' 
+      model: modelName || 'gemini-2.5-flash-preview-tts'
     });
     
     // Конфигурация для получения аудио

@@ -2,7 +2,11 @@
 # Пример запроса к streaming TTS endpoint
 
 # Базовый URL (измените если нужно)
-BASE_URL="http://localhost:4000"
+BASE_URL="${API_BASE_URL:-http://localhost:4000}"
+
+echo "🧪 Тест streaming TTS"
+echo "URL: ${BASE_URL}/api/tts-stream"
+echo ""
 
 # Отправка POST запроса
 curl -X POST "${BASE_URL}/api/tts-stream" \
@@ -12,10 +16,30 @@ curl -X POST "${BASE_URL}/api/tts-stream" \
     "voiceName": "Aoede",
     "modelName": "gemini-2.5-flash-preview-tts"
   }' \
-  --output test-audio.pcm
+  --output test-audio.pcm \
+  --write-out "\nHTTP: %{http_code} | Size: %{size_download} bytes | Time: %{time_total}s\n"
 
 echo ""
-echo "✅ Аудио сохранено в test-audio.pcm"
+if [ -f test-audio.pcm ]; then
+  FILE_SIZE=$(stat -c%s test-audio.pcm 2>/dev/null || stat -f%z test-audio.pcm 2>/dev/null || echo "0")
+  FILE_TYPE=$(file test-audio.pcm 2>/dev/null || echo "unknown")
+  
+  echo "✅ Аудио сохранено в test-audio.pcm"
+  echo "📊 Размер: ${FILE_SIZE} bytes"
+  echo "📄 Тип: ${FILE_TYPE}"
+  
+  # Проверяем на ошибки
+  if [ "$FILE_SIZE" -lt 100 ] || echo "$FILE_TYPE" | grep -q "JSON\|text"; then
+    echo ""
+    echo "⚠️ Возможна ошибка! Содержимое:"
+    head -c 500 test-audio.pcm
+    echo ""
+    exit 1
+  fi
+else
+  echo "❌ Файл не создан!"
+  exit 1
+fi
 
 # Проверяем размер файла
 if [ -f test-audio.pcm ]; then
