@@ -9320,16 +9320,12 @@ app.post('/api/tts-stream', async (req, res) => {
     const finalModelName = modelName || 'gemini-2.5-flash-preview-tts';
     const finalVoiceName = voiceName || 'Aoede';
     
-    // Тело запроса для streaming TTS
-    // ВАЖНО: Добавляем systemInstruction чтобы модель генерировала ТОЛЬКО аудио, не текст
+    // Тело запроса для streaming TTS (как в обычном TTS, но для streaming endpoint)
     const requestBody = {
       contents: [{
         role: 'user',
         parts: [{ text }]
       }],
-      systemInstruction: {
-        parts: [{ text: 'You are a text-to-speech system. Generate ONLY audio output from the given text. Do not generate any text response, only audio.' }]
-      },
       generationConfig: {
         responseModalities: ['AUDIO'], // КРИТИЧЕСКИ ВАЖНО: только аудио
         speechConfig: {
@@ -9363,6 +9359,7 @@ app.post('/api/tts-stream', async (req, res) => {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${finalModelName}:streamGenerateContent?alt=sse`;
         
         console.log(`[GEMINI-TTS-STREAM] 🎤 Attempting streaming via ${finalModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
+        console.log(`[GEMINI-TTS-STREAM] Request body:`, JSON.stringify(requestBody, null, 2).slice(0, 500));
         
         const response = await undiciFetch(url, {
           method: 'POST',
