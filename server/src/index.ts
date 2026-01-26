@@ -9381,6 +9381,8 @@ app.post('/api/tts-stream', async (req, res) => {
           continue;
         }
         
+        console.log(`[GEMINI-TTS-STREAM] ✅ Response OK, Content-Type: ${response.headers.get('content-type')}`);
+        
         // Читаем SSE stream
         const reader = response.body;
         if (!reader) {
@@ -9392,6 +9394,9 @@ app.post('/api/tts-stream', async (req, res) => {
         let chunkCount = 0;
         let hasAudio = false;
         let buffer = '';
+        let sseLineCount = 0;
+        
+        console.log('[GEMINI-TTS-STREAM] 📡 Reading SSE stream...');
         
         // Парсим SSE stream
         for await (const chunk of reader) {
@@ -9400,9 +9405,19 @@ app.post('/api/tts-stream', async (req, res) => {
           buffer = lines.pop() || ''; // Оставляем неполную строку в буфере
           
           for (const line of lines) {
+            if (line.trim() === '') continue; // Пропускаем пустые строки
+            
             if (line.startsWith('data: ')) {
+              sseLineCount++;
               try {
-                const data = JSON.parse(line.slice(6));
+                const jsonData = line.slice(6); // Убираем "data: "
+                const data = JSON.parse(jsonData);
+                
+                // Логируем структуру первых нескольких сообщений
+                if (sseLineCount <= 3) {
+                  console.log(`[GEMINI-TTS-STREAM] 📨 SSE message ${sseLineCount} structure:`, JSON.stringify(data, null, 2).slice(0, 500));
+                }
+                
                 const candidates = data.candidates;
                 if (candidates && candidates.length > 0) {
                   const content = candidates[0].content;
@@ -9422,17 +9437,42 @@ app.post('/api/tts-stream', async (req, res) => {
                           res.write(audioBuffer);
                           
                           console.log(`[GEMINI-TTS-STREAM] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
+                        } else if (mimeType) {
+                          console.log(`[GEMINI-TTS-STREAM] ⚠️ Found inlineData but not audio: mimeType=${mimeType}, dataLength=${data ? data.length : 0}`);
+                        }
+                      } else {
+                        // Логируем если есть другие поля
+                        const partKeys = Object.keys(part);
+                        if (partKeys.length > 0 && sseLineCount <= 5) {
+                          console.log(`[GEMINI-TTS-STREAM] 📋 Part keys:`, partKeys);
                         }
                       }
                     }
+                  } else {
+                    if (sseLineCount <= 3) {
+                      console.log(`[GEMINI-TTS-STREAM] ⚠️ Content has no parts:`, JSON.stringify(content, null, 2).slice(0, 300));
+                    }
+                  }
+                } else {
+                  if (sseLineCount <= 3) {
+                    console.log(`[GEMINI-TTS-STREAM] ⚠️ No candidates in data:`, JSON.stringify(data, null, 2).slice(0, 300));
                   }
                 }
               } catch (e) {
-                // Игнорируем ошибки парсинга отдельных чанков
+                console.warn(`[GEMINI-TTS-STREAM] ⚠️ Error parsing SSE line ${sseLineCount}:`, e?.message || String(e), 'Line:', line.slice(0, 200));
+              }
+            } else if (line.startsWith('event:') || line.startsWith('id:')) {
+              // Игнорируем другие SSE поля
+            } else if (line.trim() !== '') {
+              // Логируем неожиданные строки
+              if (sseLineCount < 5) {
+                console.log(`[GEMINI-TTS-STREAM] 📝 Unexpected SSE line:`, line.slice(0, 200));
               }
             }
           }
         }
+        
+        console.log(`[GEMINI-TTS-STREAM] 📊 SSE stream ended. Total SSE messages: ${sseLineCount}, Audio chunks: ${chunkCount}`);
         
         if (!hasAudio) {
           console.warn('[GEMINI-TTS-STREAM] ⚠️ No audio chunks received');
