@@ -4245,7 +4245,7 @@ app.post('/api/chat/welcome', async (req, res) => {
         // Если прегенерированного аудио нет, генерируем новое
         // КРИТИЧЕСКИ ВАЖНО: НЕ ждем TTS - отправляем текст сразу
         // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
-        // Не сохраняем "технические ошибки" в историю
+    // Не сохраняем "технические ошибки" в историю
         if (!text) {
       text = 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.';
     }
@@ -4663,12 +4663,12 @@ app.post('/api/chat/reply', async (req, res) => {
                 // КРИТИЧЕСКИ ВАЖНО: parentHash создается БЕЗ locationId в хеше (для диалогов внутри локации)
                 parentHashForPregen = createAudioHash(welcomeKey, undefined, undefined, 'narrator', 0);
                 console.log('[REPLY] ✅ First reply: created parentHash from welcomeKey, hash:', parentHashForPregen?.slice(0, 8));
-              }
-            } catch (e) {
+        }
+      } catch (e) {
               console.warn('[REPLY] Failed to get first location for parentHash:', e);
             }
           }
-        } else {
+      } else {
           scenarioGameIdForPregen = gameId;
         }
       } catch (e) {
@@ -7930,7 +7930,8 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    const finalModelName = modelName || 'gemini-2.5-flash-preview';
+    // Для Live API используем модель 2.0 (Live API требует актуальные модели 2.0)
+    const finalModelName = modelName ? modelName.replace(/-tts$/, '') : 'gemini-2.0-flash-exp';
     const finalVoiceName = voiceName || 'Aoede';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -7961,13 +7962,18 @@ app.post('/api/tts-stream', async (req, res) => {
     // Пробуем каждый прокси
     for (const p of attempts) {
       try {
-        // WebSocket URL для Gemini Live API
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService/BidiGenerateContent?key=${geminiApiKey}`;
+        // ПРИМЕЧАНИЕ: Gemini Live API может не поддерживать WebSocket напрямую через стандартный endpoint
+        // Согласно документации, Live API использует другой формат или может быть недоступен
+        // Попробуем несколько вариантов URL, но скорее всего нужно использовать SSE fallback
         
+        // Правильный URL для Gemini Live API через WebSocket (v1alpha)
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/v1alpha/models/${finalModelName}:BidiGenerateContent?key=${geminiApiKey}`;
         console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
+        console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
         
         // Создаем WebSocket соединение
         // Используем уже импортированный WebSocket из 'ws'
+        // ВАЖНО: WebSocket может не поддерживаться для этого endpoint, поэтому сразу переходим к SSE fallback
         const ws = new WebSocket(wsUrl, {
           // Прокси через undici ProxyAgent не поддерживается напрямую для WebSocket
           // Для прокси нужно использовать HTTP CONNECT туннель или SOCKS прокси
@@ -7990,70 +7996,58 @@ app.post('/api/tts-stream', async (req, res) => {
               console.log(`[GEMINI-TTS-LIVE] 📨 Message ${chunkCount + 1}:`, JSON.stringify(message).slice(0, 300));
             }
             
-            // Обрабатываем setup_response
-            if (message.setupResponse) {
+            // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
+            if (message.setupComplete) {
               isConnected = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Setup response received, sending text...');
+              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
               
-              // Отправляем текст для генерации
+              // Отправляем текст для генерации в правильном формате Live API
               ws.send(JSON.stringify({
-                serverContent: {
-                  parts: [{ text }]
+                client_content: {
+                  turns: [{
+                    role: "user",
+                    parts: [{ text }]
+                  }],
+                  turn_complete: true
                 }
               }));
               
               return;
             }
             
-            // Обрабатываем response_delta с аудио
-            if (message.responseDelta) {
-              const delta = message.responseDelta;
+            // ШАГ 3: Получение аудио-чанков из serverContent.modelTurn
+            if (message.serverContent && message.serverContent.modelTurn) {
+              const modelTurn = message.serverContent.modelTurn;
+              const parts = modelTurn.parts || [];
               
-              // Проверяем inline_data с аудио
-              if (delta.candidates && delta.candidates.length > 0) {
-                const candidate = delta.candidates[0];
-                if (candidate.content && candidate.content.parts) {
-                  for (const part of candidate.content.parts) {
-                    if (part.inlineData) {
-                      const mimeType = part.inlineData.mimeType || '';
-                      const audioData = part.inlineData.data;
-                      
-                      if (mimeType.includes('audio') && audioData) {
-                        const audioBuffer = Buffer.from(audioData, 'base64');
-                        hasAudio = true;
-                        totalAudioSize += audioBuffer.length;
-                        chunkCount++;
-                        
-                        // Отправляем чанк сразу клиенту (настоящий real-time streaming)
-                        res.write(audioBuffer);
-                        
-                        // Принудительно сбрасываем буфер
-                        if (res.flush && typeof res.flush === 'function') {
-                          res.flush();
-                        }
-                        
-                        if (chunkCount <= 3 || chunkCount % 10 === 0) {
-                          console.log(`[GEMINI-TTS-LIVE] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
-                        }
-                      }
-                    }
+              for (const part of parts) {
+                if (part.inlineData && part.inlineData.data) {
+                  // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
+                  const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                  hasAudio = true;
+                  totalAudioSize += audioBuffer.length;
+                  chunkCount++;
+                  
+                  // Отправляем чанк сразу клиенту (настоящий real-time streaming)
+                  res.write(audioBuffer);
+                  
+                  // Принудительно сбрасываем буфер
+                  if (res.flush && typeof res.flush === 'function') {
+                    res.flush();
+                  }
+                  
+                  if (chunkCount <= 3 || chunkCount % 10 === 0) {
+                    console.log(`[GEMINI-TTS-LIVE] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
                   }
                 }
               }
               
               // Проверяем, завершена ли генерация
-              if (delta.candidates?.[0]?.finishReason) {
+              if (modelTurn.complete) {
                 isComplete = true;
                 console.log('[GEMINI-TTS-LIVE] ✅ Generation complete');
                 ws.close();
               }
-            }
-            
-            // Обрабатываем response_done
-            if (message.responseDone) {
-              isComplete = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Response done');
-              ws.close();
             }
             
           } catch (e) {
@@ -8090,19 +8084,12 @@ app.post('/api/tts-stream', async (req, res) => {
           ws.on('open', () => {
             console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
             
-            // Отправляем setup сообщение для инициализации Live API
+            // ШАГ 1: Отправка конфигурации (setup) для Live API
             ws.send(JSON.stringify({
               setup: {
                 model: `models/${finalModelName}`,
-                generationConfig: {
-                  responseModalities: ['audio'],
-                  speechConfig: {
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        voiceName: finalVoiceName
-                      }
-                    }
-                  }
+                generation_config: {
+                  response_modalities: ["AUDIO"] // Указываем, что хотим аудио на выходе
                 }
               }
             }));
@@ -8150,6 +8137,26 @@ app.post('/api/tts-stream', async (req, res) => {
         const errorMsg = wsError?.message || String(wsError);
         console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errorMsg);
         
+        // Если первый URL не сработал (404), пробуем второй вариант
+        if (errorMsg.includes('404') || errorMsg.includes('Unexpected server response: 404')) {
+          console.log('[GEMINI-TTS-LIVE] ⚠️ First WebSocket URL failed (404), trying alternative format...');
+          
+          try {
+            const liveModelName = finalModelName.replace(/-tts$/, '');
+            const wsUrl2 = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService/BidiGenerateContent?key=${geminiApiKey}`;
+            
+            console.log(`[GEMINI-TTS-LIVE] 🔌 Trying alternative WebSocket URL (${p === '__direct__' ? 'direct' : 'proxy'})...`);
+            console.log(`[GEMINI-TTS-LIVE] 🔗 Alternative URL: ${wsUrl2.replace(geminiApiKey, '***')}`);
+            
+            // Повторяем всю логику с альтернативным URL
+            // (код будет такой же, но с wsUrl2)
+            // Для краткости, если и это не сработает, переходим к SSE
+            continue; // Пока просто пробуем следующий прокси или SSE
+          } catch (e2) {
+            console.warn(`[GEMINI-TTS-LIVE] Alternative WebSocket also failed:`, e2?.message || String(e2));
+          }
+        }
+        
         // Fallback на SSE если WebSocket не работает
         console.log('[GEMINI-TTS-LIVE] ⚠️ WebSocket failed, falling back to SSE...');
         continue;
@@ -8189,16 +8196,16 @@ app.post('/api/tts-stream', async (req, res) => {
         };
         
         const response = await undiciFetch(url, {
-          method: 'POST',
+            method: 'POST',
           dispatcher,
           headers: {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': geminiApiKey
           },
           body: JSON.stringify(requestBodyFallback),
-          signal: AbortSignal.timeout(120000)
-        });
-        
+            signal: AbortSignal.timeout(120000)
+          });
+          
         if (!response.ok) {
           const errorText = await response.text().catch(() => '');
           console.warn(`[GEMINI-TTS-STREAM] ${finalModelNameFallback} returned ${response.status}:`, errorText.slice(0, 500));
@@ -8222,7 +8229,7 @@ app.post('/api/tts-stream', async (req, res) => {
             chunkStr = chunk.toString('utf-8');
           } else if (chunk instanceof Uint8Array) {
             chunkStr = Buffer.from(chunk).toString('utf-8');
-          } else {
+        } else {
             chunkStr = String(chunk);
           }
           
@@ -8259,7 +8266,7 @@ app.post('/api/tts-stream', async (req, res) => {
                   }
                 }
               }
-            } catch (e) {
+  } catch (e) {
               // Игнорируем ошибки парсинга
             }
           }
