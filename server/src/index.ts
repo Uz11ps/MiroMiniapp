@@ -4772,9 +4772,6 @@ app.post('/api/chat/reply', async (req, res) => {
       crit_fail: 'Результат D&D: Критический провал! Опиши катастрофическое последствие или досадную помеху.',
     };
 
-    // КРИТИЧЕСКИ ВАЖНО: Определяем choiceIndex ДО создания userPrompt, чтобы передать его в промпт
-    // Это нужно, чтобы AI знал, какой вариант выбрал пользователь, даже если прегенерированного контента нет
-    let detectedChoiceIndexForPrompt: number | undefined = undefined;
 
     const userPrompt = [
       'Контекст игры:\n' + context.filter(Boolean).join('\n\n'),
@@ -4792,7 +4789,6 @@ app.post('/api/chat/reply', async (req, res) => {
     let scenarioGameIdForPregen: string | undefined = undefined;
     let depthForPregen = 0;
     let choiceIndexForPregen: number | undefined = undefined;
-    let choiceIndexFromAI: boolean = false; // Флаг: был ли choiceIndex определен AI
     let parentHashForPregen: string | undefined = undefined;
     // Прегенерация удалена
     
@@ -4823,32 +4819,7 @@ app.post('/api/chat/reply', async (req, res) => {
             });
             depthForPregen = botMessages.length;
             
-            // КРИТИЧЕСКИ ВАЖНО: choiceIndex определяем из ТЕКУЩЕГО userText (ответ пользователя)
-            // А не из истории, так как для первого ответа на welcome сообщение это еще не в истории
-            // КРИТИЧЕСКИ ВАЖНО: Всегда используем AI для определения choiceIndex, если есть варианты выбора
-            if (userText) {
-              const lastBotMessage = botMessages.length > 0 ? botMessages[botMessages.length - 1] : null;
-              try {
-                const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessage?.text);
-                if (detectedChoiceIndex === -1) {
-                  // AI не смог определить выбор - отправляем сообщение пользователю
-                  console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
-                  return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-                } else if (detectedChoiceIndex !== undefined) {
-                  // AI успешно определил choiceIndex
-                  choiceIndexForPregen = detectedChoiceIndex;
-                  choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
-                  console.log('[REPLY] ✅ Detected choiceIndex from current userText (AI):', choiceIndexForPregen, 'for userText:', userText);
-                } else {
-                  // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
-                  console.log('[REPLY] ⚠️ AI returned undefined - no choices found in bot message, continuing without choiceIndex');
-        }
-      } catch (e) {
-                console.warn('[REPLY] Failed to detect choiceIndex with AI:', e);
-                // Если AI не смог определить - просим пользователя уточнить
-                return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-              }
-            }
+            // choiceIndex больше не определяется через AI - пользователь может писать свободно
             
             // parentHash - это хеш последнего сообщения бота (welcome сообщения или предыдущего ответа)
             if (botMessages.length > 0) {
@@ -4860,50 +4831,8 @@ app.post('/api/chat/reply', async (req, res) => {
               }
             }
       } else {
-            // Если истории нет (первый ответ на welcome), depth=1, choiceIndex из userText
+            // Если истории нет (первый ответ на welcome), depth=1
             depthForPregen = 1;
-            if (userText) {
-              // Получаем welcome сообщение для AI-поиска
-              let welcomeMessageText: string | undefined = undefined;
-              try {
-                const uid = lobbyId ? undefined : await resolveUserIdFromQueryOrBody(req, prisma);
-                const chatSess = lobbyId 
-                  ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } })
-                  : uid ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } } }) : null;
-                if (chatSess?.history) {
-                  const hist = (chatSess.history as any) as Array<{ from: 'bot' | 'me'; text: string }>;
-                  const welcomeMsg = hist.find(m => m.from === 'bot');
-                  if (welcomeMsg?.text) {
-                    welcomeMessageText = welcomeMsg.text;
-                  }
-                }
-              } catch (e) {
-                // Игнорируем ошибки
-              }
-              
-              // КРИТИЧЕСКИ ВАЖНО: Всегда используем AI для определения choiceIndex, если есть варианты выбора
-              try {
-                const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, welcomeMessageText);
-                if (detectedChoiceIndex === -1) {
-                  // AI не смог определить выбор - отправляем сообщение пользователю
-                  console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
-                  return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-                } else if (detectedChoiceIndex !== undefined) {
-                  // AI успешно определил choiceIndex
-                  choiceIndexForPregen = detectedChoiceIndex;
-                  choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
-                  detectedChoiceIndexForPrompt = detectedChoiceIndex; // Сохраняем для использования в промпте
-                  console.log('[REPLY] ✅ First reply: detected choiceIndex from userText (AI):', choiceIndexForPregen, 'for userText:', userText);
-                } else {
-                  // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
-                  console.log('[REPLY] ⚠️ AI returned undefined - no choices found in welcome message, continuing without choiceIndex');
-                }
-              } catch (e) {
-                console.warn('[REPLY] Failed to detect choiceIndex with AI:', e);
-                // Если AI не смог определить - просим пользователя уточнить
-                return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-              }
-            }
             // parentHash для первого ответа - это хеш welcome сообщения (depth=0)
             // КРИТИЧЕСКИ ВАЖНО: Используем welcomeKey вместо текста, чтобы parentHash был одинаковым для одной локации
             try {
@@ -4928,130 +4857,12 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
     
-    // КРИТИЧЕСКИ ВАЖНО: Определяем choiceIndex через AI ПЕРЕД поиском прегенерации
-    // Это нужно, чтобы использовать правильный choiceIndex при поиске
-    if (scenarioGameIdForPregen && userText && choiceIndexForPregen === undefined) {
-      try {
-        // Получаем последнее сообщение бота для AI-обработки
-        let lastBotMessageText: string | undefined = undefined;
-        if (baseHistory && baseHistory.length > 0) {
-          const botMessages = baseHistory.filter(m => m.from === 'bot');
-          if (botMessages.length > 0) {
-            lastBotMessageText = botMessages[botMessages.length - 1]?.text;
-          }
-        } else {
-          // Если истории нет, получаем welcome сообщение из chatSession
-          try {
-            const uid = lobbyId ? undefined : await resolveUserIdFromQueryOrBody(req, prisma);
-            const chatSess = lobbyId 
-              ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } } })
-              : uid ? await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } } }) : null;
-            if (chatSess?.history) {
-              const hist = (chatSess.history as any) as Array<{ from: 'bot' | 'me'; text: string }>;
-              const welcomeMsg = hist.find(m => m.from === 'bot');
-              if (welcomeMsg?.text) {
-                lastBotMessageText = welcomeMsg.text;
-              }
-            }
-          } catch (e) {
-            // Игнорируем ошибки
-          }
-        }
-        
-        // КРИТИЧЕСКИ ВАЖНО: Всегда используем AI для определения choiceIndex, если есть варианты выбора
-        const detectedChoiceIndex = await detectChoiceIndexWithAI(userText, lastBotMessageText);
-        if (detectedChoiceIndex === -1) {
-          // AI не смог определить выбор - отправляем сообщение пользователю
-          console.log('[REPLY] ⚠️ AI cannot determine choiceIndex, asking user to clarify');
-          return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-        } else if (detectedChoiceIndex !== undefined) {
-          // AI успешно определил choiceIndex
-          choiceIndexForPregen = detectedChoiceIndex;
-          choiceIndexFromAI = true; // Помечаем, что choiceIndex определен AI
-          console.log('[REPLY] ✅ Detected choiceIndex with AI:', choiceIndexForPregen, 'for userText:', userText);
-          
-          // КРИТИЧЕСКИ ВАЖНО: Используем choiceIndex для выбора exit
-          if (gameId) {
-            try {
-              const sess = await getGameSession();
-              console.log(`[REPLY] 🔍 Checking exit selection: gameId=${gameId}, sess=${!!sess}, currentLocationId=${sess?.currentLocationId}`);
-              if (sess?.currentLocationId) {
-                const curLocId = sess.currentLocationId;
-                const exits = await prisma.locationExit.findMany({ where: { locationId: curLocId } });
-                const btns = exits.filter((e: any) => e.type === 'BUTTON');
-                console.log(`[REPLY] 🔍 Found ${btns.length} buttons for location ${curLocId}, choiceIndexForPregen=${choiceIndexForPregen}`);
-                if (btns.length > 0 && choiceIndexForPregen >= 0 && choiceIndexForPregen < btns.length) {
-                  const chosenExit = btns[choiceIndexForPregen];
-                  console.log(`[REPLY] ✅ Chosen exit by choiceIndex ${choiceIndexForPregen}:`, { 
-                    id: chosenExit.id, 
-                    buttonText: chosenExit.buttonText, 
-                    isGameOver: chosenExit.isGameOver, 
-                    type: chosenExit.type, 
-                    targetLocationId: chosenExit.targetLocationId 
-                  });
-                  
-                  // КРИТИЧЕСКИ ВАЖНО: Если у exit есть targetLocationId, то isGameOver ДОЛЖЕН быть false!
-                  if (chosenExit.targetLocationId && (chosenExit.isGameOver || chosenExit.type === 'GAMEOVER')) {
-                    console.warn(`[REPLY] ⚠️ Exit has targetLocationId but is marked as game over - IGNORING isGameOver flag!`);
-                    chosenExit.isGameOver = false;
-                    chosenExit.type = chosenExit.type === 'GAMEOVER' ? 'BUTTON' : chosenExit.type;
-                  }
-                  
-                  if (chosenExit.isGameOver || chosenExit.type === 'GAMEOVER') {
-                    console.log('[REPLY] ⚠️ Exit marked as game over - setting forcedGameOver');
-                    try {
-                      const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
-                      state.finishedAt = new Date().toISOString();
-                      state.finishReason = 'game_over';
-                      await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
-                      forcedGameOver = true;
-                    } catch {}
-                  } else if (chosenExit.targetLocationId) {
-                    console.log(`[REPLY] 🔄 Updating currentLocationId from ${sess.currentLocationId} to ${chosenExit.targetLocationId}`);
-                    await prisma.gameSession.update({ where: { id: sess.id }, data: { currentLocationId: chosenExit.targetLocationId } });
-                    // Обновляем кэш после изменения локации
-                    cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
-                    // КРИТИЧЕСКИ ВАЖНО: Обновляем locationIdForPregen для правильного сохранения прегенерированных материалов
-                    locationIdForPregen = chosenExit.targetLocationId;
-                    console.log(`[REPLY] ✅ Updated locationIdForPregen from ${sess.currentLocationId} to ${locationIdForPregen} after exit selection`);
-                  } else {
-                    console.warn(`[REPLY] ⚠️ Chosen exit has no targetLocationId, locationIdForPregen remains: ${locationIdForPregen}`);
-                  }
-                } else {
-                  console.warn(`[REPLY] ⚠️ Cannot choose exit: btns.length=${btns.length}, choiceIndexForPregen=${choiceIndexForPregen}`);
-                }
-              }
-            } catch (e) {
-              console.warn('[REPLY] Failed to choose exit by choiceIndex:', e);
-            }
-          }
-        } else {
-          // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
-          console.log('[REPLY] ⚠️ AI returned undefined - no choices found in bot message, continuing without choiceIndex');
-        }
-      } catch (e) {
-        console.warn('[REPLY] Failed to detect choiceIndex with AI:', e);
-        // Если AI не смог определить - просим пользователя уточнить
-        return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
-      }
-    }
+    // AI обработка выбора вариантов удалена - пользователь может писать свободно
     
     // Прегенерация удалена - генерируем в реальном времени
-    // КРИТИЧЕСКИ ВАЖНО: Если AI определил choiceIndex, добавляем информацию о выбранном варианте в промпт
+    // AI обработка выбора вариантов удалена - пользователь может писать свободно
     if (!text) {
       let enhancedUserPrompt = userPrompt;
-      if (choiceIndexForPregen !== undefined && baseHistory && baseHistory.length > 0) {
-        const botMessages = baseHistory.filter(m => m.from === 'bot');
-        const lastBotMessage = botMessages.length > 0 ? botMessages[botMessages.length - 1] : null;
-        if (lastBotMessage?.text) {
-          const choices = parseChoiceOptions(lastBotMessage.text);
-          if (choices.length > 0 && choiceIndexForPregen >= 0 && choiceIndexForPregen < choices.length) {
-            const selectedChoice = choices[choiceIndexForPregen];
-            enhancedUserPrompt = userPrompt + `\n\nКРИТИЧЕСКИ ВАЖНО: Пользователь выбрал вариант ${choiceIndexForPregen + 1}: "${selectedChoice}". Генерируй ответ на основе ЭТОГО выбора, а не на основе исходного текста пользователя.`;
-            console.log(`[REPLY] 🎯 Enhanced prompt with selected choice: ${choiceIndexForPregen + 1} - "${selectedChoice}"`);
-          }
-        }
-      }
       
       // КРИТИЧЕСКИ ВАЖНО: Получаем реальные exits из базы данных и передаем их AI
       // Это нужно, чтобы AI знал о реальных exits и не предлагал варианты, которых нет в базе данных
@@ -5439,7 +5250,6 @@ app.post('/api/chat/reply', async (req, res) => {
     const parentHash = parentHashForPregen;
     const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
     const characterId = undefined; // Для narrator всегда undefined
-    const choiceIndexFromAIFlag = choiceIndexFromAI; // Копируем флаг для использования в блоке TTS
     
     try {
       // КРИТИЧЕСКИ ВАЖНО: Используем уже определенные переменные из верхнего блока поиска текста!
@@ -6278,6 +6088,29 @@ function simpleHash(str: string): number {
     hash = hash & hash; // Convert to 32bit integer
   }
   return Math.abs(hash);
+}
+
+// Функция для создания хеша аудио (для отслеживания цепочек диалогов)
+// Используется для parentHash - отслеживания связи между сообщениями
+function createAudioHash(
+  text: string,
+  locationId: string | undefined,
+  characterId: string | undefined,
+  role: string,
+  depth: number
+): string {
+  // Создаем ключ из параметров (БЕЗ locationId для диалогов внутри локации)
+  const parts: string[] = [];
+  parts.push(text || '');
+  // locationId НЕ включаем в хеш (для диалогов внутри локации)
+  if (characterId) parts.push(`char:${characterId}`);
+  parts.push(`role:${role}`);
+  parts.push(`depth:${depth}`);
+  
+  const key = parts.join('|');
+  
+  // Создаем SHA-256 хеш
+  return crypto.createHash('sha256').update(key).digest('hex');
 }
 
 // Расширенный тип персонажа для анализа
