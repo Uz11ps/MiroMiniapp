@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, playStreamingTTSChunked } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, playStreamingTTSSegmented, stopStreamingTTS } from '../../api';
 
 // CSS импортируется в main.tsx, не нужно дублировать здесь
 
@@ -240,20 +240,16 @@ const GameChat: React.FC = () => {
       // Предотвращаем дубли
       if (t === lastSpokenRef.current && speakingInFlightRef.current) return;
       
-      console.log('[TTS-CLIENT] Starting streaming TTS for text:', t.slice(0, 100));
+      console.log('[TTS-CLIENT] Starting segmented streaming TTS for text:', t.slice(0, 100));
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
       speakingInFlightRef.current = true;
       lastSpokenRef.current = t;
 
-      // Останавливаем старый AudioContext если нужно (хотя наш streamingTTS использует синглтон)
-      // В данном случае streamingTTS сам управляет очередью или наложением через nextStartTime
-      
-      await playStreamingTTSChunked({
+      await playStreamingTTSSegmented({
         text: t,
-        voiceName: 'Aoede', // Или брать из настроек/контекста
+        gameId: id,
         modelName: 'gemini-2.0-flash-exp',
-        wordsPerChunk: 50,
         onProgress: (bytes) => {
           // Можно обновлять UI прогресса
         },
@@ -643,20 +639,11 @@ const GameChat: React.FC = () => {
     
     // КРИТИЧЕСКИ ВАЖНО: Останавливаем текущее воспроизведение TTS при отправке нового сообщения
     try {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = '';
-        audioRef.current.load();
-        audioRef.current = null;
-      }
-      if (audioUrlRef.current) {
-        URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
-      }
+      stopStreamingTTS();
       // Сбрасываем флаги воспроизведения
       speakingInFlightRef.current = false;
       activeSpeakSeqRef.current = 0;
-      console.log('[TTS-CLIENT] Stopped audio playback due to new user message');
+      console.log('[TTS-CLIENT] Stopped all audio streams due to new user message');
     } catch (e) {
       console.warn('[TTS-CLIENT] Error stopping audio:', e);
     }

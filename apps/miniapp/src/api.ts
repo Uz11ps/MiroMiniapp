@@ -659,7 +659,7 @@ export async function ttsSynthesize(
 }
 
 // Экспортируем streaming TTS функции
-export { playStreamingTTS, playStreamingTTSChunked } from './streamingTTS';
+export { playStreamingTTS, playStreamingTTSChunked, playStreamingTTSSegmented, stopStreamingTTS } from './streamingTTS';
 
 export async function generateBackground(prompt: string, size?: { width: number; height: number }): Promise<string> {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';

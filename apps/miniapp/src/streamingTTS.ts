@@ -1,5 +1,7 @@
 // Глобальный экземпляр AudioContext (синглтон)
 let globalAudioContext: AudioContext | null = null;
+let activeSources: AudioBufferSourceNode[] = [];
+let currentAbortController: AbortController | null = null;
 
 // Типы для TTS
 export interface StreamingTTSOptions {
@@ -9,6 +11,24 @@ export interface StreamingTTSOptions {
   onProgress?: (bytes: number) => void;
   onComplete?: () => void;
   onError?: (error: Error) => void;
+}
+
+// Функция для остановки текущего проигрывания
+export function stopStreamingTTS() {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+  activeSources.forEach(source => {
+    try {
+      source.stop();
+      source.disconnect();
+    } catch (e) {
+      // Игнорируем ошибки если источник уже остановлен
+    }
+  });
+  activeSources = [];
+  console.log('[STREAMING-TTS] Playback stopped and cleared');
 }
 
 // Функция для инициализации контекста (вызывать по жесту пользователя)
@@ -55,6 +75,9 @@ if (typeof window !== 'undefined') {
 export async function playStreamingTTS(options: StreamingTTSOptions): Promise<void> {
   const { text, voiceName, modelName, onProgress, onComplete, onError } = options;
   
+  // Если уже что-то играет, останавливаем (опционально, зависит от того как вызываем)
+  // stopStreamingTTS(); 
+
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   const root = host.split('.').slice(-2).join('.');
   const apiBase = root === 'localhost' 
@@ -63,6 +86,9 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
   
   const url = `${apiBase}/tts-stream`;
   
+  currentAbortController = new AbortController();
+  const signal = currentAbortController.signal;
+
   try {
     const audioContext = initAudioContext();
     const sampleRate = 24000; // Gemini Live по умолчанию шлет 24кГц
@@ -77,6 +103,8 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     
     // Функция проигрывания сырого PCM куска (Шаг 1)
     const playPCM = (value: Uint8Array) => {
+      if (signal.aborted) return;
+
       // 1. Соединяем с остатком от прошлого чанка
       let combined = value;
       if (leftover) {
@@ -114,6 +142,12 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(gainNode);
+      
+      // Добавляем в список активных для возможности остановки
+      activeSources.push(source);
+      source.onended = () => {
+        activeSources = activeSources.filter(s => s !== source);
+      };
 
       const now = audioContext.currentTime;
       if (nextStartTime < now) {
@@ -135,6 +169,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         voiceName: voiceName || 'Aoede',
         modelName: modelName || 'gemini-2.0-flash-exp',
       }),
+      signal
     });
     
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -147,10 +182,14 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     while (true) {
       const { done, value } = await reader.read();
       
-      if (done) {
-        console.log('[STREAMING-TTS] Stream complete');
-        const wait = (nextStartTime - audioContext.currentTime) * 1000 + 100;
-        setTimeout(() => onComplete?.(), Math.max(0, wait));
+      if (done || signal.aborted) {
+        if (!signal.aborted) {
+          console.log('[STREAMING-TTS] Stream complete');
+          const wait = (nextStartTime - audioContext.currentTime) * 1000 + 100;
+          setTimeout(() => {
+            if (!signal.aborted) onComplete?.();
+          }, Math.max(0, wait));
+        }
         break;
       }
       
@@ -169,26 +208,52 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       playPCM(value);
     }
     
-  } catch (error) {
+  } catch (error: any) {
+    if (error.name === 'AbortError') {
+      console.log('[STREAMING-TTS] Fetch aborted');
+      return;
+    }
     console.error('[STREAMING-TTS] Error:', error);
     onError?.(error instanceof Error ? error : new Error(String(error)));
   }
 }
 
 /**
- * Разбивает текст на части и проигрывает последовательно.
+ * Разбивает текст на части по предложениям и проигрывает последовательно.
  */
 export async function playStreamingTTSChunked(options: StreamingTTSOptions & { wordsPerChunk?: number }): Promise<void> {
-  const { text, wordsPerChunk = 50, ...rest } = options;
-  const words = text.split(/\s+/);
+  const { text, wordsPerChunk = 40, ...rest } = options;
+  
+  // Регулярка для разбивки по предложениям, сохраняя знаки препинания
+  // Разбиваем по . ! ? \n, но следим за длиной
+  const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
+  
   const chunks: string[] = [];
+  let currentChunk = '';
   
-  for (let i = 0; i < words.length; i += wordsPerChunk) {
-    chunks.push(words.slice(i, i + wordsPerChunk).join(' '));
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+    
+    // Если добавление предложения не превышает лимит слов (примерно)
+    if ((currentChunk + ' ' + trimmed).split(/\s+/).length <= wordsPerChunk) {
+      currentChunk += (currentChunk ? ' ' : '') + trimmed;
+    } else {
+      if (currentChunk) chunks.push(currentChunk);
+      currentChunk = trimmed;
+    }
   }
+  if (currentChunk) chunks.push(currentChunk);
   
+  // Перед началом новой очереди останавливаем старую
+  stopStreamingTTS();
+  
+  const abortController = currentAbortController; // Запоминаем текущий контроллер
+
   for (const chunkText of chunks) {
     if (!chunkText) continue;
+    if (abortController?.signal.aborted) break;
+
     await new Promise<void>((resolve, reject) => {
       playStreamingTTS({
         ...rest,
@@ -197,5 +262,72 @@ export async function playStreamingTTSChunked(options: StreamingTTSOptions & { w
         onError: (err) => reject(err)
       });
     });
+  }
+}
+
+/**
+ * Проигрывает текст с учетом сегментации (разные голоса для диалогов).
+ */
+export async function playStreamingTTSSegmented(options: StreamingTTSOptions & { gameId?: string }): Promise<void> {
+  const { text, gameId, ...rest } = options;
+  
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  const root = host.split('.').slice(-2).join('.');
+  const apiBase = root === 'localhost' 
+    ? 'http://localhost:4000/api' 
+    : `${typeof window !== 'undefined' ? window.location.protocol : 'https:'}//api.${root}/api`;
+
+  // Перед анализом останавливаем старую озвучку
+  stopStreamingTTS();
+  const abortController = currentAbortController;
+
+  try {
+    // 1. Анализируем текст на сегменты
+    const analyzeRes = await fetch(`${apiBase}/tts/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, gameId })
+    });
+    
+    if (!analyzeRes.ok) throw new Error('Analysis failed');
+    const { segments } = await analyzeRes.json();
+    
+    if (!segments || segments.length === 0) {
+      // Фолбек на обычный режим если анализ не удался
+      return playStreamingTTSChunked(options);
+    }
+
+    // 2. Проигрываем каждый сегмент
+    for (const segment of segments) {
+      if (abortController?.signal.aborted) break;
+      if (!segment.text?.trim()) continue;
+
+      // Выбор голоса для сегмента
+      let voiceName = 'Aoede';
+      if (segment.isNarrator) {
+        voiceName = 'Aoede';
+      } else if (segment.gender?.toLowerCase().includes('жен') || segment.gender?.toLowerCase().includes('female')) {
+        voiceName = 'Kore';
+      } else {
+        // Рандомизируем мужские голоса на основе имени персонажа (чтобы у одного персонажа был один голос)
+        const maleVoices = ['Charon', 'Puck', 'Fenrir'];
+        const nameHash = (segment.characterName || 'default').split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0);
+        voiceName = maleVoices[Math.abs(nameHash) % maleVoices.length];
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        playStreamingTTS({
+          ...rest,
+          text: segment.text,
+          voiceName: voiceName,
+          onComplete: () => resolve(),
+          onError: (err) => reject(err)
+        });
+      });
+    }
+  } catch (error) {
+    console.error('[STREAMING-TTS] Segmented playback error:', error);
+    // Фолбек на обычный режим
+    return playStreamingTTSChunked(options);
   }
 }
