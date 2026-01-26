@@ -45,36 +45,35 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
   const url = `${apiBase}/tts-stream`;
   
   try {
-    // Инициализируем Web Audio API
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const sampleRate = 24000; // Как указано в заголовках сервера
+    // Инициализируем Web Audio API с правильным sampleRate
+    // ВАЖНО: Браузеры блокируют AudioContext до первого клика пользователя
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const audioContext = new AudioContextClass({ sampleRate: 24000 });
+    
+    // Разблокируем звук (если заблокирован)
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+    
+    const sampleRate = audioContext.sampleRate; // Используем реальный sampleRate контекста
     const channels = 1; // Моно
     
-    // Создаем gain node для управления громкостью
-    const gainNode = audioContext.createGain();
-    gainNode.connect(audioContext.destination);
+    // Планировщик для плавного воспроизведения без щелчков
+    let nextStartTime = audioContext.currentTime;
     
-    // Буфер для накопления аудио данных
+    // Буфер для накопления аудио данных (джиттер-буфер для стабильности)
     let bytesReceived = 0;
+    const jitterBuffer: ArrayBuffer[] = [];
+    const jitterBufferSize = sampleRate * 0.1; // 100ms буфер для стабильности при нестабильном интернете
+    let jitterBufferSamples = 0;
     let isPlaying = false;
-    let startTime = 0;
     
-    // Используем ScriptProcessorNode для streaming воспроизведения
-    // (более старый API, но работает везде)
-    // Или используем AudioWorklet (современный, но требует отдельного файла)
-    // Для простоты используем ScriptProcessorNode
-    
-    let scriptProcessor: ScriptProcessorNode | null = null;
-    let audioQueue: Float32Array[] = [];
-    let queueOffset = 0;
-    let currentQueueBuffer: Float32Array | null = null;
-    
-    // Функция для добавления PCM данных в очередь
-    const addAudioChunk = (pcmData: ArrayBuffer) => {
+    // Функция для воспроизведения PCM чанка
+    const playPCMChunk = (pcmData: ArrayBuffer) => {
       bytesReceived += pcmData.byteLength;
       onProgress?.(bytesReceived);
       
-      // Конвертируем Int16 PCM в Float32 для Web Audio API
+      // 1. Конвертируем Int16 (PCM Little Endian) в Float32 (формат AudioContext)
       const int16Array = new Int16Array(pcmData);
       const float32Array = new Float32Array(int16Array.length);
       
@@ -83,68 +82,50 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         const sample = int16Array[i];
         if (sample !== undefined) {
           float32Array[i] = sample / 32768.0;
+        } else {
+          float32Array[i] = 0;
         }
       }
       
-      audioQueue.push(float32Array);
+      // 2. Создаем AudioBuffer и планируем воспроизведение
+      const audioBuffer = audioContext.createBuffer(channels, float32Array.length, sampleRate);
+      audioBuffer.getChannelData(0).set(float32Array);
       
-      // Начинаем воспроизведение сразу при получении первого чанка (real-time)
-      // Минимальный буфер уменьшен для более быстрого старта
-      const minSamplesToStart = sampleRate * 0.05; // 0.05 секунды буфера (1200 samples) для быстрого старта
-      if (!isPlaying) {
-        const totalSamples = audioQueue.reduce((sum, buf) => sum + buf.length, 0);
-        if (totalSamples >= minSamplesToStart) {
-          startPlayback();
-        }
-      }
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      
+      // 3. Расчет времени старта, чтобы не было щелчков между чанками
+      const startTime = Math.max(audioContext.currentTime, nextStartTime);
+      source.start(startTime);
+      nextStartTime = startTime + audioBuffer.duration;
+      
+      console.log(`[STREAMING-TTS] Scheduled chunk: ${float32Array.length} samples, start: ${startTime.toFixed(3)}s, duration: ${audioBuffer.duration.toFixed(3)}s`);
     };
     
-    // Функция для начала воспроизведения
-    const startPlayback = () => {
-      if (isPlaying) return;
-      isPlaying = true;
+    // Функция для добавления PCM данных с джиттер-буфером
+    const addAudioChunk = (pcmData: ArrayBuffer) => {
+      const samples = pcmData.byteLength / 2; // 16-bit = 2 bytes per sample
       
-      // Создаем ScriptProcessorNode для streaming
-      const bufferSize = 4096; // Размер буфера обработки
-      scriptProcessor = audioContext.createScriptProcessor(bufferSize, 0, channels);
+      // Добавляем в джиттер-буфер
+      jitterBuffer.push(pcmData);
+      jitterBufferSamples += samples;
       
-      scriptProcessor.onaudioprocess = (e) => {
-        const output = e.outputBuffer.getChannelData(0);
-        let outputOffset = 0;
+      // Если буфер достаточно заполнен, начинаем воспроизведение
+      if (!isPlaying && jitterBufferSamples >= jitterBufferSize) {
+        isPlaying = true;
+        console.log('[STREAMING-TTS] Jitter buffer filled, starting playback');
         
-        while (outputOffset < output.length) {
-          // Если текущий буфер закончился, берем следующий из очереди
-          if (!currentQueueBuffer || queueOffset >= currentQueueBuffer.length) {
-            if (audioQueue.length === 0) {
-              // Нет данных - заполняем тишиной
-              for (let i = outputOffset; i < output.length; i++) {
-                output[i] = 0;
-              }
-              break;
-            }
-            currentQueueBuffer = audioQueue.shift()!;
-            queueOffset = 0;
-          }
-          
-          // Копируем данные из текущего буфера в выходной
-          const remainingInBuffer = currentQueueBuffer.length - queueOffset;
-          const remainingInOutput = output.length - outputOffset;
-          const copyLength = Math.min(remainingInBuffer, remainingInOutput);
-          
-          output.set(
-            currentQueueBuffer.subarray(queueOffset, queueOffset + copyLength),
-            outputOffset
-          );
-          
-          outputOffset += copyLength;
-          queueOffset += copyLength;
+        // Воспроизводим все данные из буфера
+        for (const chunk of jitterBuffer) {
+          playPCMChunk(chunk);
         }
-      };
-      
-      scriptProcessor.connect(gainNode);
-      startTime = audioContext.currentTime;
-      
-      console.log('[STREAMING-TTS] Started streaming playback');
+        jitterBuffer.length = 0;
+        jitterBufferSamples = 0;
+      } else if (isPlaying) {
+        // Если уже играет, воспроизводим сразу
+        playPCMChunk(pcmData);
+      }
     };
     
     // Отправляем запрос на streaming TTS
@@ -183,26 +164,24 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         }
         
         // Если еще не начали проигрывать, начинаем сейчас (даже если данных мало)
-        if (!isPlaying) {
-          const totalSamples = audioQueue.reduce((sum, buf) => sum + buf.length, 0);
-          if (totalSamples > 0) {
-            startPlayback();
+        if (!isPlaying && jitterBuffer.length > 0) {
+          isPlaying = true;
+          console.log('[STREAMING-TTS] Stream ended, playing remaining buffer');
+          
+          // Воспроизводим все данные из буфера
+          for (const chunk of jitterBuffer) {
+            playPCMChunk(chunk);
           }
+          jitterBuffer.length = 0;
+          jitterBufferSamples = 0;
         }
         
-        // Ждем окончания воспроизведения всех данных из очереди
-        if (isPlaying && scriptProcessor) {
-          const currentScriptProcessor: ScriptProcessorNode = scriptProcessor;
-          // Ждем пока очередь не опустеет и ScriptProcessor не обработает все данные
-          while (audioQueue.length > 0 || currentQueueBuffer !== null) {
-            await new Promise(resolve => setTimeout(resolve, 100));
+        // Ждем окончания воспроизведения (все чанки запланированы, ждем последний)
+        if (isPlaying) {
+          const waitTime = (nextStartTime - audioContext.currentTime) * 1000 + 500; // Время до последнего чанка + запас
+          if (waitTime > 0) {
+            await new Promise(resolve => setTimeout(resolve, waitTime));
           }
-          
-          // Дополнительная задержка для завершения обработки последнего буфера
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-          currentScriptProcessor.disconnect();
-          scriptProcessor = null;
         }
         
         onComplete?.();
@@ -226,13 +205,9 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     }
     
     // Очистка
-    if (scriptProcessor) {
-      const finalScriptProcessor: ScriptProcessorNode = scriptProcessor;
-      finalScriptProcessor.disconnect();
-      scriptProcessor = null;
-    }
-    gainNode.disconnect();
-    audioContext.close();
+    // AudioContext и BufferSource автоматически очищаются после завершения воспроизведения
+    // Закрываем контекст только если нужно освободить ресурсы
+    // audioContext.close(); // Раскомментируйте, если нужно закрыть контекст
     
   } catch (error) {
     console.error('[STREAMING-TTS] Error:', error);
