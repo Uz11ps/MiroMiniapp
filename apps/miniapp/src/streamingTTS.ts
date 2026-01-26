@@ -242,6 +242,58 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
 }
 
 /**
+ * Разбивает текст на части по указанному количеству слов и последовательно воспроизводит их
+ * @param options - опции для streaming TTS
+ * @param wordsPerChunk - количество слов в каждой части (по умолчанию 50)
+ */
+export async function playStreamingTTSChunked(
+  options: StreamingTTSOptions & { wordsPerChunk?: number }
+): Promise<void> {
+  const { text, wordsPerChunk = 50, onProgress, onComplete, onError } = options;
+  
+  // Разбиваем текст на части по словам
+  const words = text.trim().split(/\s+/);
+  const chunks: string[] = [];
+  
+  for (let i = 0; i < words.length; i += wordsPerChunk) {
+    const chunk = words.slice(i, i + wordsPerChunk).join(' ');
+    chunks.push(chunk);
+  }
+  
+  console.log(`[STREAMING-TTS-CHUNKED] Split text into ${chunks.length} chunks (${wordsPerChunk} words each)`);
+  
+  // Воспроизводим каждую часть последовательно
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (!chunk) continue; // Пропускаем пустые чанки
+    
+    const isLast = i === chunks.length - 1;
+    
+    console.log(`[STREAMING-TTS-CHUNKED] Playing chunk ${i + 1}/${chunks.length} (${chunk.length} chars)`);
+    
+    try {
+      await playStreamingTTS({
+        text: chunk,
+        voiceName: options.voiceName || undefined,
+        modelName: options.modelName || undefined,
+        onProgress: isLast ? onProgress : undefined, // Прогресс только для последнего чанка
+        onComplete: isLast ? onComplete : undefined, // Завершение только для последнего чанка
+        onError: onError
+      });
+      
+      // Небольшая пауза между частями для плавности (кроме последней)
+      if (!isLast) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    } catch (error) {
+      console.error(`[STREAMING-TTS-CHUNKED] Error playing chunk ${i + 1}:`, error);
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+}
+
+/**
  * Альтернативный вариант: использование MediaSource API для streaming WAV
  * (более совместимый, но требует конвертации PCM в WAV на сервере)
  */
