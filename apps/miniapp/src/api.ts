@@ -618,7 +618,7 @@ export async function ttsSynthesize(
   // Используем streaming TTS endpoint
   const body: any = {
     text,
-    voiceName: 'Aoede',
+    voiceName: 'Kore',
     modelName: 'gemini-2.5-flash-preview-tts'
   };
   

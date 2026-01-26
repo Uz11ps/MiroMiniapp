@@ -178,7 +178,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
-        voiceName: voiceName || 'Aoede',
+        voiceName: voiceName || 'Kore',
         modelName: modelName || 'gemini-2.0-flash-exp',
       }),
       signal

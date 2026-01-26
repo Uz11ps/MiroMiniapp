@@ -3,7 +3,7 @@
 
 BASE_URL="${API_BASE_URL:-http://localhost:4000}"
 TEXT="${1:-Привет! Это тест streaming TTS через Gemini.}"
-VOICE="${2:-Aoede}"
+VOICE="${2:-Kore}"
 MODEL="${3:-gemini-2.5-flash-preview-tts}"
 
 echo "🧪 Тест streaming TTS endpoint"
