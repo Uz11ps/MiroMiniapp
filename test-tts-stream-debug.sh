@@ -56,21 +56,19 @@ if [ -f test-audio.pcm ]; then
   FILE_TYPE=$(file test-audio.pcm 2>/dev/null || echo "unknown")
   echo "📄 Тип файла: ${FILE_TYPE}"
   
-  if [ "$FILE_SIZE" -lt 100 ]; then
-    echo "⚠️ Файл очень маленький - возможно это ошибка"
+  # Проверяем JSON ошибки (независимо от размера)
+  if echo "$FILE_TYPE" | grep -q "JSON\|text" || grep -q "error" test-audio.pcm 2>/dev/null; then
+    echo "❌ Обнаружена ошибка в ответе (JSON/text вместо аудио):"
     echo ""
-    echo "Содержимое файла:"
-    head -c 500 test-audio.pcm
+    cat test-audio.pcm | python3 -m json.tool 2>/dev/null || cat test-audio.pcm
     echo ""
+    echo "💡 Проверьте логи сервера: docker logs miniapp-server-1 --tail 50"
+    exit 1
+  fi
+  
+  if [ "$FILE_SIZE" -lt 1000 ]; then
+    echo "⚠️ Файл очень маленький (${FILE_SIZE} bytes) - возможно неполные данные"
     echo ""
-    
-    # Проверяем JSON ошибки
-    if grep -q "error" test-audio.pcm 2>/dev/null; then
-      echo "❌ Обнаружена ошибка в ответе:"
-      cat test-audio.pcm | python3 -m json.tool 2>/dev/null || cat test-audio.pcm
-      echo ""
-      exit 1
-    fi
   else
     echo "✅ Файл выглядит как аудио данные"
     
