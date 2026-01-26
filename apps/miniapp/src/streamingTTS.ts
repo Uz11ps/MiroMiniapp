@@ -106,7 +106,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     };
     
     // Функция для добавления PCM данных с джиттер-буфером
-    const addAudioChunk = (pcmData: ArrayBuffer) => {
+    const addAudioChunk = async (pcmData: ArrayBuffer) => {
       const samples = pcmData.byteLength / 2; // 16-bit = 2 bytes per sample
       
       // Добавляем в джиттер-буфер
@@ -120,13 +120,13 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         
         // Воспроизводим все данные из буфера
         for (const chunk of jitterBuffer) {
-          playPCMChunk(chunk);
+          await playPCMChunk(chunk);
         }
         jitterBuffer.length = 0;
         jitterBufferSamples = 0;
       } else if (isPlaying) {
         // Если уже играет, воспроизводим сразу
-        playPCMChunk(pcmData);
+        await playPCMChunk(pcmData);
       }
     };
     
@@ -173,7 +173,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       if (done) {
         // Поток завершен, добавляем оставшиеся данные
         if (buffer.length > 0) {
-          addAudioChunk(buffer.buffer);
+          await addAudioChunk(buffer.buffer);
         }
         
         // Если еще не начали проигрывать, начинаем сейчас (даже если данных мало)
@@ -183,7 +183,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
           
           // Воспроизводим все данные из буфера
           for (const chunk of jitterBuffer) {
-            playPCMChunk(chunk);
+            await playPCMChunk(chunk);
           }
           jitterBuffer.length = 0;
           jitterBufferSamples = 0;
@@ -257,7 +257,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
           console.log('[STREAMING-TTS] First bytes (decimal):', Array.from(chunk.slice(0, 8)).join(', '));
         }
         
-        addAudioChunk(chunk.buffer);
+        await addAudioChunk(chunk.buffer);
       }
     }
     
