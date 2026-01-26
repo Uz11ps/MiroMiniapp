@@ -240,32 +240,22 @@ const GameChat: React.FC = () => {
       // Предотвращаем дубли
       if (t === lastSpokenRef.current && speakingInFlightRef.current) return;
       
-      console.log('[TTS-CLIENT] Starting standalone streaming TTS for text:', t.slice(0, 100));
+      console.log('[TTS-CLIENT] Starting segmented streaming TTS for text:', t.slice(0, 100));
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
       speakingInFlightRef.current = true;
       lastSpokenRef.current = t;
 
-      // Базовая логика выбора голоса
-      let voiceName = 'Aoede';
-      if (context?.gender?.toLowerCase().includes('жен')) voiceName = 'Kore';
-      else if (context?.gender?.toLowerCase().includes('муж')) voiceName = 'Charon';
-
-      await playStreamingTTSChunked({
+      await playStreamingTTSSegmented({
         text: t,
-        voiceName: voiceName,
-        modelName: 'gemini-2.0-flash-exp',
-        wordsPerChunk: 40,
-        onProgress: (bytes: number) => {
-          // Можно обновлять UI прогресса
-        },
+        gameId: id,
         onComplete: () => {
           if (seq === activeSpeakSeqRef.current) {
             speakingInFlightRef.current = false;
           }
         },
         onError: (err: Error) => {
-          console.error('[TTS-CLIENT] Streaming TTS error:', err);
+          console.error('[TTS-CLIENT] Segmented TTS error:', err);
           if (seq === activeSpeakSeqRef.current) {
             speakingInFlightRef.current = false;
           }
@@ -696,8 +686,8 @@ const GameChat: React.FC = () => {
       if (!r.ok) {
         setIsGenerating(false);
         if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: 'Ошибка связи с сервером.' }]);
-        return;
-      }
+          return;
+        }
 
       const reader = r.body?.getReader();
       if (!reader) return;
@@ -735,7 +725,7 @@ const GameChat: React.FC = () => {
             fullText = data.text;
             if (fullText) {
               setMessages((m) => {
-                if (lobbyId) {
+      if (lobbyId) {
                   // В лобби режиме мы просто обновляем историю из логов позже,
                   // но для мгновенного фидбека можно добавить временное сообщение
                   return [...m, { from: 'bot', text: fullText }];
@@ -761,7 +751,7 @@ const GameChat: React.FC = () => {
       console.error('[REPLY] Stream request failed:', err);
       setIsGenerating(false);
       if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: 'Ошибка связи с сервером.' }]);
-    }
+      }
 
     // После завершения стрима, если были кубики (пока в reply-stream не реализовано, но добавим позже)
     // if (requestDice) { ... }
