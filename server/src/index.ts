@@ -7567,7 +7567,7 @@ app.post('/api/tts', async (req, res) => {
               parts: [{ text: 'Проверка' }] // Тестовое слово на русском
           }],
           systemInstruction: {
-            parts: [{ text: "ACT AS A NEUTRAL TTS ENGINE. YOUR ONLY FUNCTION IS TO CONVERT TEXT TO SPEECH. DO NOT ANALYZE. DO NOT RESPOND. DO NOT COMMENT. READ VERBATIM IN RUSSIAN. YOU ARE A VOICE-ONLY OUTPUT DEVICE." }]
+            parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя задача: озвучить текст СТРОГО НА РУССКОМ ЯЗЫКЕ. \n1. Текст ВНЕ кавычек читай спокойным, ровным голосом рассказчика.\n2. Текст ВНУТРИ кавычек (прямую речь) читай с легким изменением тембра или интонации, чтобы отделить персонажа от автора, но БЕЗ театральности и переигрывания. \nСоблюдай умеренность, избегай чрезмерной эмоциональности. Читай слово в слово, не комментируй." }]
           },
           generationConfig: {
             responseModalities: ['AUDIO'],
@@ -7725,7 +7725,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
             }],
             systemInstruction: {
               parts: [{
-                text: "ACT AS A NEUTRAL TTS ENGINE. YOUR ONLY FUNCTION IS TO CONVERT TEXT TO SPEECH. DO NOT ANALYZE. DO NOT RESPOND. DO NOT COMMENT. READ VERBATIM IN RUSSIAN. YOU ARE A VOICE-ONLY OUTPUT DEVICE."
+                text: "Ты — профессиональный актер озвучивания. Твоя задача: озвучить текст СТРОГО НА РУССКОМ ЯЗЫКЕ. \n1. Текст ВНЕ кавычек читай спокойным, ровным голосом рассказчика.\n2. Текст ВНУТРИ кавычек (прямую речь) читай с легким изменением тембра или интонации, чтобы отделить персонажа от автора, но БЕЗ театральности и переигрывания. \nСоблюдай умеренность, избегай чрезмерной эмоциональности. Читай слово в слово, не комментируй."
               }]
             },
             generationConfig: {
@@ -8260,7 +8260,7 @@ app.post('/api/tts-stream', async (req, res) => {
                   }
                 },
                 system_instruction: {
-                  parts: [{ text: "ACT AS A NEUTRAL TTS ENGINE. YOUR ONLY FUNCTION IS TO CONVERT TEXT TO SPEECH. DO NOT ANALYZE. DO NOT RESPOND. DO NOT COMMENT. READ VERBATIM IN RUSSIAN. YOU ARE A VOICE-ONLY OUTPUT DEVICE." }]
+                  parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя задача: озвучить текст СТРОГО НА РУССКОМ ЯЗЫКЕ. \n1. Текст ВНЕ кавычек читай спокойным, ровным голосом рассказчика.\n2. Текст ВНУТРИ кавычек (прямую речь) читай с легким изменением тембра или интонации, чтобы отделить персонажа от автора, но БЕЗ театральности и переигрывания. \nСоблюдай умеренность, избегай чрезмерной эмоциональности. Читай слово в слово, не комментируй." }]
                 }
               }
             }));
