@@ -9917,3 +9917,13 @@ app.post('/api/chat/dice', async (req, res) => {
       }
     }
     
+    // Отправляем текст сразу, аудио будет стримиться отдельно
+    const response: any = { ok: true, messages: [fmt, narr.text], audioStream: true };
+    console.log('[DICE] ✅ Returning text immediately, audio will stream separately');
+    return res.json(response);
+  } catch {
+    return res.status(400).json({ ok: false, error: 'dice_chat_error' });
+  }
+});
+
+
