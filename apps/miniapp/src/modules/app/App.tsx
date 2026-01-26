@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, getAudioQueue, initAudioContext, playStreamingTTSChunked } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, getAudioQueue, initAudioContext, playStreamingTTS } from '../../api';
 
 // CSS импортируется в main.tsx, не нужно дублировать здесь
 
@@ -251,25 +251,27 @@ const GameChat: React.FC = () => {
       if (context?.gender?.toLowerCase().includes('жен')) voiceName = 'Kore';
       else if (context?.gender?.toLowerCase().includes('муж')) voiceName = 'Charon';
 
-      await playStreamingTTSChunked({
+      // ИСПРАВЛЕНИЕ: Отправляем весь текст целиком, без разбиения на части
+      // Gemini Live API уже поддерживает streaming и может обрабатывать длинные тексты
+      // Разбиение на части вызывает проблемы - Gemini пытается анализировать каждый чанк отдельно
+      await playStreamingTTS({
         text: t,
         voiceName: voiceName,
         modelName: 'gemini-2.0-flash-exp',
-        wordsPerChunk: 40,
         onProgress: (bytes: number) => {
           // Можно обновлять UI прогресса
         },
         onComplete: () => {
           if (seq === activeSpeakSeqRef.current) {
-                  speakingInFlightRef.current = false;
+            speakingInFlightRef.current = false;
           }
         },
         onError: (err: Error) => {
           console.error('[TTS-CLIENT] Streaming TTS error:', err);
-              if (seq === activeSpeakSeqRef.current) {
-                speakingInFlightRef.current = false;
-              }
-            }
+          if (seq === activeSpeakSeqRef.current) {
+            speakingInFlightRef.current = false;
+          }
+        }
       });
     } catch (err) {
       console.error('[TTS-CLIENT] speak() error:', err);
