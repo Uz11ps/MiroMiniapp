@@ -6,6 +6,9 @@ TEXT="${1:-Привет! Это тест streaming TTS через Gemini.}"
 VOICE="${2:-Aoede}"
 MODEL="${3:-gemini-2.5-flash-preview-tts}"
 
+# Прокси для curl (из переменных окружения или docker-compose)
+PROXY_URL="${HTTPS_PROXY:-${GEMINI_PROXY:-${GOOGLE_PROXY:-}}}"
+
 echo "🧪 Тест streaming TTS endpoint"
 echo "================================"
 echo "URL: ${BASE_URL}/api/tts-stream"
@@ -16,7 +19,13 @@ echo ""
 
 # Проверяем доступность endpoint
 echo "1️⃣ Проверка доступности endpoint..."
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/api/tts-stream" -X POST \
+CURL_PROXY_ARGS=""
+if [ -n "$PROXY_URL" ]; then
+  CURL_PROXY_ARGS="--proxy ${PROXY_URL}"
+  echo "🔄 Используется прокси: ${PROXY_URL}"
+fi
+
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${CURL_PROXY_ARGS} "${BASE_URL}/api/tts-stream" -X POST \
   -H "Content-Type: application/json" \
   -d "{\"text\":\"test\"}" 2>/dev/null)
 
@@ -35,7 +44,7 @@ echo "2️⃣ Отправка запроса с детальным выводо
 echo ""
 
 # Отправляем запрос с детальным выводом
-curl -v -X POST "${BASE_URL}/api/tts-stream" \
+curl -v ${CURL_PROXY_ARGS} -X POST "${BASE_URL}/api/tts-stream" \
   -H "Content-Type: application/json" \
   -d "{
     \"text\": \"${TEXT}\",
@@ -62,7 +71,13 @@ if [ -f test-audio.pcm ]; then
     echo ""
     cat test-audio.pcm | python3 -m json.tool 2>/dev/null || cat test-audio.pcm
     echo ""
-    echo "💡 Проверьте логи сервера: docker logs miniapp-server-1 --tail 50"
+    echo "💡 Возможные причины:"
+    echo "   - Прокси не настроен для SDK (проверьте GEMINI_PROXY в .env)"
+    echo "   - Регион не поддерживает streaming TTS"
+    echo "   - Ошибка в коде endpoint"
+    echo ""
+    echo "📋 Проверьте логи сервера:"
+    echo "   docker logs miniapp-server-1 --tail 50 | grep GEMINI-TTS-STREAM"
     exit 1
   fi
   
@@ -93,6 +108,19 @@ else
   echo "Логи curl:"
   cat curl-output.log 2>/dev/null || true
   exit 1
+fi
+
+echo ""
+echo "5️⃣ Проверка логов сервера..."
+echo ""
+
+# Пытаемся получить логи если docker доступен
+if command -v docker &> /dev/null; then
+  echo "Последние логи сервера (GEMINI-TTS-STREAM):"
+  docker logs miniapp-server-1 --tail 30 2>/dev/null | grep -i "GEMINI-TTS-STREAM\|tts-stream\|proxy" || echo "Логи не найдены или docker недоступен"
+  echo ""
+else
+  echo "⚠️ Docker не доступен, проверьте логи вручную"
 fi
 
 echo ""
