@@ -190,8 +190,8 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         }
         
         // Ждем окончания воспроизведения всех данных из очереди
-        const currentScriptProcessor = scriptProcessor;
-        if (isPlaying && currentScriptProcessor !== null) {
+        if (isPlaying && scriptProcessor) {
+          const currentScriptProcessor: ScriptProcessorNode = scriptProcessor;
           // Ждем пока очередь не опустеет и ScriptProcessor не обработает все данные
           while (audioQueue.length > 0 || currentQueueBuffer !== null) {
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -225,8 +225,8 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     }
     
     // Очистка
-    const finalScriptProcessor = scriptProcessor;
-    if (finalScriptProcessor !== null) {
+    if (scriptProcessor) {
+      const finalScriptProcessor: ScriptProcessorNode = scriptProcessor;
       finalScriptProcessor.disconnect();
       scriptProcessor = null;
     }
