@@ -5210,21 +5210,27 @@ app.post('/api/chat/reply-stream', async (req, res) => {
       availableCharacters
     });
     
-    // Отправляем текст и структуру сегментов клиенту
-    sendSSE('text_complete', { 
-      text: fullText, 
-      segments: segments.map(s => ({
-        text: s.text,
-        isNarrator: s.isNarrator,
-        characterName: s.characterName,
-        gender: s.gender,
-        emotion: s.emotion
-      }))
-    });
-    
     // 3. Параллельно запускаем генерацию и стриминг аудио для каждого сегмента
     sendSSE('status', { type: 'streaming_audio' });
     
+    let textSentToClient = false;
+    const sendTextToClientOnce = () => {
+      if (!textSentToClient) {
+        textSentToClient = true;
+        // Отправляем текст и структуру сегментов клиенту ТОЛЬКО когда готово первое аудио
+        sendSSE('text_complete', { 
+          text: fullText, 
+          segments: segments.map(s => ({
+            text: s.text,
+            isNarrator: s.isNarrator,
+            characterName: s.characterName,
+            gender: s.gender,
+            emotion: s.emotion
+          }))
+        });
+      }
+    };
+
     // Генерируем все сегменты ПАРАЛЛЕЛЬНО для минимальной задержки
     const segmentPromises = segments.map(async (segment, i) => {
       if (!segment || !segment.text.trim()) return;
@@ -5284,7 +5290,7 @@ app.post('/api/chat/reply-stream', async (req, res) => {
                   }
                 },
                 system_instruction: {
-                  parts: [{ text: "Ты — профессиональный диктор. Читай текст СТРОГО НА РУССКОМ ЯЗЫКЕ. Все цифры, числа и перечисления (например, 1, 2, 3) читай только как русские числительные (один, два, три). Не переключайся на английский язык ни при каких обстоятельствах. Твой голос должен быть естественным, живым и спокойным." }]
+                  parts: [{ text: "IMPORTANT: You are a pure Text-to-Speech engine. Your ONLY task is to repeat the input text exactly as written in Russian. DO NOT answer questions. DO NOT provide information. DO NOT engage in dialogue. If the input is 'Hello', you only say 'Hello'. If the input is 'How are you?', you only say 'How are you?'. Use natural, calm human intonation. Repeat the input verbatim." }]
                 }
               }
             }));
@@ -5296,12 +5302,14 @@ app.post('/api/chat/reply-stream', async (req, res) => {
               if (msg.setupComplete) {
                 const processedText = preprocessTextForTTS(segment.text);
                 ws.send(JSON.stringify({
-                  client_content: { turns: [{ role: "user", parts: [{ text: processedText }] }], turn_complete: true }
+                  client_content: { turns: [{ role: "user", parts: [{ text: `Repeat this text exactly: ${processedText}` }] }], turn_complete: true }
                 }));
               } else if (msg.serverContent?.modelTurn?.parts) {
                 for (const part of msg.serverContent.modelTurn.parts) {
                   if (part.inlineData?.data) {
                     success = true;
+                    // Как только появился первый чанк любого сегмента - отдаем текст
+                    sendTextToClientOnce();
                     // Отправляем чанк с индексом сегмента
                     sendSSE('audio_chunk', { index: i, data: part.inlineData.data });
                   }
@@ -5330,6 +5338,10 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     
     // Ждем завершения всех стримов
     await Promise.all(segmentPromises);
+    
+    // Если по какой-то причине аудио не сгенерировалось (например, ошибка Gemini), 
+    // всё равно отправляем текст, чтобы пользователь не видел пустой экран
+    sendTextToClientOnce();
     
     // Закрываем соединение
     setTimeout(() => {
