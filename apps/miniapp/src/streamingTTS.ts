@@ -311,8 +311,11 @@ export async function playStreamingTTSSegmented(options: StreamingTTSOptions & {
       } else {
         // Рандомизируем мужские голоса на основе имени персонажа (чтобы у одного персонажа был один голос)
         const maleVoices = ['Charon', 'Puck', 'Fenrir'];
-        const nameHash = (segment.characterName || 'default').split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0);
-        voiceName = maleVoices[Math.abs(nameHash) % maleVoices.length];
+        const nameHash = (segment.characterName || 'default').split('').reduce((a: number, b: string) => { 
+          const hash = ((a << 5) - a) + b.charCodeAt(0); 
+          return hash & hash; 
+        }, 0);
+        voiceName = maleVoices[Math.abs(nameHash) % maleVoices.length] || 'Charon';
       }
 
       await new Promise<void>((resolve, reject) => {
