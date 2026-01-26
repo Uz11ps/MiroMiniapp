@@ -266,71 +266,140 @@ export async function playStreamingTTSChunked(options: StreamingTTSOptions & { w
 }
 
 /**
- * Проигрывает текст с учетом сегментации (разные голоса для диалогов).
+ * Очередь для проигрывания аудио-кусков, приходящих через сокет или SSE.
+ * Умеет склеивать сегменты в правильном порядке.
  */
-export async function playStreamingTTSSegmented(options: StreamingTTSOptions & { gameId?: string }): Promise<void> {
-  const { text, gameId, ...rest } = options;
-  
-  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  const root = host.split('.').slice(-2).join('.');
-  const apiBase = root === 'localhost' 
-    ? 'http://localhost:4000/api' 
-    : `${typeof window !== 'undefined' ? window.location.protocol : 'https:'}//api.${root}/api`;
+class AudioQueue {
+  private segments: Map<number, Uint8Array[]> = new Map();
+  private isPlaying = false;
+  private ctx: AudioContext;
+  private nextStartTime = 0;
+  private currentSegmentIndex = 0;
+  private segmentLeftover: Map<number, Uint8Array | null> = new Map();
 
-  // Перед анализом останавливаем старую озвучку
-  stopStreamingTTS();
-  const abortController = currentAbortController;
+  constructor(ctx: AudioContext) {
+    this.ctx = ctx;
+    this.nextStartTime = ctx.currentTime;
+  }
 
-  try {
-    // 1. Анализируем текст на сегменты
-    const analyzeRes = await fetch(`${apiBase}/tts/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, gameId })
-    });
-    
-    if (!analyzeRes.ok) throw new Error('Analysis failed');
-    const { segments } = await analyzeRes.json();
-    
-    if (!segments || segments.length === 0) {
-      // Фолбек на обычный режим если анализ не удался
-      return playStreamingTTSChunked(options);
+  push(index: number, chunk: Uint8Array) {
+    if (!this.segments.has(index)) {
+      this.segments.set(index, []);
     }
+    this.segments.get(index)!.push(chunk);
+    this.process();
+  }
 
-    // 2. Проигрываем каждый сегмент
-    for (const segment of segments) {
-      if (abortController?.signal.aborted) break;
-      if (!segment.text?.trim()) continue;
+  private async process() {
+    if (this.isPlaying) return;
+    this.isPlaying = true;
 
-      // Выбор голоса для сегмента
-      let voiceName = 'Aoede';
-      if (segment.isNarrator) {
-        voiceName = 'Aoede';
-      } else if (segment.gender?.toLowerCase().includes('жен') || segment.gender?.toLowerCase().includes('female')) {
-        voiceName = 'Kore';
-      } else {
-        // Рандомизируем мужские голоса на основе имени персонажа (чтобы у одного персонажа был один голос)
-        const maleVoices = ['Charon', 'Puck', 'Fenrir'];
-        const nameHash = (segment.characterName || 'default').split('').reduce((a: number, b: string) => { 
-          const hash = ((a << 5) - a) + b.charCodeAt(0); 
-          return hash & hash; 
-        }, 0);
-        voiceName = maleVoices[Math.abs(nameHash) % maleVoices.length] || 'Charon';
+    while (true) {
+      const segmentChunks = this.segments.get(this.currentSegmentIndex);
+      
+      // Если у нас нет данных для текущего сегмента, но есть для следующих - ждем
+      if (!segmentChunks || segmentChunks.length === 0) {
+        // Проверяем, есть ли вообще данные в очереди (для отладки)
+        const hasAnyData = Array.from(this.segments.values()).some(q => q.length > 0);
+        if (!hasAnyData) break;
+        
+        // Ждем немного появления данных для текущего сегмента
+        await new Promise(r => setTimeout(r, 50));
+        continue;
       }
 
-      await new Promise<void>((resolve, reject) => {
-        playStreamingTTS({
-          ...rest,
-          text: segment.text,
-          voiceName: voiceName,
-          onComplete: () => resolve(),
-          onError: (err) => reject(err)
-        });
-      });
+      const value = segmentChunks.shift();
+      if (!value) continue;
+
+      // Логика PCM
+      let leftover = this.segmentLeftover.get(this.currentSegmentIndex) || null;
+      let combined = value;
+      if (leftover) {
+        const newCombined = new Uint8Array(leftover.length + value.length);
+        newCombined.set(leftover);
+        newCombined.set(value, leftover.length);
+        combined = newCombined;
+      }
+
+      if (combined.length % 2 !== 0) {
+        this.segmentLeftover.set(this.currentSegmentIndex, combined.slice(combined.length - 1));
+        combined = combined.slice(0, combined.length - 1);
+      } else {
+        this.segmentLeftover.set(this.currentSegmentIndex, null);
+      }
+
+      if (combined.length === 0) continue;
+
+      const int16Array = new Int16Array(combined.buffer, combined.byteOffset, combined.length / 2);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = (int16Array[i] || 0) / 32768.0;
+      }
+
+      const audioBuffer = this.ctx.createBuffer(1, float32Array.length, 24000);
+      audioBuffer.getChannelData(0).set(float32Array);
+
+      const source = this.ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.ctx.destination);
+      activeSources.push(source);
+      
+      source.onended = () => {
+        activeSources = activeSources.filter(s => s !== source);
+        
+        // Если сегмент закончился (на сервере пришел turnComplete и очередь пуста)
+        // ВАЖНО: Мы переходим к следующему сегменту, когда текущий проигран полностью
+        // Но так как у нас стриминг, мы просто продолжаем пока есть данные.
+        // Переход к следующему сегменту осуществляется когда текущий ПУСТ и мы получили сигнал о конце (но тут мы упростим)
+      };
+
+      const now = this.ctx.currentTime;
+      if (this.nextStartTime < now) {
+        this.nextStartTime = now + 0.05;
+      }
+
+      source.start(this.nextStartTime);
+      this.nextStartTime += audioBuffer.duration;
+
+      // Если в текущем сегменте больше нет чанков, пробуем заглянуть в следующий
+      if (segmentChunks.length === 0) {
+        // Даем небольшую фору серверу
+        await new Promise(r => setTimeout(r, 50));
+        if (segmentChunks.length === 0) {
+          // Если все еще пусто, проверяем наличие следующего сегмента
+          if (this.segments.has(this.currentSegmentIndex + 1)) {
+            this.currentSegmentIndex++;
+            console.log('[AUDIO-QUEUE] Switching to segment:', this.currentSegmentIndex);
+          }
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 10));
     }
-  } catch (error) {
-    console.error('[STREAMING-TTS] Segmented playback error:', error);
-    // Фолбек на обычный режим
-    return playStreamingTTSChunked(options);
+
+    this.isPlaying = false;
+  }
+
+  stop() {
+    this.segments.clear();
+    this.currentSegmentIndex = 0;
+    this.isPlaying = false;
+    this.segmentLeftover.clear();
+    this.nextStartTime = this.ctx.currentTime;
+  }
+}
+
+let globalAudioQueue: AudioQueue | null = null;
+
+export function getAudioQueue(ctx: AudioContext): AudioQueue {
+  if (!globalAudioQueue) {
+    globalAudioQueue = new AudioQueue(ctx);
+  }
+  return globalAudioQueue;
+}
+
+export function stopAudioQueue() {
+  if (globalAudioQueue) {
+    globalAudioQueue.stop();
   }
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, playStreamingTTSSegmented, stopStreamingTTS } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, getAudioQueue, initAudioContext, playStreamingTTSChunked } from '../../api';
 
 // CSS импортируется в main.tsx, не нужно дублировать здесь
 
@@ -240,17 +240,23 @@ const GameChat: React.FC = () => {
       // Предотвращаем дубли
       if (t === lastSpokenRef.current && speakingInFlightRef.current) return;
       
-      console.log('[TTS-CLIENT] Starting segmented streaming TTS for text:', t.slice(0, 100));
+      console.log('[TTS-CLIENT] Starting standalone streaming TTS for text:', t.slice(0, 100));
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
       speakingInFlightRef.current = true;
       lastSpokenRef.current = t;
 
-      await playStreamingTTSSegmented({
+      // Базовая логика выбора голоса
+      let voiceName = 'Aoede';
+      if (context?.gender?.toLowerCase().includes('жен')) voiceName = 'Kore';
+      else if (context?.gender?.toLowerCase().includes('муж')) voiceName = 'Charon';
+
+      await playStreamingTTSChunked({
         text: t,
-        gameId: id,
+        voiceName: voiceName,
         modelName: 'gemini-2.0-flash-exp',
-        onProgress: (bytes) => {
+        wordsPerChunk: 40,
+        onProgress: (bytes: number) => {
           // Можно обновлять UI прогресса
         },
         onComplete: () => {
@@ -258,7 +264,7 @@ const GameChat: React.FC = () => {
             speakingInFlightRef.current = false;
           }
         },
-        onError: (err) => {
+        onError: (err: Error) => {
           console.error('[TTS-CLIENT] Streaming TTS error:', err);
           if (seq === activeSpeakSeqRef.current) {
             speakingInFlightRef.current = false;
@@ -680,102 +686,85 @@ const GameChat: React.FC = () => {
       let requestDice: any = null;
       let isFallback = false;
       
-      try {
-        const r = await fetch(`${apiBase}/chat/reply`, { 
-          method: 'POST', 
-          headers: { 'Content-Type': 'application/json' }, 
-          body: JSON.stringify(body) 
-        });
-        
+    try {
+      const r = await fetch(`${apiBase}/chat/reply-stream`, { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify(body) 
+      });
+      
       if (!r.ok) {
-        setIsGenerating(false);
-        const err = await r.json().catch(() => ({} as any));
-        if (r.status === 403 && (err?.error === 'not_your_turn')) {
-          alert('Сейчас ход другого игрока.');
-          if (!lobbyId) setMessages((m) => m.slice(0, -1));
-          return;
-        }
-        const errText = typeof err === 'string' ? err : (err?.error || 'Ошибка AI');
-        if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: `Ошибка AI: ${errText}` }]);
-        return;
-      }
-        
-      const data = await r.json();
-        fullText = data.message || '';
-        audioData = data.audio;
-        requestDice = data.requestDice;
-        isFallback = Boolean(data.fallback);
-      } catch (err) {
-        console.error('[REPLY] Request failed:', err);
         setIsGenerating(false);
         if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: 'Ошибка связи с сервером.' }]);
         return;
       }
-      
-      if (!fullText) {
-        setIsGenerating(false);
-        return;
-      }
-      
-      setIsGenerating(false); // Скрываем "генерация"
-      
-      // Используем прегенерированное аудио, если оно есть
-      const preGeneratedAudio = audioData;
-      
-      // Если сервер просит бросок (requestDice) — ТОЛЬКО покажем подсказку в ленте (она уже в истории),
-      // авто‑окно и авто‑бросок не открываем: пользователь сам нажмёт 🎲.
-      if (lobbyId) {
-        // подтянуть общую историю после ответа
-        try {
-          const h = await getChatHistory(id, lobbyId);
-          if (Array.isArray(h)) {
-            setMessages(h as any);
-            const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
-            if (lastBot?.text) {
-              // Используем прегенерированное аудио, если есть - НЕ делаем повторный запрос к TTS
-              if (preGeneratedAudio?.data) {
-                console.log('[CLIENT] Using pre-generated audio from server response (lobby mode)');
-                const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
-                const audioUrl = URL.createObjectURL(audioBlob);
-                speakWithAudio(audioUrl, lastBot.text).catch((err) => {
-                  console.error('[CLIENT] speakWithAudio failed (lobby):', err);
-                });
-              } else {
-                console.log('[CLIENT] No pre-generated audio (lobby mode), using TTS synthesis');
-                speak(lastBot.text);
-              }
-            }
-          }
-        } catch {}
-      } else {
-        const txt = String(fullText);
-          setMessages((m) => {
-            const next = [...m, { from: 'bot' as const, text: txt }];
-          return next;
-        });
-        
-        // Используем прегенерированное аудио, если есть
-            if (preGeneratedAudio?.data) {
-              console.log('[CLIENT] Using pre-generated audio from server response');
-              const audioBlob = new Blob([Uint8Array.from(atob(preGeneratedAudio.data), c => c.charCodeAt(0))], { type: preGeneratedAudio.contentType || 'audio/wav' });
-              const audioUrl = URL.createObjectURL(audioBlob);
-              speakWithAudio(audioUrl, txt).catch((err) => {
-                console.error('[CLIENT] speakWithAudio failed:', err);
-              });
-            } else {
-              console.log('[CLIENT] No pre-generated audio, using TTS synthesis');
-              speak(txt);
-            }
-            try { applyBgFromText(txt); } catch {}
-        // saveChatHistory будет вызван автоматически через useEffect при изменении messages
-      }
 
-      // Адаптация под D&D 5e: Если сервер предложил бросок, открываем окно кубиков
-      if (requestDice) {
-        setTimeout(() => {
-          rollDiceUi(requestDice);
-        }, 800);
+      const reader = r.body?.getReader();
+      if (!reader) return;
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const audioContext = initAudioContext();
+      const audioQueue = getAudioQueue(audioContext);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          if (!part.trim()) continue;
+          
+          const lines = part.split('\n');
+          let event = 'message';
+          let dataStr = '';
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) event = line.slice(7);
+            else if (line.startsWith('data: ')) dataStr = line.slice(6);
+          }
+
+          if (!dataStr) continue;
+          const data = JSON.parse(dataStr);
+
+          if (event === 'text_complete') {
+            setIsGenerating(false);
+            fullText = data.text;
+            if (fullText) {
+              setMessages((m) => {
+                if (lobbyId) {
+                  // В лобби режиме мы просто обновляем историю из логов позже,
+                  // но для мгновенного фидбека можно добавить временное сообщение
+                  return [...m, { from: 'bot', text: fullText }];
+                }
+                return [...m, { from: 'bot', text: fullText }];
+              });
+              try { applyBgFromText(fullText); } catch {}
+            }
+          } else if (event === 'audio_chunk') {
+            // Превращаем base64 в Uint8Array и пушим в очередь с индексом сегмента
+            const binary = atob(data.data);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            audioQueue.push(data.index, bytes);
+          } else if (event === 'error') {
+            console.error('[STREAM] Server error:', data.error);
+          }
+        }
       }
+    } catch (err) {
+      console.error('[REPLY] Stream request failed:', err);
+      setIsGenerating(false);
+      if (!lobbyId) setMessages((m) => [...m, { from: 'bot' as const, text: 'Ошибка связи с сервером.' }]);
+    }
+
+    // После завершения стрима, если были кубики (пока в reply-stream не реализовано, но добавим позже)
+    // if (requestDice) { ... }
     } catch {}
   };
 

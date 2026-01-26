@@ -7,6 +7,7 @@ import { games, createGame, updateGame, deleteGame, profile, friends, users, cre
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import pdfParse from 'pdf-parse';
 import fs from 'fs';
 import path from 'path';
@@ -5151,93 +5152,153 @@ app.post('/api/chat/reply-stream', async (req, res) => {
       history: history
     });
     const fullText = generatedText || '';
-    sendSSE('text_complete', { text: fullText });
     
-    // Параллельно запускаем генерацию TTS
-    sendSSE('status', { type: 'generating_audio' });
+    // 2. Анализируем текст на сегменты (диалоги и рассказчик)
+    sendSSE('status', { type: 'analyzing_segments' });
     
-    (async () => {
-      try {
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const ttsUrl = `${apiBase}/api/tts-stream`;
-        
-        const ttsResponse = await undiciFetch(ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: fullText,
-            voiceName: 'Aoede',
-            modelName: 'gemini-2.5-flash-preview-tts'
-          }),
-          signal: AbortSignal.timeout(60000)
-        });
-        
-        if (ttsResponse.ok) {
-          // Собираем все PCM чанки из streaming ответа
-          const reader = ttsResponse.body;
-          if (!reader) {
-            sendSSE('audio_error', { error: 'No response body' });
-        } else {
-            const audioChunks: Buffer[] = [];
-            for await (const chunk of reader) {
-              if (Buffer.isBuffer(chunk)) {
-                audioChunks.push(chunk);
-              } else if (chunk instanceof Uint8Array) {
-                audioChunks.push(Buffer.from(chunk));
-              } else if (chunk instanceof ArrayBuffer) {
-                audioChunks.push(Buffer.from(chunk));
-              }
-            }
-            
-            if (audioChunks.length === 0) {
-              sendSSE('audio_error', { error: 'No audio chunks received' });
-            } else {
-              // Конвертируем PCM в WAV
-              const pcmAudio = Buffer.concat(audioChunks);
-              const sampleRate = 24000;
-              const channels = 1;
-              const bitsPerSample = 16;
-              const byteRate = sampleRate * channels * (bitsPerSample / 8);
-              const blockAlign = channels * (bitsPerSample / 8);
-              const dataSize = pcmAudio.length;
-              const fileSize = 36 + dataSize;
-              
-              const wavHeader = Buffer.alloc(44);
-              wavHeader.write('RIFF', 0);
-              wavHeader.writeUInt32LE(fileSize, 4);
-              wavHeader.write('WAVE', 8);
-              wavHeader.write('fmt ', 12);
-              wavHeader.writeUInt32LE(16, 16);
-              wavHeader.writeUInt16LE(1, 20);
-              wavHeader.writeUInt16LE(channels, 22);
-              wavHeader.writeUInt32LE(sampleRate, 24);
-              wavHeader.writeUInt32LE(byteRate, 28);
-              wavHeader.writeUInt16LE(blockAlign, 32);
-              wavHeader.writeUInt16LE(bitsPerSample, 34);
-              wavHeader.write('data', 36);
-              wavHeader.writeUInt32LE(dataSize, 40);
-              
-              const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
-              const audioBase64 = audioBuffer.toString('base64');
-              sendSSE('audio_ready', { 
-                audio: audioBase64,
-                contentType: 'audio/wav',
-          format: 'base64'
-              });
-            }
-          }
+    // Получаем список персонажей для контекста (из игры)
+    let availableCharacters: Array<CharacterForAnalysis> = [];
+    if (game && game.characters) {
+      availableCharacters = game.characters.map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        gender: c.gender,
+        race: c.race,
+        persona: c.persona,
+        role: c.role
+      }));
+    }
+    
+    const segments = await parseTextIntoSegments({
+      text: fullText,
+      gameId,
+      availableCharacters
+    });
+    
+    // Отправляем текст и структуру сегментов клиенту
+    sendSSE('text_complete', { 
+      text: fullText, 
+      segments: segments.map(s => ({
+        text: s.text,
+        isNarrator: s.isNarrator,
+        characterName: s.characterName,
+        gender: s.gender,
+        emotion: s.emotion
+      }))
+    });
+    
+    // 3. Параллельно запускаем генерацию и стриминг аудио для каждого сегмента
+    sendSSE('status', { type: 'streaming_audio' });
+    
+    // Генерируем все сегменты ПАРАЛЛЕЛЬНО для минимальной задержки
+    const segmentPromises = segments.map(async (segment, i) => {
+      if (!segment || !segment.text.trim()) return;
+      
+      // Определяем голос для сегмента
+      let finalVoiceName = 'Aoede';
+      if (segment.isNarrator) {
+        finalVoiceName = 'Aoede';
+      } else if (segment.gender?.toLowerCase().includes('жен') || segment.gender?.toLowerCase().includes('female')) {
+        finalVoiceName = 'Kore';
       } else {
-          sendSSE('audio_error', { error: 'TTS generation failed' });
-        }
-      } catch (ttsErr) {
-        sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
+        const maleVoices = ['Charon', 'Puck', 'Fenrir'];
+        const nameHash = (segment.characterName || 'default').split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0);
+        finalVoiceName = maleVoices[Math.abs(nameHash) % maleVoices.length] || 'Charon';
       }
-    })();
+      
+      const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+      if (!geminiApiKey) return;
+      
+      return new Promise<void>((resolveSegment) => {
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+        const proxies = parseGeminiProxies();
+        const attempts = proxies.length ? proxies : ['__direct__'];
+        
+        let success = false;
+        
+        const tryConnect = async (proxyIndex: number) => {
+          if (proxyIndex >= attempts.length || success) {
+            resolveSegment();
+            return;
+          }
+          
+          const p = attempts[proxyIndex];
+          let agent: any = null;
+          if (p !== '__direct__') {
+            try {
+              agent = new HttpsProxyAgent(p);
+            } catch (e) {}
+          }
+          
+          const ws = new WebSocket(wsUrl, agent ? { agent } : {});
+          let wsTimeout = setTimeout(() => ws.terminate(), 10000);
+          
+          ws.on('open', () => {
+            clearTimeout(wsTimeout);
+            ws.send(JSON.stringify({
+              setup: {
+                model: 'models/gemini-2.0-flash-exp',
+                generation_config: {
+                  response_modalities: ["AUDIO"],
+                  speech_config: { 
+                    voice_config: { 
+                      prebuilt_voice_config: { 
+                        voice_name: finalVoiceName 
+                      } 
+                    } 
+                  }
+                },
+                system_instruction: {
+                  parts: [{ text: "Ты — профессиональный диктор с приятным, естественным человеческим голосом. Читай текст СЛОВО В СЛОВО НА РУССКОМ ЯЗЫКЕ. Избегай театральности и переигрывания. Твоя интонация должна быть спокойной, уверенной и живой, как у реального человека в спокойной беседе." }]
+                }
+              }
+            }));
+          });
+          
+          ws.on('message', (data: any) => {
+            try {
+              const msg = JSON.parse(data.toString());
+              if (msg.setupComplete) {
+                ws.send(JSON.stringify({
+                  client_content: { turns: [{ role: "user", parts: [{ text: segment.text }] }], turn_complete: true }
+                }));
+              } else if (msg.serverContent?.modelTurn?.parts) {
+                for (const part of msg.serverContent.modelTurn.parts) {
+                  if (part.inlineData?.data) {
+                    success = true;
+                    // Отправляем чанк с индексом сегмента
+                    sendSSE('audio_chunk', { index: i, data: part.inlineData.data });
+                  }
+                }
+              }
+              if (msg.serverContent?.turnComplete) {
+                ws.close();
+              }
+            } catch (e) {}
+          });
+          
+          ws.on('close', () => {
+            if (success) resolveSegment();
+            else tryConnect(proxyIndex + 1);
+          });
+          
+          ws.on('error', () => {
+            ws.terminate();
+            if (!success) tryConnect(proxyIndex + 1);
+          });
+        };
+        
+        tryConnect(0);
+      });
+    });
     
-    // Закрываем соединение после небольшой задержки
+    // Ждем завершения всех стримов
+    await Promise.all(segmentPromises);
+    
+    // Закрываем соединение
     setTimeout(() => {
       res.end();
-    }, 100);
+    }, 500);
     
   } catch (e) {
     sendSSE('error', { error: String(e) });
