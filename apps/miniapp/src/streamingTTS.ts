@@ -15,8 +15,9 @@ export interface StreamingTTSOptions {
 export function initAudioContext(): AudioContext {
   if (!globalAudioContext) {
     const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
-    globalAudioContext = new AudioContextClass({ sampleRate: 24000 });
-    console.log('[STREAMING-TTS] AudioContext created, state:', globalAudioContext.state);
+    const ctx = new AudioContextClass({ sampleRate: 24000 });
+    globalAudioContext = ctx;
+    console.log('[STREAMING-TTS] AudioContext created, state:', ctx.state);
   }
   
   const ctx = globalAudioContext;
@@ -74,7 +75,8 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       
       // Конвертация Int16 -> Float32
       for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768.0;
+        const val = int16Array[i];
+        float32Array[i] = val !== undefined ? val / 32768.0 : 0;
       }
       
       const audioBuffer = audioContext.createBuffer(1, float32Array.length, sampleRate);
