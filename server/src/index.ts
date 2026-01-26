@@ -5119,15 +5119,22 @@ app.post('/api/chat/reply-stream', async (req, res) => {
   const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
   
-  // Настраиваем SSE
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  
-  const sendSSE = (event: string, data: any) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
+    // Настраиваем SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Отключает буферизацию Nginx
+    if (res.flushHeaders) {
+      res.flushHeaders();
+    }
+    
+    const sendSSE = (event: string, data: any) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      if (res.flush && typeof res.flush === 'function') {
+        res.flush();
+      }
+    };
   
   try {
     const prisma = getPrisma();
@@ -7717,6 +7724,10 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
           res.setHeader('X-Audio-Sample-Rate', '24000');
           res.setHeader('X-Audio-Channels', '1');
           res.setHeader('X-Audio-Bits-Per-Sample', '16');
+          res.setHeader('X-Accel-Buffering', 'no'); // Отключает буферизацию Nginx
+          if (res.flushHeaders) {
+            res.flushHeaders();
+          }
           
           // Для WAV формата нужно сначала собрать все чанки для заголовка
           // Для PCM формата можем отправлять сразу (настоящий streaming)
