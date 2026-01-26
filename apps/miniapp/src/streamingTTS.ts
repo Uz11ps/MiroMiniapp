@@ -16,13 +16,20 @@ export function initAudioContext(): AudioContext {
   if (!globalAudioContext) {
     const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
     globalAudioContext = new AudioContextClass({ sampleRate: 24000 });
-    console.log('[STREAMING-TTS] AudioContext initialized, state:', globalAudioContext.state);
+    if (globalAudioContext) {
+      console.log('[STREAMING-TTS] AudioContext initialized, state:', globalAudioContext.state);
+    }
   }
   
-  if (globalAudioContext && globalAudioContext.state === 'suspended') {
-    globalAudioContext.resume().catch(e => console.error('[STREAMING-TTS] Resume failed:', e));
+  const ctx = globalAudioContext;
+  if (!ctx) {
+    throw new Error('Failed to initialize AudioContext');
   }
-  return globalAudioContext;
+
+  if (ctx.state === 'suspended') {
+    ctx.resume().catch(e => console.error('[STREAMING-TTS] Resume failed:', e));
+  }
+  return ctx;
 }
 
 // Авто-инициализация при любом взаимодействии
