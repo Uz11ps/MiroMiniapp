@@ -100,6 +100,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     let nextStartTime = audioContext.currentTime;
     let bytesReceived = 0;
     let leftover: Uint8Array | null = null;
+    let isFirstChunk = true; // Флаг для первого чанка - начинаем воспроизведение сразу
     
     // Функция проигрывания сырого PCM куска (Шаг 1)
     const playPCM = (value: Uint8Array) => {
@@ -152,10 +153,15 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       const now = audioContext.currentTime;
       
       // КРИТИЧЕСКИ ВАЖНО: Для максимально быстрого старта воспроизведения
-      // Если это первый чанк или мы отстали - начинаем почти сразу
-      if (nextStartTime <= now + 0.01) {
-        // Первый чанк или если мы отстали - начинаем с минимальной задержкой
-        nextStartTime = now + 0.01; // Минимальная задержка для стабильности (10мс)
+      // Первый чанк должен начать воспроизводиться СРАЗУ, без задержек
+      if (isFirstChunk) {
+        // Первый чанк - начинаем воспроизведение немедленно
+        nextStartTime = now;
+        isFirstChunk = false;
+        console.log('[STREAMING-TTS] 🎵 First chunk - starting playback immediately');
+      } else if (nextStartTime < now) {
+        // Если мы отстали (например, из-за задержек сети) - начинаем сразу
+        nextStartTime = now;
       }
       // Если nextStartTime уже в будущем (последующие чанки), используем его как есть
       // Это обеспечивает плавное воспроизведение без пропусков
@@ -210,8 +216,14 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         }
       }
 
-      // Передаем весь объект Uint8Array (Шаг 2)
+      // КРИТИЧЕСКИ ВАЖНО: Передаем чанк сразу для воспроизведения, без задержек
+      // playPCM вызывается синхронно и сразу планирует воспроизведение
       playPCM(value);
+      
+      // Логируем получение первого чанка для отладки
+      if (isFirstChunk) {
+        console.log('[STREAMING-TTS] 📦 First chunk received, size:', value.length, 'bytes, starting playback immediately');
+      }
     }
     
   } catch (error: any) {

@@ -7804,8 +7804,6 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                               if (res.flush && typeof res.flush === 'function') {
                                 res.flush();
                               }
-                              // Логируем все чанки для отслеживания потока данных
-                              console.log(`[GEMINI-TTS] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
                             }
                           }
                         }
@@ -8041,11 +8039,6 @@ app.post('/api/tts-stream', async (req, res) => {
           try {
             const message = JSON.parse(data.toString('utf-8'));
             
-            // Логируем первые сообщения для отладки
-            if (chunkCount < 3) {
-              console.log(`[GEMINI-TTS-LIVE] 📨 Message ${chunkCount + 1}:`, JSON.stringify(message).slice(0, 300));
-            }
-            
             // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
             if (message.setupComplete) {
               isConnected = true;
@@ -8085,9 +8078,6 @@ app.post('/api/tts-stream', async (req, res) => {
                   if (res.flush && typeof res.flush === 'function') {
                     res.flush();
                   }
-                  
-                  // Логируем все чанки для отслеживания потока данных
-                  console.log(`[GEMINI-TTS-LIVE] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
                 }
               }
               
