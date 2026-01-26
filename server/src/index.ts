@@ -7965,7 +7965,7 @@ app.post('/api/tts-stream', async (req, res) => {
     if (finalModelName.includes('2.5') || !finalModelName.includes('2.0-flash-exp')) {
       finalModelName = 'gemini-2.0-flash-exp';
     }
-    const finalVoiceName = voiceName || 'Aoede';
+    const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
     res.setHeader('Content-Type', 'audio/pcm');
@@ -8240,7 +8240,7 @@ app.post('/api/tts-stream', async (req, res) => {
     console.log('[GEMINI-TTS-LIVE] ⚠️ WebSocket failed, trying SSE fallback...');
     
     const finalModelNameFallback = modelName || 'gemini-2.5-flash-preview-tts';
-    const finalVoiceNameFallback = voiceName || 'Aoede';
+    const finalVoiceNameFallback = voiceName || 'Kore';
     const proxiesFallback = parseGeminiProxies();
     const attemptsFallback = proxiesFallback.length ? proxiesFallback : ['__direct__'];
     

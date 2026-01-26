@@ -247,7 +247,7 @@ const GameChat: React.FC = () => {
       lastSpokenRef.current = t;
 
       // Базовая логика выбора голоса
-      let voiceName = 'Aoede';
+      let voiceName = 'Kore'; // По умолчанию женский голос Kore
       if (context?.gender?.toLowerCase().includes('жен')) voiceName = 'Kore';
       else if (context?.gender?.toLowerCase().includes('муж')) voiceName = 'Charon';
 
