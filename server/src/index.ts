@@ -9398,11 +9398,28 @@ app.post('/api/tts-stream', async (req, res) => {
         
         console.log('[GEMINI-TTS-STREAM] 📡 Reading SSE stream...');
         
+        let rawChunkCount = 0;
+        let totalRawBytes = 0;
+        
         // Парсим SSE stream
         for await (const chunk of reader) {
-          buffer += chunk.toString();
+          rawChunkCount++;
+          const chunkStr = chunk.toString();
+          totalRawBytes += chunk.length;
+          
+          // Логируем первые несколько сырых чанков
+          if (rawChunkCount <= 3) {
+            console.log(`[GEMINI-TTS-STREAM] 📥 Raw chunk ${rawChunkCount} (${chunk.length} bytes):`, chunkStr.slice(0, 500));
+          }
+          
+          buffer += chunkStr;
           const lines = buffer.split('\n');
           buffer = lines.pop() || ''; // Оставляем неполную строку в буфере
+          
+          // Логируем количество строк после парсинга
+          if (rawChunkCount <= 3) {
+            console.log(`[GEMINI-TTS-STREAM] 📋 Parsed ${lines.length} lines from chunk ${rawChunkCount}`);
+          }
           
           for (const line of lines) {
             if (line.trim() === '') continue; // Пропускаем пустые строки
@@ -9472,7 +9489,12 @@ app.post('/api/tts-stream', async (req, res) => {
           }
         }
         
-        console.log(`[GEMINI-TTS-STREAM] 📊 SSE stream ended. Total SSE messages: ${sseLineCount}, Audio chunks: ${chunkCount}`);
+        console.log(`[GEMINI-TTS-STREAM] 📊 SSE stream ended. Raw chunks: ${rawChunkCount}, Raw bytes: ${totalRawBytes}, SSE messages: ${sseLineCount}, Audio chunks: ${chunkCount}`);
+        
+        // Если нет данных, логируем что было в буфере
+        if (sseLineCount === 0 && buffer.length > 0) {
+          console.log(`[GEMINI-TTS-STREAM] ⚠️ No SSE messages but buffer has data (${buffer.length} chars):`, buffer.slice(0, 1000));
+        }
         
         if (!hasAudio) {
           console.warn('[GEMINI-TTS-STREAM] ⚠️ No audio chunks received');
