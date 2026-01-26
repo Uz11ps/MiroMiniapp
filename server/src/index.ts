@@ -7931,8 +7931,13 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     
     // Для Live API используем модель 2.0 (Live API требует актуальные модели 2.0)
-    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API, используем gemini-2.0-flash-exp
-    const finalModelName = modelName ? modelName.replace(/-tts$/, '').replace(/gemini-2\.5-flash-preview.*/, 'gemini-2.0-flash-exp') : 'gemini-2.0-flash-exp';
+    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API, строго используем gemini-2.0-flash-exp
+    // Модели 1.5 не всегда стабильны в Live-режиме через чистые сокеты
+    let finalModelName = modelName ? modelName.replace(/-tts$/, '') : 'gemini-2.0-flash-exp';
+    // Принудительно заменяем любые модели 2.5 на 2.0, и любые другие на 2.0-flash-exp
+    if (finalModelName.includes('2.5') || !finalModelName.includes('2.0-flash-exp')) {
+      finalModelName = 'gemini-2.0-flash-exp';
+    }
     const finalVoiceName = voiceName || 'Aoede';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -7968,8 +7973,9 @@ app.post('/api/tts-stream', async (req, res) => {
         // Попробуем несколько вариантов URL, но скорее всего нужно использовать SSE fallback
         
         // Правильный URL для Gemini Live API через WebSocket (v1alpha)
-        // Используется полное имя сервиса в пути: google.ai.generativelanguage.v1alpha.GenerativeService/BidiGenerateContent
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService/BidiGenerateContent?key=${geminiApiKey}`;
+        // ВАЖНО: Модель НЕ передается в URL, только в JSON-сообщении setup
+        // Используется полное имя сервиса: google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
         console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
         console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
         console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
@@ -8057,12 +8063,13 @@ app.post('/api/tts-stream', async (req, res) => {
                 }
               }
               
-              // Проверяем, завершена ли генерация
-              if (modelTurn.complete) {
-                isComplete = true;
-                console.log('[GEMINI-TTS-LIVE] ✅ Generation complete');
-                ws.close();
-              }
+            }
+            
+            // Проверяем, завершен ли turn (завершение определяется через turnComplete, а не modelTurn.complete)
+            if (message.serverContent && message.serverContent.turnComplete) {
+              isComplete = true;
+              console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
+              ws.close();
             }
             
           } catch (e) {
