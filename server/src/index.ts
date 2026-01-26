@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import { games, createGame, updateGame, deleteGame, profile, friends, users, createUser, updateUser, deleteUser, feedbacks, subscriptionPlans, characters, createCharacter, updateCharacter, deleteCharacter } from './db.js';
 import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
 import pdfParse from 'pdf-parse';
 import fs from 'fs';
@@ -9288,6 +9289,129 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
   } catch (e) {
     console.error('[TTS] TTS endpoint error:', e);
     return res.status(500).json({ error: 'tts_error', details: String(e) });
+  }
+});
+
+// Streaming TTS endpoint через Gemini SDK
+app.post('/api/tts-stream', async (req, res) => {
+  try {
+    const { text, voiceName, modelName } = req.body;
+    
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'text_required', message: 'Текст для синтеза обязателен' });
+    }
+    
+    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (!geminiApiKey) {
+      return res.status(500).json({ 
+        error: 'tts_key_missing', 
+        message: 'Необходимо настроить GEMINI_API_KEY для генерации речи через Gemini.' 
+      });
+    }
+    
+    // Настройка для streaming
+    const genAI = new GoogleGenerativeAI(geminiApiKey);
+    const model = genAI.getGenerativeModel({ 
+      model: modelName || 'gemini-2.5-flash-preview-tts' 
+    });
+    
+    // Конфигурация для получения аудио
+    const config = {
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: { 
+            prebuiltVoiceConfig: { 
+              voiceName: voiceName || 'Aoede' // По умолчанию женский голос
+            } 
+          }
+        }
+      }
+    };
+    
+    // Устанавливаем заголовки для streaming (PCM audio, не WAV, так как не знаем размер заранее)
+    res.setHeader('Content-Type', 'audio/pcm');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Audio-Sample-Rate', '24000');
+    res.setHeader('X-Audio-Channels', '1');
+    res.setHeader('X-Audio-Bits-Per-Sample', '16');
+    
+    console.log('[GEMINI-TTS-STREAM] 🎤 Starting streaming TTS generation...');
+    console.log('[GEMINI-TTS-STREAM] Text length:', text.length, 'chars');
+    console.log('[GEMINI-TTS-STREAM] Voice:', voiceName || 'Aoede');
+    console.log('[GEMINI-TTS-STREAM] Model:', modelName || 'gemini-2.5-flash-preview-tts');
+    
+    try {
+      // Генерируем контент с streaming
+      const result = await model.generateContentStream({
+        contents: [{ role: 'user', parts: [{ text }] }],
+        ...config
+      });
+      
+      let totalAudioSize = 0;
+      let chunkCount = 0;
+      let hasAudio = false;
+      
+      // Отправляем аудио чанки по мере получения (настоящий streaming)
+      for await (const chunk of result.stream) {
+        const candidates = chunk.candidates;
+        if (candidates && candidates.length > 0) {
+          const content = candidates[0].content;
+          if (content && content.parts) {
+            for (const part of content.parts) {
+              if (part.inlineData) {
+                const mimeType = part.inlineData.mimeType || '';
+                const data = part.inlineData.data;
+                
+                if (mimeType.includes('audio') && data) {
+                  const audioBuffer = Buffer.from(data, 'base64');
+                  hasAudio = true;
+                  totalAudioSize += audioBuffer.length;
+                  chunkCount++;
+                  
+                  // Отправляем чанк сразу клиенту (настоящий streaming)
+                  res.write(audioBuffer);
+                  
+                  console.log(`[GEMINI-TTS-STREAM] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      if (!hasAudio) {
+        console.warn('[GEMINI-TTS-STREAM] ⚠️ No audio chunks received');
+        if (!res.headersSent) {
+          return res.status(500).json({ error: 'no_audio', message: 'Не удалось получить аудио данные' });
+        }
+        res.end();
+        return;
+      }
+      
+      console.log(`[GEMINI-TTS-STREAM] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
+      
+      res.end();
+      
+    } catch (streamError: any) {
+      console.error('[GEMINI-TTS-STREAM] ❌ Streaming error:', streamError?.message || String(streamError));
+      if (!res.headersSent) {
+        return res.status(500).json({ 
+          error: 'stream_error', 
+          message: streamError?.message || 'Ошибка при генерации streaming аудио' 
+        });
+      }
+      res.end();
+    }
+    
+  } catch (e) {
+    console.error('[TTS-STREAM] TTS streaming endpoint error:', e);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'tts_error', details: String(e) });
+    }
+    res.end();
   }
 });
 
