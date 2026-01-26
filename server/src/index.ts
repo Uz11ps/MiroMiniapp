@@ -235,11 +235,11 @@ ${choices.map((c, i) => `${i + 1}. ${c}`).join('\n')}
       // AI вернул 0 - не может определить выбор, нужно уточнить у пользователя
       console.warn('[AI-CHOICE] ⚠️ AI returned 0 - cannot determine choice, user needs to clarify');
       return -1; // Специальное значение: AI не смог определить, нужно уточнить у пользователя
-    } else {
+      } else {
       console.warn('[AI-CHOICE] ⚠️ AI returned invalid choice number:', choiceNum, 'expected 1-', choices.length);
       return -1; // Невалидное значение - тоже просим уточнить
-    }
-  } catch (e) {
+      }
+    } catch (e) {
     console.warn('[AI-CHOICE] Failed to detect choice with AI:', e);
     return -1; // Ошибка AI - просим уточнить
   }
@@ -4324,9 +4324,9 @@ app.post('/api/chat/welcome', async (req, res) => {
                   if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
                     text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
                     text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
-                  } else {
+          } else {
                     text = text + '\n\n**Что вы делаете?**\n\n' + choiceLines;
-                  }
+          }
                 }
               }
             }
@@ -4406,7 +4406,7 @@ app.post('/api/chat/welcome', async (req, res) => {
             }
           } else {
             console.warn('[WELCOME] TTS generation failed (SOLO):', ttsResponse.status);
-          }
+        }
       } catch (ttsErr: any) {
         console.warn('[WELCOME] TTS generation error (SOLO, non-critical):', ttsErr?.message || String(ttsErr));
               // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
@@ -4842,8 +4842,8 @@ app.post('/api/chat/reply', async (req, res) => {
                 } else {
                   // AI вернул undefined - нет вариантов выбора, это нормально, продолжаем без choiceIndex
                   console.log('[REPLY] ⚠️ AI returned undefined - no choices found in bot message, continuing without choiceIndex');
-                }
-              } catch (e) {
+        }
+      } catch (e) {
                 console.warn('[REPLY] Failed to detect choiceIndex with AI:', e);
                 // Если AI не смог определить - просим пользователя уточнить
                 return res.json({ message: 'Не распознали ваш ответ, выберите вариант корректно!', fallback: false });
@@ -4859,7 +4859,7 @@ app.post('/api/chat/reply', async (req, res) => {
                 console.log('[REPLY] ✅ Created parentHash from last bot message, depth:', depthForPregen - 1, 'hash:', parentHashForPregen?.slice(0, 8));
               }
             }
-          } else {
+      } else {
             // Если истории нет (первый ответ на welcome), depth=1, choiceIndex из userText
             depthForPregen = 1;
             if (userText) {
@@ -5513,10 +5513,10 @@ app.post('/api/chat/reply', async (req, res) => {
               
               const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
               const contentType = 'audio/wav';
-              const ttsDuration = Date.now() - ttsStartTime;
+          const ttsDuration = Date.now() - ttsStartTime;
               audioData = { buffer: audioBuffer, contentType };
-              console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
-              
+          console.log(`[REPLY] ✅ TTS generation successful (took ${ttsDuration}ms), audio size: ${audioBuffer.byteLength} bytes`);
+          
               // Сохраняем сгенерированное с учетом depth, choiceIndex, parentHash для цепочек диалогов, но только если аудио валидное
               // ВАЖНО: Сохраняем по userText (действие игрока), а не по text (ответ бота)
               // Это нужно, чтобы потом можно было найти ответ бота по действию игрока
@@ -5525,7 +5525,7 @@ app.post('/api/chat/reply', async (req, res) => {
               if (audioData && scenarioGameIdForPregen) {
                 try {
                   // Прегенерация удалена
-                } catch (e) {
+            } catch (e) {
                   console.warn('[REPLY] TTS generation error:', e);
                 }
               }
@@ -8170,20 +8170,20 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
       console.log(`[GEMINI-TTS] 🎤 Attempting streaming TTS generation via ${finalModelName}...`);
       
       // Пробуем каждый прокси
-      for (const p of attempts) {
-        try {
-          const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        for (const p of attempts) {
+          try {
+            const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${finalModelName}:streamGenerateContent?alt=sse`;
           
           console.log(`[GEMINI-TTS] 🎤 Attempting streaming via ${finalModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
-          
-          const response = await undiciFetch(url, {
+            
+            const response = await undiciFetch(url, {
             method: 'POST',
-            dispatcher,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Goog-Api-Key': geminiApiKey
-            },
+              dispatcher,
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': geminiApiKey
+              },
             body: JSON.stringify(requestBody),
             signal: AbortSignal.timeout(120000)
           });
@@ -8203,9 +8203,9 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
           const reader = response.body;
           if (!reader) {
             console.warn('[GEMINI-TTS] ⚠️ No response body');
-            continue;
-          }
-          
+                continue;
+              }
+              
           // Устанавливаем заголовки для streaming (PCM audio)
           res.setHeader('Content-Type', format === 'wav' ? 'audio/wav' : 'audio/pcm');
           res.setHeader('Transfer-Encoding', 'chunked');
@@ -8261,8 +8261,8 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                         if (part.inlineData) {
                           const mimeType = part.inlineData.mimeType || '';
                           const data = part.inlineData.data;
-                          
-                          if (mimeType.includes('audio') && data) {
+                  
+                  if (mimeType.includes('audio') && data) {
                             const audioBuffer = Buffer.from(data, 'base64');
                             hasAudio = true;
                             totalAudioSize += audioBuffer.length;
@@ -8336,33 +8336,33 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
             const combinedAudio = Buffer.concat(audioChunks);
             const sampleRate = 24000;
             const channels = 1;
-            const bitsPerSample = 16;
-            const byteRate = sampleRate * channels * (bitsPerSample / 8);
-            const blockAlign = channels * (bitsPerSample / 8);
+                      const bitsPerSample = 16;
+                      const byteRate = sampleRate * channels * (bitsPerSample / 8);
+                      const blockAlign = channels * (bitsPerSample / 8);
             const dataSize = combinedAudio.length;
-            const fileSize = 36 + dataSize;
-            
-            const wavHeader = Buffer.alloc(44);
-            wavHeader.write('RIFF', 0);
-            wavHeader.writeUInt32LE(fileSize, 4);
-            wavHeader.write('WAVE', 8);
-            wavHeader.write('fmt ', 12);
+                      const fileSize = 36 + dataSize;
+                      
+                      const wavHeader = Buffer.alloc(44);
+                      wavHeader.write('RIFF', 0);
+                      wavHeader.writeUInt32LE(fileSize, 4);
+                      wavHeader.write('WAVE', 8);
+                      wavHeader.write('fmt ', 12);
             wavHeader.writeUInt32LE(16, 16);
             wavHeader.writeUInt16LE(1, 20);
-            wavHeader.writeUInt16LE(channels, 22);
-            wavHeader.writeUInt32LE(sampleRate, 24);
-            wavHeader.writeUInt32LE(byteRate, 28);
-            wavHeader.writeUInt16LE(blockAlign, 32);
-            wavHeader.writeUInt16LE(bitsPerSample, 34);
-            wavHeader.write('data', 36);
-            wavHeader.writeUInt32LE(dataSize, 40);
-            
+                      wavHeader.writeUInt16LE(channels, 22);
+                      wavHeader.writeUInt32LE(sampleRate, 24);
+                      wavHeader.writeUInt32LE(byteRate, 28);
+                      wavHeader.writeUInt16LE(blockAlign, 32);
+                      wavHeader.writeUInt16LE(bitsPerSample, 34);
+                      wavHeader.write('data', 36);
+                      wavHeader.writeUInt32LE(dataSize, 40);
+                      
             const finalAudio = Buffer.concat([wavHeader, combinedAudio]);
             res.setHeader('Content-Type', 'audio/wav');
             res.setHeader('Content-Length', String(finalAudio.length));
             console.log(`[GEMINI-TTS] ✅ Collected ${chunkCount} chunks, total size: ${finalAudio.length} bytes, sending WAV`);
             return res.send(finalAudio);
-          } else {
+            } else {
             // Для PCM уже отправили все чанки через res.write()
             console.log(`[GEMINI-TTS] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
             res.end();
@@ -8372,7 +8372,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
         } catch (streamError: any) {
           const errorMsg = streamError?.message || String(streamError);
           console.warn(`[GEMINI-TTS] ${finalModelName} error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errorMsg);
-          continue;
+                continue;
         }
       }
       
@@ -8477,16 +8477,16 @@ app.post('/api/tts-stream', async (req, res) => {
         console.log(`[GEMINI-TTS-STREAM] 🎤 Attempting streaming via ${finalModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
         
         const response = await undiciFetch(url, {
-          method: 'POST',
+        method: 'POST',
           dispatcher,
           headers: {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': geminiApiKey
           },
           body: JSON.stringify(requestBody),
-          signal: AbortSignal.timeout(120000)
-        });
-        
+            signal: AbortSignal.timeout(120000)
+          });
+          
         if (!response.ok) {
           const errorText = await response.text().catch(() => '');
           console.warn(`[GEMINI-TTS-STREAM] ${finalModelName} returned ${response.status}:`, errorText.slice(0, 500));
@@ -8526,7 +8526,7 @@ app.post('/api/tts-stream', async (req, res) => {
             chunkStr = Buffer.from(chunk).toString('utf-8');
           } else if (typeof chunk === 'string') {
             chunkStr = chunk;
-          } else {
+      } else {
             chunkStr = String(chunk);
           }
           
@@ -8576,7 +8576,7 @@ app.post('/api/tts-stream', async (req, res) => {
                     }
                   }
                 }
-              } catch (e) {
+                } catch (e) {
                 console.warn(`[GEMINI-TTS-STREAM] ⚠️ Error parsing SSE line ${sseLineCount}:`, e?.message || String(e));
               }
             }
@@ -8609,8 +8609,8 @@ app.post('/api/tts-stream', async (req, res) => {
                     }
                   }
                 }
-              }
-            } catch (e) {
+                }
+              } catch (e) {
               console.warn(`[GEMINI-TTS-STREAM] ⚠️ Error parsing final buffer:`, e?.message || String(e));
             }
           }
@@ -8642,7 +8642,7 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     res.end();
     
-  } catch (e) {
+        } catch (e) {
     console.error('[TTS-STREAM] TTS streaming endpoint error:', e);
     if (!res.headersSent) {
       return res.status(500).json({ error: 'tts_error', details: String(e) });
