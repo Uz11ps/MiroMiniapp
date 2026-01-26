@@ -16,15 +16,11 @@ export function initAudioContext(): AudioContext {
   if (!globalAudioContext) {
     const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
     globalAudioContext = new AudioContextClass({ sampleRate: 24000 });
-    if (globalAudioContext) {
-      console.log('[STREAMING-TTS] AudioContext initialized, state:', globalAudioContext.state);
-    }
+    console.log('[STREAMING-TTS] AudioContext created, state:', globalAudioContext.state);
   }
   
   const ctx = globalAudioContext;
-  if (!ctx) {
-    throw new Error('Failed to initialize AudioContext');
-  }
+  if (!ctx) throw new Error('Failed to create AudioContext');
 
   if (ctx.state === 'suspended') {
     ctx.resume().catch(e => console.error('[STREAMING-TTS] Resume failed:', e));
@@ -32,15 +28,15 @@ export function initAudioContext(): AudioContext {
   return ctx;
 }
 
-// Авто-инициализация при любом взаимодействии
+// Разблокировка при первом тапе
 if (typeof window !== 'undefined') {
   const unlock = () => {
     initAudioContext();
     window.removeEventListener('click', unlock);
     window.removeEventListener('touchstart', unlock);
   };
-  window.addEventListener('click', unlock);
-  window.addEventListener('touchstart', unlock);
+  window.addEventListener('click', unlock, { once: true });
+  window.addEventListener('touchstart', unlock, { once: true });
 }
 
 export async function playStreamingTTS(options: StreamingTTSOptions): Promise<void> {
@@ -57,34 +53,31 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
   try {
     const audioContext = initAudioContext();
     const sampleRate = audioContext.sampleRate;
-    const channels = 1;
     
+    // GainNode для контроля громкости
     const gainNode = audioContext.createGain();
     gainNode.gain.value = 1.0;
     gainNode.connect(audioContext.destination);
     
-    let nextStartTime = 0;
+    // Планировщик времени
+    let nextStartTime = audioContext.currentTime;
     let bytesReceived = 0;
-    let chunkCount = 0;
-    const jitterBuffer: ArrayBuffer[] = [];
-    const jitterBufferSize = sampleRate * 0.3; // 300ms
-    let jitterBufferSamples = 0;
-    let isPlaying = false;
     
-    const playPCMChunk = (pcmData: ArrayBuffer) => {
-      chunkCount++;
-      bytesReceived += pcmData.byteLength;
-      onProgress?.(bytesReceived);
+    // Функция проигрывания сырого PCM куска
+    const playPCM = (pcmBuffer: ArrayBuffer) => {
+      if (pcmBuffer.byteLength < 2) return;
       
-      const int16Array = new Int16Array(pcmData);
+      // КРИТИЧНО: Убеждаемся, что длина кратна 2 для Int16
+      const safeLength = pcmBuffer.byteLength - (pcmBuffer.byteLength % 2);
+      const int16Array = new Int16Array(pcmBuffer, 0, safeLength / 2);
       const float32Array = new Float32Array(int16Array.length);
       
+      // Конвертация Int16 -> Float32
       for (let i = 0; i < int16Array.length; i++) {
-        const sample = int16Array[i];
-        float32Array[i] = sample !== undefined ? sample / 32768.0 : 0;
+        float32Array[i] = int16Array[i] / 32768.0;
       }
       
-      const audioBuffer = audioContext.createBuffer(channels, float32Array.length, sampleRate);
+      const audioBuffer = audioContext.createBuffer(1, float32Array.length, sampleRate);
       audioBuffer.getChannelData(0).set(float32Array);
       
       const source = audioContext.createBufferSource();
@@ -92,29 +85,16 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       source.connect(gainNode);
       
       const now = audioContext.currentTime;
+      // Если мы отстали (или это первый чанк), начинаем от "сейчас" + небольшой буфер
       if (nextStartTime < now) {
-        nextStartTime = now + 0.1;
+        nextStartTime = now + 0.05; 
       }
       
       source.start(nextStartTime);
       nextStartTime += audioBuffer.duration;
-    };
-    
-    const addAudioChunk = (pcmData: ArrayBuffer) => {
-      const samples = pcmData.byteLength / 2;
-      if (!isPlaying) {
-        jitterBuffer.push(pcmData);
-        jitterBufferSamples += samples;
-        if (jitterBufferSamples >= jitterBufferSize) {
-          isPlaying = true;
-          while (jitterBuffer.length > 0) {
-            const chunk = jitterBuffer.shift();
-            if (chunk) playPCMChunk(chunk);
-          }
-        }
-      } else {
-        playPCMChunk(pcmData);
-      }
+      
+      bytesReceived += pcmBuffer.byteLength;
+      onProgress?.(bytesReceived);
     };
 
     const response = await fetch(url, {
@@ -132,52 +112,46 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     const reader = response.body?.getReader();
     if (!reader) throw new Error('No reader');
     
-    let buffer = new Uint8Array(0);
+    console.log('[STREAMING-TTS] Reading stream...');
     
     while (true) {
       const { done, value } = await reader.read();
       
       if (done) {
-        if (buffer.length > 0) addAudioChunk(buffer.buffer);
-        if (!isPlaying && jitterBuffer.length > 0) {
-          while (jitterBuffer.length > 0) {
-            const chunk = jitterBuffer.shift();
-            if (chunk) playPCMChunk(chunk);
-          }
-        }
-        const waitTime = (nextStartTime - audioContext.currentTime) * 1000 + 300;
-        if (waitTime > 0) await new Promise(resolve => setTimeout(resolve, waitTime));
-        onComplete?.();
+        console.log('[STREAMING-TTS] Stream complete');
+        // Ждем завершения последнего звука
+        const wait = (nextStartTime - audioContext.currentTime) * 1000 + 100;
+        setTimeout(() => onComplete?.(), Math.max(0, wait));
         break;
       }
       
-      const newBuf = new Uint8Array(buffer.length + value.length);
-      newBuf.set(buffer);
-      newBuf.set(value, buffer.length);
-      buffer = newBuf;
-      
-      const chunkSize = 4096;
-      while (buffer.length >= chunkSize) {
-        const chunk = buffer.slice(0, chunkSize);
-        buffer = buffer.slice(chunkSize);
-        addAudioChunk(chunk.buffer);
+      // Если пришел пустой кусок - пропускаем
+      if (!value || value.length === 0) continue;
+
+      // Проверка на JSON (если сервер прислал ошибку текстом вместо бинарных данных)
+      if (value[0] === 123) { // 123 это '{'
+        const text = new TextDecoder().decode(value);
+        if (text.startsWith('{"error"')) {
+          console.error('[STREAMING-TTS] Server returned error JSON:', text);
+          throw new Error(text);
+        }
       }
+
+      // Проигрываем кусок сразу, как только он пришел
+      playPCM(value.buffer);
     }
     
   } catch (error) {
-    console.error('[STREAMING-TTS] Fatal:', error);
+    console.error('[STREAMING-TTS] Error:', error);
     onError?.(error instanceof Error ? error : new Error(String(error)));
   }
 }
 
 /**
- * Разбивает текст на части по количеству слов и проигрывает их последовательно.
- * Это позволяет обходить лимиты на длину текста и начинать воспроизведение быстрее.
+ * Вспомогательная функция для проигрывания длинных текстов частями
  */
 export async function playStreamingTTSChunked(options: StreamingTTSOptions & { wordsPerChunk?: number }): Promise<void> {
   const { text, wordsPerChunk = 50, ...rest } = options;
-  
-  // Разбиваем текст на слова
   const words = text.split(/\s+/);
   const chunks: string[] = [];
   
@@ -185,15 +159,8 @@ export async function playStreamingTTSChunked(options: StreamingTTSOptions & { w
     chunks.push(words.slice(i, i + wordsPerChunk).join(' '));
   }
   
-  console.log(`[STREAMING-TTS] Split text into ${chunks.length} chunks (${words.length} words total)`);
-  
-  // Проигрываем чанки последовательно
-  for (let i = 0; i < chunks.length; i++) {
-    const chunkText = chunks[i];
+  for (const chunkText of chunks) {
     if (!chunkText) continue;
-    
-    console.log(`[STREAMING-TTS] Playing text chunk ${i + 1}/${chunks.length} (${chunkText.length} chars)`);
-    
     await new Promise<void>((resolve, reject) => {
       playStreamingTTS({
         ...rest,
