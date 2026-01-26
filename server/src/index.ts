@@ -7788,6 +7788,9 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                             } else {
                               // Для PCM отправляем сразу (настоящий streaming)
                               res.write(audioBuffer);
+                              if (res.flush && typeof res.flush === 'function') {
+                                res.flush();
+                              }
                               if (chunkCount <= 3 || chunkCount % 10 === 0) {
                                 console.log(`[GEMINI-TTS] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
                               }
@@ -7828,6 +7831,9 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
                             audioChunks.push(audioBuffer);
                           } else {
                             res.write(audioBuffer);
+                            if (res.flush && typeof res.flush === 'function') {
+                              res.flush();
+                            }
                           }
                         }
                       }
