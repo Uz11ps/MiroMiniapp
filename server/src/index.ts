@@ -7,7 +7,6 @@ import { games, createGame, updateGame, deleteGame, profile, friends, users, cre
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
-import { HttpsProxyAgent } from 'https-proxy-agent';
 import pdfParse from 'pdf-parse';
 import fs from 'fs';
 import path from 'path';
@@ -5113,41 +5112,6 @@ app.post('/api/chat/reply', async (req, res) => {
   }
 });
 
-/**
- * Предварительная обработка текста для TTS:
- * - Заменяет цифры 1-9 словами (чтобы Gemini не переключался на английский)
- * - Чистит лишние символы
- */
-function preprocessTextForTTS(text: string): string {
-  if (!text) return '';
-  
-  const digitMap: Record<number, string> = {
-    0: 'ноль', 1: 'один', 2: 'два', 3: 'три', 4: 'четыре', 5: 'пять',
-    6: 'шесть', 7: 'семь', 8: 'восемь', 9: 'девять', 10: 'десять',
-    11: 'одиннадцать', 12: 'двенадцать', 13: 'тринадцать', 14: 'четырнадцать',
-    15: 'пятнадцать', 16: 'шестнадцать', 17: 'семнадцать', 18: 'восемнадцать',
-    19: 'девятнадцать', 20: 'двадцать'
-  };
-
-  // Заменяем числа от 0 до 20
-  let processed = text.replace(/\b(\d+)\b/g, (match, numStr) => {
-    const num = parseInt(numStr, 10);
-    if (num >= 0 && num <= 20) {
-      return digitMap[num];
-    }
-    return numStr;
-  });
-
-  // Заменяем цифры в списках (1., 2) и т.д.)
-  processed = processed.replace(/(\d+)([\)\.])/g, (match, numStr, suffix) => {
-    const num = parseInt(numStr, 10);
-    const word = (num >= 0 && num <= 20) ? digitMap[num] : numStr;
-    return `${word}${suffix}`;
-  });
-
-  return processed;
-}
-
 // Потоковый endpoint для генерации текста с параллельной генерацией TTS
 app.post('/api/chat/reply-stream', async (req, res) => {
   const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
@@ -5187,135 +5151,93 @@ app.post('/api/chat/reply-stream', async (req, res) => {
       history: history
     });
     const fullText = generatedText || '';
+    sendSSE('text_complete', { text: fullText });
     
-    // 2. Простая озвучка без анализа - один естественный голос для всего текста
-    sendSSE('status', { type: 'streaming_audio' });
+    // Параллельно запускаем генерацию TTS
+    sendSSE('status', { type: 'generating_audio' });
     
-    let textSentToClient = false;
-    let hasAudio = false;
-    const sendTextToClientOnce = () => {
-      if (!textSentToClient) {
-        textSentToClient = true;
-        sendSSE('text_complete', { text: fullText });
-      }
-    };
-
-    // Генерируем аудио для всего текста одним голосом (без анализа)
-    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
-    if (geminiApiKey && fullText.trim()) {
-      const finalVoiceName = 'Aoede'; // Естественный женский голос для всего текста
-      
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
-      const proxies = parseGeminiProxies();
-      const attempts = proxies.length ? proxies : ['__direct__'];
-      
-      let success = false;
-      
-      const tryConnect = async (proxyIndex: number) => {
-        if (proxyIndex >= attempts.length || success) return;
+    (async () => {
+      try {
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts-stream`;
         
-        const p = attempts[proxyIndex];
-        let agent: any = null;
-        if (p !== '__direct__') {
-          try {
-            agent = new HttpsProxyAgent(p);
-          } catch (e) {}
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: fullText,
+            voiceName: 'Aoede',
+            modelName: 'gemini-2.5-flash-preview-tts'
+          }),
+          signal: AbortSignal.timeout(60000)
+        });
+        
+        if (ttsResponse.ok) {
+          // Собираем все PCM чанки из streaming ответа
+          const reader = ttsResponse.body;
+          if (!reader) {
+            sendSSE('audio_error', { error: 'No response body' });
+        } else {
+            const audioChunks: Buffer[] = [];
+            for await (const chunk of reader) {
+              if (Buffer.isBuffer(chunk)) {
+                audioChunks.push(chunk);
+              } else if (chunk instanceof Uint8Array) {
+                audioChunks.push(Buffer.from(chunk));
+              } else if (chunk instanceof ArrayBuffer) {
+                audioChunks.push(Buffer.from(chunk));
+              }
+            }
+            
+            if (audioChunks.length === 0) {
+              sendSSE('audio_error', { error: 'No audio chunks received' });
+            } else {
+              // Конвертируем PCM в WAV
+              const pcmAudio = Buffer.concat(audioChunks);
+              const sampleRate = 24000;
+              const channels = 1;
+              const bitsPerSample = 16;
+              const byteRate = sampleRate * channels * (bitsPerSample / 8);
+              const blockAlign = channels * (bitsPerSample / 8);
+              const dataSize = pcmAudio.length;
+              const fileSize = 36 + dataSize;
+              
+              const wavHeader = Buffer.alloc(44);
+              wavHeader.write('RIFF', 0);
+              wavHeader.writeUInt32LE(fileSize, 4);
+              wavHeader.write('WAVE', 8);
+              wavHeader.write('fmt ', 12);
+              wavHeader.writeUInt32LE(16, 16);
+              wavHeader.writeUInt16LE(1, 20);
+              wavHeader.writeUInt16LE(channels, 22);
+              wavHeader.writeUInt32LE(sampleRate, 24);
+              wavHeader.writeUInt32LE(byteRate, 28);
+              wavHeader.writeUInt16LE(blockAlign, 32);
+              wavHeader.writeUInt16LE(bitsPerSample, 34);
+              wavHeader.write('data', 36);
+              wavHeader.writeUInt32LE(dataSize, 40);
+              
+              const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
+              const audioBase64 = audioBuffer.toString('base64');
+              sendSSE('audio_ready', { 
+                audio: audioBase64,
+                contentType: 'audio/wav',
+          format: 'base64'
+              });
+            }
+          }
+      } else {
+          sendSSE('audio_error', { error: 'TTS generation failed' });
         }
-        
-        const ws = new WebSocket(wsUrl, agent ? { agent } : {});
-        let wsTimeout = setTimeout(() => ws.terminate(), 10000);
-        
-        ws.on('open', () => {
-          clearTimeout(wsTimeout);
-          ws.send(JSON.stringify({
-            setup: {
-              model: 'models/gemini-2.0-flash-exp',
-              generation_config: {
-                response_modalities: ["AUDIO"],
-                speech_config: { 
-                  voice_config: { 
-                    prebuilt_voice_config: { 
-                      voice_name: finalVoiceName 
-                    } 
-                  } 
-                }
-              },
-              system_instruction: {
-                parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words. READ THE ENTIRE TEXT FROM BEGINNING TO END WITHOUT SKIPPING ANY PART.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- READ EVERY SINGLE WORD FROM START TO FINISH - DO NOT SKIP ANY PART OF THE TEXT\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
-              }
-            }
-          }));
-        });
-        
-        ws.on('message', (data: any) => {
-          try {
-            const msg = JSON.parse(data.toString());
-            if (msg.setupComplete) {
-              // Отправляем текст частями по 500 символов АСИНХРОННО для настоящего streaming
-              console.log(`[GEMINI-TTS-LIVE] 📤 Sending text to Gemini in streaming chunks, total length: ${fullText.length} chars`);
-              
-              const chunkSize = 500;
-              let offset = 0;
-              
-              // Отправляем все чанки асинхронно без await - они будут обрабатываться параллельно
-              while (offset < fullText.length) {
-                const chunk = fullText.slice(offset, offset + chunkSize);
-                const isLast = offset + chunkSize >= fullText.length;
-                
-                // Отправляем чанк сразу, не ждем обработки
-                ws.send(JSON.stringify({
-                  client_content: { 
-                    turns: [{ role: "user", parts: [{ text: chunk }] }], 
-                    turn_complete: isLast 
-                  }
-                }));
-                
-                offset += chunkSize;
-              }
-            } else if (msg.serverContent?.modelTurn?.parts) {
-              for (const part of msg.serverContent.modelTurn.parts) {
-                if (part.inlineData?.data) {
-                  success = true;
-                  hasAudio = true;
-                  // Как только появился первый чанк - отдаем текст
-                  sendTextToClientOnce();
-                  // Отправляем аудио чанк
-                  sendSSE('audio_chunk', { data: part.inlineData.data });
-                }
-              }
-            }
-            if (msg.serverContent?.turnComplete) {
-              ws.close();
-            }
-          } catch (e) {}
-        });
-        
-        ws.on('close', () => {
-          if (!success && proxyIndex < attempts.length - 1) {
-            tryConnect(proxyIndex + 1);
-          }
-        });
-        
-        ws.on('error', () => {
-          ws.terminate();
-          if (!success && proxyIndex < attempts.length - 1) {
-            tryConnect(proxyIndex + 1);
-          }
-        });
-      };
-      
-      await tryConnect(0);
-    }
+      } catch (ttsErr) {
+        sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
+      }
+    })();
     
-    // Если по какой-то причине аудио не сгенерировалось, всё равно отправляем текст
-    if (!hasAudio) {
-      sendTextToClientOnce();
-    }
-    
-    // Закрываем соединение
+    // Закрываем соединение после небольшой задержки
     setTimeout(() => {
       res.end();
-    }, 500);
+    }, 100);
     
   } catch (e) {
     sendSSE('error', { error: String(e) });
@@ -5946,28 +5868,77 @@ async function parseTextIntoSegments(params: {
         }).join('\n')
       : 'Персонажи не указаны';
     
-    const systemPrompt = `Ты разбиваешь текст на сегменты. ВАЖНО: В поле "text" каждого сегмента должен быть ТОЧНО ТАКОЙ ЖЕ текст как в оригинале. НЕ изменяй, НЕ добавляй, НЕ перефразируй. Просто скопируй кусок текста как есть.
+    const systemPrompt = `Ты анализируешь текст из настольной ролевой игры D&D 5e и разбиваешь его на сегменты с ПОЛНЫМ пониманием семантического смысла.
 
-Верни ТОЛЬКО JSON:
+КРИТИЧЕСКИ ВАЖНО - Ты должен понимать СЕМАНТИКУ текста:
+- Понимай контекст каждого предложения и абзаца
+- Определяй главную мысль и подтекст
+- Распознавай эмоциональную окраску каждого фрагмента
+- Понимай логические связи между частями текста
+- Определяй, где заканчивается одна мысль и начинается другая
+- Распознавай персонажей по ИМЕНАМ, описаниям, характеристикам и манере речи
+
+Текст может содержать:
+1. Текст рассказчика (мастера) - описания действий, окружения, событий
+2. Реплики персонажей - прямая речь в кавычках или после указания имени
+
+ВАЖНО: Учитывай характеристики персонажей из D&D 5e:
+- Класс персонажа влияет на манеру речи (маг говорит интеллигентно, воин - прямо, друид - мудро, плут - хитро)
+- Раса влияет на акцент и особенности речи
+- Харизма (CHA) влияет на убедительность и красноречие
+- Интеллект (INT) влияет на сложность речи и словарный запас
+- Мудрость (WIS) влияет на интонацию и размеренность речи
+- Persona (характер) описывает манеру общения персонажа
+- Способности и магия могут влиять на голос (например, заклинания могут изменять голос)
+
+Твоя задача:
+1. Разбить текст на сегменты (части) с пониманием СЕМАНТИЧЕСКОЙ структуры
+2. Для каждого сегмента определить:
+   - Является ли он текстом рассказчика или репликой персонажа
+   - Если это реплика - какой персонаж говорит:
+     * КРИТИЧЕСКИ ВАЖНО: Используй ИМЕНА ПЕРСОНАЖЕЙ из текста (например, "БАЛДУР", "Балдур", "балдур" - все варианты)
+     * Если в тексте упоминается имя персонажа (в любом регистре), это ОБЯЗАТЕЛЬНО его реплика
+     * Используй характеристики для точного определения (класс, раса, персона)
+     * Учитывай описание персонажа и его способности
+   - Эмоцию в сегменте (учитывай класс и характер персонажа, а также СЕМАНТИЧЕСКИЙ СМЫСЛ текста)
+   - Пол говорящего персонажа (если это реплика) - используй информацию о персонаже из списка
+   - Учитывай класс, расу, persona и способности персонажа при определении
+   - Понимай СЕМАНТИЧЕСКИЙ КОНТЕКСТ - разбивай по смысловым блокам, а не механически
+
+Доступные персонажи:
+${charactersList}
+
+Верни ТОЛЬКО JSON в следующем формате (без дополнительного текста, только JSON):
 {
   "segments": [
     {
-      "text": "ТОЧНАЯ КОПИЯ куска текста из оригинала",
+      "text": "текст сегмента",
       "isNarrator": true/false,
-      "characterName": "имя или null",
+      "characterName": "имя персонажа или null",
       "gender": "мужской/женский/null",
-      "emotion": "neutral",
-      "intensity": 0.5
+      "emotion": "neutral/joy/sadness/fear/anger/surprise",
+      "intensity": 0.0-1.0
     }
   ]
 }
 
-Доступные персонажи:
-${charactersList}`;
+Правила разбиения:
+- Разбивай текст ТОЛЬКО когда есть реплики персонажей - выделяй реплики отдельными сегментами
+- Если весь текст - это рассказчик (нет реплик), верни ОДИН сегмент с isNarrator: true
+- НЕ разбивай текст рассказчика на мелкие части - объединяй весь текст рассказчика в один сегмент
+- Разбивай только когда есть явные реплики персонажей (в кавычках или после имени)
+- КРИТИЧЕСКИ ВАЖНО: Распознавай персонажей по имени точно - если в тексте упоминается имя персонажа (например, "БАЛДУР говорит:", "Балдур:", "балдур сказал"), это ОБЯЗАТЕЛЬНО реплика этого персонажа
+- Имена персонажей могут быть в любом регистре - учитывай это при сопоставлении
+- Сохраняй порядок сегментов как в оригинальном тексте
+- Не теряй текст - каждый символ должен быть в каком-то сегменте
+- Учитывай характеристики персонажей при определении, кто говорит
+- Минимизируй количество сегментов - объединяй текст рассказчика`;
 
-    const userPrompt = `Разбей текст на сегменты. В поле "text" каждого сегмента должен быть ТОЧНО ТАКОЙ ЖЕ текст как в оригинале:
+    const userPrompt = `Разбей следующий текст на сегменты и проанализируй каждый:
 
-"${text}"`;
+"${text}"
+
+Верни JSON с сегментами.`;
 
     const { text: aiResponse } = await generateChatCompletion({
       systemPrompt,
@@ -7487,7 +7458,7 @@ app.post('/api/tts', async (req, res) => {
               parts: [{ text: 'Проверка' }] // Тестовое слово на русском
           }],
           systemInstruction: {
-            parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
+            parts: [{ text: "Ты — TTS система. Озвучь текст на русском." }]
           },
           generationConfig: {
             responseModalities: ['AUDIO'],
@@ -7645,7 +7616,7 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
             }],
             systemInstruction: {
               parts: [{
-                text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre"
+                text: "Ты — профессиональный актер озвучивания и мастер игры (Dungeon Master). Читай текст СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек, а не робот. Используй естественные интонации, паузы и ритм речи. Избегай монотонности и роботического звучания. Передавай эмоции и настроение сцены через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу. Не отвечай на вопросы, не комментируй, просто озвучивай его естественным человеческим голосом."
               }]
             },
             generationConfig: {
@@ -7700,11 +7671,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
       const requestBody = {
         contents: [{
           role: 'user',
-          parts: [{ text: text }]
+          parts: [{ text }]
         }],
         systemInstruction: {
           parts: [{
-            text: "Ты — профессиональный диктор. Читай текст СТРОГО НА РУССКОМ ЯЗЫКЕ. Все цифры, числа и перечисления (например, 1, 2, 3) читай только как русские числительные (один, два, три). Не переключайся на английский язык ни при каких обстоятельствах. Твой голос должен быть естественным, живым и спокойным."
+            text: "Ты — профессиональный актер озвучивания и мастер игры (Dungeon Master). Читай текст СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек, а не робот. Используй естественные интонации, паузы и ритм речи. Избегай монотонности и роботического звучания. Передавай эмоции и настроение сцены через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу. Не отвечай на вопросы, не комментируй, просто озвучивай его естественным человеческим голосом."
           }]
         },
         generationConfig: {
@@ -8081,12 +8052,12 @@ app.post('/api/tts-stream', async (req, res) => {
               isConnected = true;
               console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
               
-              // Отправляем СТРОГО оригинальный текст
+              // Отправляем текст для генерации в правильном формате Live API
               ws.send(JSON.stringify({
                 client_content: {
                   turns: [{
                     role: "user",
-                    parts: [{ text: text }]
+                    parts: [{ text }]
                   }],
                   turn_complete: true
                 }
@@ -8180,7 +8151,9 @@ app.post('/api/tts-stream', async (req, res) => {
                   }
                 },
                 system_instruction: {
-                  parts: [{ text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words. READ THE ENTIRE TEXT FROM BEGINNING TO END WITHOUT SKIPPING ANY PART.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- READ EVERY SINGLE WORD FROM START TO FINISH - DO NOT SKIP ANY PART OF THE TEXT\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre" }]
+                  parts: [{
+                    text: "Ты — профессиональный актер озвучивания и мастер игры (Dungeon Master). Читай текст СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек, а не робот. Используй естественные интонации, паузы и ритм речи. Избегай монотонности и роботического звучания. Передавай эмоции и настроение сцены через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу. Не отвечай на вопросы в тексте, не комментируй, просто озвучивай его естественным человеческим голосом."
+                  }]
                 }
               }
             }));
@@ -8258,11 +8231,11 @@ app.post('/api/tts-stream', async (req, res) => {
         const requestBodyFallback = {
           contents: [{
             role: 'user',
-            parts: [{ text: text }]
+            parts: [{ text }]
           }],
           systemInstruction: {
             parts: [{
-              text: "You are a professional text-to-speech voice actor. Read the text exactly as provided in Russian without changing any words.\n\nVOICE CHARACTERISTICS:\n- Use warm, natural timbre with subtle depth\n- Apply expressive intonation that matches the meaning: raise pitch for questions, lower for statements, vary rhythm for emphasis\n- Use natural pauses at commas and periods\n- Vary tempo slightly: slower for important moments, faster for action\n- Add subtle emotional coloring based on punctuation: excitement for exclamation marks, calm for periods, curiosity for question marks\n- Maintain consistent, pleasant voice quality throughout\n\nREADING STYLE:\n- Speak smoothly and naturally, as a professional narrator would\n- Use calm, measured pace with natural breathing pauses\n- Apply gentle emphasis on key words through slight pitch variation\n- Keep voice warm and engaging, never robotic or monotone\n\nCRITICAL RULES:\n- DO NOT analyze the text content or meaning\n- DO NOT add any words, comments, or explanations\n- DO NOT change or modify the text in any way\n- Read exactly what is written, but with natural human-like intonation and timbre"
+              text: "Ты — профессиональный актер озвучивания и мастер игры (Dungeon Master). Читай текст СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек, а не робот. Используй естественные интонации, паузы и ритм речи. Избегай монотонности и роботического звучания. Передавай эмоции и настроение сцены через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу. Не отвечай на вопросы, не комментируй, просто озвучивай его естественным человеческим голосом."
             }]
           },
           generationConfig: {

@@ -403,15 +403,3 @@ export function stopAudioQueue() {
     globalAudioQueue.stop();
   }
 }
-
-/**
- * Простая озвучка без анализа: использует один естественный голос.
- */
-export async function playStreamingTTSSegmented(options: StreamingTTSOptions & { gameId?: string }): Promise<void> {
-  // Просто используем обычную озвучку без анализа - один естественный голос
-  return playStreamingTTSChunked({
-    ...options,
-    voiceName: 'Aoede', // Естественный женский голос для всего текста
-    wordsPerChunk: 40
-  });
-}

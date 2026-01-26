@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, getAudioQueue, initAudioContext, playStreamingTTSChunked, playStreamingTTSSegmented } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, getAudioQueue, initAudioContext, playStreamingTTSChunked } from '../../api';
 
 // CSS импортируется в main.tsx, не нужно дублировать здесь
 
@@ -240,26 +240,36 @@ const GameChat: React.FC = () => {
       // Предотвращаем дубли
       if (t === lastSpokenRef.current && speakingInFlightRef.current) return;
       
-      console.log('[TTS-CLIENT] Starting segmented streaming TTS for text:', t.slice(0, 100));
+      console.log('[TTS-CLIENT] Starting standalone streaming TTS for text:', t.slice(0, 100));
       const seq = ++speakSeqRef.current;
       activeSpeakSeqRef.current = seq;
       speakingInFlightRef.current = true;
       lastSpokenRef.current = t;
 
-      await playStreamingTTSSegmented({
+      // Базовая логика выбора голоса
+      let voiceName = 'Aoede';
+      if (context?.gender?.toLowerCase().includes('жен')) voiceName = 'Kore';
+      else if (context?.gender?.toLowerCase().includes('муж')) voiceName = 'Charon';
+
+      await playStreamingTTSChunked({
         text: t,
-        gameId: id,
+        voiceName: voiceName,
+        modelName: 'gemini-2.0-flash-exp',
+        wordsPerChunk: 40,
+        onProgress: (bytes: number) => {
+          // Можно обновлять UI прогресса
+        },
         onComplete: () => {
           if (seq === activeSpeakSeqRef.current) {
-            speakingInFlightRef.current = false;
+                  speakingInFlightRef.current = false;
           }
         },
         onError: (err: Error) => {
-          console.error('[TTS-CLIENT] Segmented TTS error:', err);
-          if (seq === activeSpeakSeqRef.current) {
-            speakingInFlightRef.current = false;
-          }
-        }
+          console.error('[TTS-CLIENT] Streaming TTS error:', err);
+              if (seq === activeSpeakSeqRef.current) {
+                speakingInFlightRef.current = false;
+              }
+            }
       });
     } catch (err) {
       console.error('[TTS-CLIENT] speak() error:', err);
@@ -735,13 +745,13 @@ const GameChat: React.FC = () => {
               try { applyBgFromText(fullText); } catch {}
             }
           } else if (event === 'audio_chunk') {
-            // Превращаем base64 в Uint8Array и пушим в очередь (без индекса сегмента - один поток)
+            // Превращаем base64 в Uint8Array и пушим в очередь с индексом сегмента
             const binary = atob(data.data);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) {
               bytes[i] = binary.charCodeAt(i);
             }
-            audioQueue.push(0, bytes); // Используем индекс 0 для единственного потока
+            audioQueue.push(data.index, bytes);
           } else if (event === 'error') {
             console.error('[STREAM] Server error:', data.error);
           }
