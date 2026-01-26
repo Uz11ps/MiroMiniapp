@@ -8039,6 +8039,12 @@ app.post('/api/tts-stream', async (req, res) => {
           try {
             const message = JSON.parse(data.toString('utf-8'));
             
+            // КРИТИЧЕСКИ ВАЖНО: Логируем структуру всех сообщений для отладки
+            // Это поможет понять, почему воспроизведение начинается с середины
+            if (chunkCount < 5) {
+              console.log(`[GEMINI-TTS-LIVE] 📨 Message ${chunkCount + 1} structure:`, JSON.stringify(message).slice(0, 500));
+            }
+            
             // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
             if (message.setupComplete) {
               isConnected = true;
@@ -8059,28 +8065,57 @@ app.post('/api/tts-stream', async (req, res) => {
             }
             
             // ШАГ 3: Получение аудио-чанков из serverContent.modelTurn
-            if (message.serverContent && message.serverContent.modelTurn) {
-              const modelTurn = message.serverContent.modelTurn;
-              const parts = modelTurn.parts || [];
-              
-              for (const part of parts) {
-                if (part.inlineData && part.inlineData.data) {
-                  // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
-                  const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-                  hasAudio = true;
-                  totalAudioSize += audioBuffer.length;
-                  chunkCount++;
-                  
-                  // Отправляем чанк сразу клиенту (настоящий real-time streaming)
-                  res.write(audioBuffer);
-                  
-                  // Принудительно сбрасываем буфер
-                  if (res.flush && typeof res.flush === 'function') {
-                    res.flush();
+            // ВАЖНО: Проверяем все возможные пути к аудио-данным
+            if (message.serverContent) {
+              // Проверяем modelTurn (основной путь)
+              if (message.serverContent.modelTurn) {
+                const modelTurn = message.serverContent.modelTurn;
+                const parts = modelTurn.parts || [];
+                
+                if (parts.length > 0 && chunkCount < 5) {
+                  console.log(`[GEMINI-TTS-LIVE] 📦 Processing ${parts.length} parts in modelTurn`);
+                }
+                
+                for (const part of parts) {
+                  if (part.inlineData && part.inlineData.data) {
+                    // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
+                    const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                    hasAudio = true;
+                    totalAudioSize += audioBuffer.length;
+                    chunkCount++;
+                    
+                    if (chunkCount <= 3) {
+                      console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
+                    }
+                    
+                    // Отправляем чанк сразу клиенту (настоящий real-time streaming)
+                    res.write(audioBuffer);
+                    
+                    // Принудительно сбрасываем буфер
+                    if (res.flush && typeof res.flush === 'function') {
+                      res.flush();
+                    }
                   }
                 }
               }
               
+              // Проверяем другие возможные пути к аудио (на случай, если формат изменился)
+              if (!hasAudio && message.serverContent.parts) {
+                console.log('[GEMINI-TTS-LIVE] ⚠️ Found serverContent.parts (alternative path)');
+                const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
+                for (const part of parts) {
+                  if (part.inlineData && part.inlineData.data) {
+                    const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                    hasAudio = true;
+                    totalAudioSize += audioBuffer.length;
+                    chunkCount++;
+                    res.write(audioBuffer);
+                    if (res.flush && typeof res.flush === 'function') {
+                      res.flush();
+                    }
+                  }
+                }
+              }
             }
             
             // Проверяем, завершен ли turn (завершение определяется через turnComplete, а не modelTurn.complete)
