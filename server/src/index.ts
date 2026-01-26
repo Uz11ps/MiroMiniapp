@@ -9916,96 +9916,10 @@ app.post('/api/chat/dice', async (req, res) => {
       create: { userId: uid, gameId, history: history as any },
     });
     
-    // КРИТИЧЕСКИ ВАЖНО: Генерируем TTS для текста после броска кубиков
-    let audioData: { buffer: Buffer; contentType: string } | null = null;
-    if (narr.text) {
-      try {
-        // Прегенерация удалена - генерируем в реальном времени через streaming TTS
-        if (!audioData) {
-          try {
-            const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-            const ttsUrl = `${apiBase}/api/tts-stream`;
-            const ttsResponse = await undiciFetch(ttsUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                text: narr.text,
-                voiceName: 'Kore',
-                modelName: 'gemini-2.5-flash-preview-tts'
-              }),
-              signal: AbortSignal.timeout(60000)
-            });
-          
-            if (ttsResponse.ok) {
-              // Собираем все PCM чанки из streaming ответа
-              const reader = ttsResponse.body;
-              if (!reader) {
-                console.warn('[DICE] ⚠️ No response body');
-                audioData = null;
-              } else {
-                const audioChunks: Buffer[] = [];
-                for await (const chunk of reader) {
-                  if (Buffer.isBuffer(chunk)) {
-                    audioChunks.push(chunk);
-                  } else if (chunk instanceof Uint8Array) {
-                    audioChunks.push(Buffer.from(chunk));
-                  } else if (chunk instanceof ArrayBuffer) {
-                    audioChunks.push(Buffer.from(chunk));
-                  }
-                }
-                
-                if (audioChunks.length === 0) {
-                  console.warn('[DICE] ⚠️ No audio chunks received');
-                  audioData = null;
-                } else {
-                  // Конвертируем PCM в WAV
-                  const pcmAudio = Buffer.concat(audioChunks);
-                  const sampleRate = 24000;
-                  const channels = 1;
-                  const bitsPerSample = 16;
-                  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-                  const blockAlign = channels * (bitsPerSample / 8);
-                  const dataSize = pcmAudio.length;
-                  const fileSize = 36 + dataSize;
-                  
-                  const wavHeader = Buffer.alloc(44);
-                  wavHeader.write('RIFF', 0);
-                  wavHeader.writeUInt32LE(fileSize, 4);
-                  wavHeader.write('WAVE', 8);
-                  wavHeader.write('fmt ', 12);
-                  wavHeader.writeUInt32LE(16, 16);
-                  wavHeader.writeUInt16LE(1, 20);
-                  wavHeader.writeUInt16LE(channels, 22);
-                  wavHeader.writeUInt32LE(sampleRate, 24);
-                  wavHeader.writeUInt32LE(byteRate, 28);
-                  wavHeader.writeUInt16LE(blockAlign, 32);
-                  wavHeader.writeUInt16LE(bitsPerSample, 34);
-                  wavHeader.write('data', 36);
-                  wavHeader.writeUInt32LE(dataSize, 40);
-                  
-                  const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
-                  const contentType = 'audio/wav';
-                  audioData = { buffer: audioBuffer, contentType };
-                  console.log('[DICE] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
-                  
-                  // Прегенерация удалена
-                }
-              }
-            } else {
-              console.warn('[DICE] TTS generation failed:', ttsResponse.status);
-            }
-          } catch (ttsErr) {
-            console.warn('[DICE] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
-          }
-        }
-      } catch (ttsErr) {
-        console.warn('[DICE] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
-      }
-    }
-    
-    // Отправляем текст сразу, аудио будет стримиться отдельно
-    const response: any = { ok: true, messages: [fmt, narr.text], audioStream: true };
-    console.log('[DICE] ✅ Returning text immediately, audio will stream separately');
+    // Отправляем текст сразу, клиент сам вызовет streaming TTS через speak()
+    console.log('[DICE] ✅ Generated narrative text length:', narr.text.length, 'chars');
+    console.log('[DICE] ✅ Narrative text preview:', narr.text.slice(0, 200));
+    const response: any = { ok: true, messages: [fmt, narr.text] };
     return res.json(response);
   } catch {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
