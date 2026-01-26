@@ -6,8 +6,8 @@ TEXT="${1:-Привет! Это тест streaming TTS через Gemini.}"
 VOICE="${2:-Aoede}"
 MODEL="${3:-gemini-2.5-flash-preview-tts}"
 
-# Прокси для curl (из переменных окружения или docker-compose)
-PROXY_URL="${HTTPS_PROXY:-${GEMINI_PROXY:-${GOOGLE_PROXY:-}}}"
+# Прокси для curl (задан напрямую как в docker-compose.yml)
+PROXY_URL="http://user340617:1ju4tp@104.164.11.51:1511"
 
 echo "🧪 Тест streaming TTS endpoint"
 echo "================================"
@@ -19,11 +19,8 @@ echo ""
 
 # Проверяем доступность endpoint
 echo "1️⃣ Проверка доступности endpoint..."
-CURL_PROXY_ARGS=""
-if [ -n "$PROXY_URL" ]; then
-  CURL_PROXY_ARGS="--proxy ${PROXY_URL}"
-  echo "🔄 Используется прокси: ${PROXY_URL}"
-fi
+CURL_PROXY_ARGS="--proxy ${PROXY_URL}"
+echo "🔄 Используется прокси: ${PROXY_URL}"
 
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${CURL_PROXY_ARGS} "${BASE_URL}/api/tts-stream" -X POST \
   -H "Content-Type: application/json" \
