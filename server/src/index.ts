@@ -9321,13 +9321,17 @@ app.post('/api/tts-stream', async (req, res) => {
     const finalVoiceName = voiceName || 'Aoede';
     
     // Тело запроса для streaming TTS
+    // ВАЖНО: Добавляем systemInstruction чтобы модель генерировала ТОЛЬКО аудио, не текст
     const requestBody = {
       contents: [{
         role: 'user',
         parts: [{ text }]
       }],
+      systemInstruction: {
+        parts: [{ text: 'You are a text-to-speech system. Generate ONLY audio output from the given text. Do not generate any text response, only audio.' }]
+      },
       generationConfig: {
-        responseModalities: ['AUDIO'],
+        responseModalities: ['AUDIO'], // КРИТИЧЕСКИ ВАЖНО: только аудио
         speechConfig: {
           voiceConfig: {
             prebuiltVoiceConfig: {
@@ -9404,8 +9408,11 @@ app.post('/api/tts-stream', async (req, res) => {
         // Парсим SSE stream
         for await (const chunk of reader) {
           rawChunkCount++;
-          const chunkStr = chunk.toString();
-          totalRawBytes += chunk.length;
+          // Конвертируем Buffer/Uint8Array в строку правильно
+          const chunkStr = Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : 
+                          chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf-8') :
+                          typeof chunk === 'string' ? chunk : String(chunk);
+          totalRawBytes += chunk.length || chunkStr.length;
           
           // Логируем первые несколько сырых чанков
           if (rawChunkCount <= 3) {

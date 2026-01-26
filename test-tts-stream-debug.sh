@@ -108,8 +108,8 @@ echo ""
 
 # Пытаемся получить логи если docker доступен
 if command -v docker &> /dev/null; then
-  echo "Последние логи сервера (GEMINI-TTS-STREAM):"
-  docker logs miniapp-server-1 --tail 30 2>/dev/null | grep -i "GEMINI-TTS-STREAM\|tts-stream\|proxy" || echo "Логи не найдены или docker недоступен"
+  echo "Последние логи сервера (GEMINI-TTS-STREAM, последние 50 строк):"
+  docker logs miniapp-server-1 --tail 50 2>/dev/null | grep -A 5 -B 5 "GEMINI-TTS-STREAM" || docker logs miniapp-server-1 --tail 50 2>/dev/null
   echo ""
 else
   echo "⚠️ Docker не доступен, проверьте логи вручную"
