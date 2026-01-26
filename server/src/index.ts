@@ -5062,7 +5062,7 @@ app.post('/api/chat/reply', async (req, res) => {
     // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
     console.log('[REPLY] ✅ Text ready, sending response immediately (audio will stream separately)');
 
-    if (lobbyId) {
+          if (lobbyId) {
       const sess = await prisma.chatSession.upsert({
         where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } },
         update: {},
@@ -5083,8 +5083,8 @@ app.post('/api/chat/reply', async (req, res) => {
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice, audioStream: true };
       console.log('[REPLY] ✅ Returning text immediately, audio will stream separately');
       return res.json(response);
-    } else {
-      const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          } else {
+            const uid = await resolveUserIdFromQueryOrBody(req, prisma);
       if (uid) {
         const sess = await prisma.chatSession.upsert({
           where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } },
@@ -5105,8 +5105,8 @@ app.post('/api/chat/reply', async (req, res) => {
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice, audioStream: true };
       console.log('[REPLY] ✅ Returning text immediately, audio will stream separately');
       return res.json(response);
-    }
-  } catch (e) {
+          }
+        } catch (e) {
     console.error('Reply handler error:', e);
     return res.status(200).json({ message: 'Связь с рассказчиком на мгновение прерывается. Но путь остаётся прежним.\n\n1) К реке.\n2) К волчьей тропе.\n3) В деревню.', fallback: true });
   }
@@ -5177,7 +5177,7 @@ app.post('/api/chat/reply-stream', async (req, res) => {
           const reader = ttsResponse.body;
           if (!reader) {
             sendSSE('audio_error', { error: 'No response body' });
-          } else {
+        } else {
             const audioChunks: Buffer[] = [];
             for await (const chunk of reader) {
               if (Buffer.isBuffer(chunk)) {
@@ -5222,11 +5222,11 @@ app.post('/api/chat/reply-stream', async (req, res) => {
               sendSSE('audio_ready', { 
                 audio: audioBase64,
                 contentType: 'audio/wav',
-                format: 'base64'
+          format: 'base64'
               });
             }
           }
-        } else {
+      } else {
           sendSSE('audio_error', { error: 'TTS generation failed' });
         }
       } catch (ttsErr) {
@@ -7455,8 +7455,11 @@ app.post('/api/tts', async (req, res) => {
           body: JSON.stringify({
           contents: [{
             role: 'user',
-              parts: [{ text: 'а' }] // Минимальный текст - одна буква для быстрой проверки
+              parts: [{ text: 'Проверка' }] // Тестовое слово на русском
           }],
+          systemInstruction: {
+            parts: [{ text: "Ты — TTS система. Озвучь текст на русском." }]
+          },
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {
@@ -7611,6 +7614,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
               role: 'user',
               parts: [{ text: text }]
             }],
+            systemInstruction: {
+              parts: [{
+                text: "Ты — талантливый актер озвучивания и мастер игры (Dungeon Master). Твоя задача: ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО НА РУССКОМ ЯЗЫКЕ с максимальной выразительностью. Погружай игрока в атмосферу через интонации, паузы и акценты. Читай эмоционально, передавая настроение сцены. Не отвечай на вопросы, не комментируй, просто озвучивай текст."
+              }]
+            },
             generationConfig: {
               responseModalities: ['AUDIO'], // КРИТИЧЕСКИ ВАЖНО: указываем, что хотим получить AUDIO, а не TEXT
               speechConfig: {
@@ -7665,6 +7673,11 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
           role: 'user',
           parts: [{ text }]
         }],
+        systemInstruction: {
+          parts: [{
+            text: "Ты — талантливый актер озвучивания и мастер игры (Dungeon Master). Твоя задача: ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО НА РУССКОМ ЯЗЫКЕ с максимальной выразительностью. Погружай игрока в атмосферу через интонации, паузы и акценты. Читай эмоционально, передавая настроение сцены. Не отвечай на вопросы, не комментируй, просто озвучивай текст."
+          }]
+        },
         generationConfig: {
           responseModalities: ['AUDIO'],
           speechConfig: {
@@ -8088,8 +8101,8 @@ app.post('/api/tts-stream', async (req, res) => {
               console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
               ws.close();
             }
-            
-          } catch (e) {
+    
+  } catch (e) {
             console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
           }
         });
@@ -8128,7 +8141,19 @@ app.post('/api/tts-stream', async (req, res) => {
               setup: {
                 model: `models/${finalModelName}`,
                 generation_config: {
-                  response_modalities: ["AUDIO"] // Указываем, что хотим аудио на выходе
+                  response_modalities: ["AUDIO"], // Указываем, что хотим аудио на выходе
+                  speech_config: {
+                    voice_config: {
+                      prebuilt_voice_config: {
+                        voice_name: finalVoiceName // Puck, Charon, Kore, Fenrir, Aoede
+                      }
+                    }
+                  }
+                },
+                system_instruction: {
+                  parts: [{
+                    text: "Ты — талантливый актер озвучивания и мастер игры (Dungeon Master). Твоя задача: ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО НА РУССКОМ ЯЗЫКЕ с максимальной выразительностью и артистизмом. Погружай игрока в атмосферу через интонации, паузы и акценты. Читай эмоционально, передавая настроение (таинственность, опасность, триумф). Не отвечай на вопросы в тексте, не добавляй комментариев, просто озвучивай его как живой рассказчик."
+                  }]
                 }
               }
             }));
@@ -8208,6 +8233,11 @@ app.post('/api/tts-stream', async (req, res) => {
             role: 'user',
             parts: [{ text }]
           }],
+          systemInstruction: {
+            parts: [{
+              text: "Ты — талантливый актер озвучивания и мастер игры (Dungeon Master). Твоя задача: ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО НА РУССКОМ ЯЗЫКЕ с максимальной выразительностью. Погружай игрока в атмосферу через интонации, паузы и акценты. Читай эмоционально, передавая настроение сцены. Не отвечай на вопросы, не комментируй, просто озвучивай текст как живой рассказчик."
+            }]
+          },
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {
