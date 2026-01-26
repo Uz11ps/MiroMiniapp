@@ -101,10 +101,18 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     let bytesReceived = 0;
     let leftover: Uint8Array | null = null;
     let isFirstChunk = true; // Флаг для первого чанка - начинаем воспроизведение сразу
+    let chunksReceived = 0; // Счетчик полученных чанков
     
     // Функция проигрывания сырого PCM куска (Шаг 1)
     const playPCM = (value: Uint8Array) => {
       if (signal.aborted) return;
+      
+      chunksReceived++;
+      
+      // Логируем первый чанк ДО обработки
+      if (isFirstChunk) {
+        console.log('[STREAMING-TTS] 📦 First chunk received, size:', value.length, 'bytes');
+      }
 
       // 1. Соединяем с остатком от прошлого чанка
       let combined = value;
@@ -122,7 +130,28 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         combined = combined.slice(0, combined.length - 1);
       }
 
-      if (combined.length === 0) return;
+      if (combined.length === 0) {
+        if (isFirstChunk) {
+          console.warn('[STREAMING-TTS] ⚠️ First chunk is empty after processing, skipping');
+        }
+        return;
+      }
+      
+      // Проверяем, не является ли первый чанк полностью тишиной (все байты равны 0 или близки к 0)
+      if (isFirstChunk && combined.length >= 2) {
+        const checkArray = new Int16Array(combined.buffer, combined.byteOffset, Math.min(combined.length / 2, 100));
+        let allZero = true;
+        for (let i = 0; i < checkArray.length; i++) {
+          const val = checkArray[i];
+          if (val !== undefined && Math.abs(val) > 100) { // Порог для определения тишины
+            allZero = false;
+            break;
+          }
+        }
+        if (allZero) {
+          console.warn('[STREAMING-TTS] ⚠️ First chunk appears to be silence, but playing anyway to avoid skipping audio');
+        }
+      }
 
       // 3. КРИТИЧНО: Используем byteOffset и длину в конструкторе
       const int16Array = new Int16Array(
@@ -158,7 +187,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         // Первый чанк - начинаем воспроизведение немедленно
         nextStartTime = now;
         isFirstChunk = false;
-        console.log('[STREAMING-TTS] 🎵 First chunk - starting playback immediately');
+        console.log('[STREAMING-TTS] 🎵 First chunk - starting playback immediately, samples:', float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's');
       } else if (nextStartTime < now) {
         // Если мы отстали (например, из-за задержек сети) - начинаем сразу
         nextStartTime = now;
@@ -205,7 +234,10 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         break;
       }
       
-      if (!value || value.length === 0) continue;
+      if (!value || value.length === 0) {
+        console.warn('[STREAMING-TTS] ⚠️ Received empty chunk, skipping');
+        continue;
+      }
 
       // Проверка на JSON
       if (value[0] === 123) {
@@ -218,12 +250,8 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
 
       // КРИТИЧЕСКИ ВАЖНО: Передаем чанк сразу для воспроизведения, без задержек
       // playPCM вызывается синхронно и сразу планирует воспроизведение
+      // НЕ пропускаем чанки, даже если они кажутся пустыми - это может быть начало аудио
       playPCM(value);
-      
-      // Логируем получение первого чанка для отладки
-      if (isFirstChunk) {
-        console.log('[STREAMING-TTS] 📦 First chunk received, size:', value.length, 'bytes, starting playback immediately');
-      }
     }
     
   } catch (error: any) {
