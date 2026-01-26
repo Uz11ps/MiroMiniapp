@@ -67,6 +67,36 @@ function parseGeminiProxies(): string[] {
   return parseProxyList(listEnvRaw, singleRaw);
 }
 
+function createProxiedFetchForGemini(proxies: string[], timeoutMs: number) {
+  return (async (input: RequestInfo, init?: RequestInit) => {
+    const controllers: Array<AbortController> = [];
+    const attempts = proxies.length ? proxies : ['__direct__'];
+    let lastErr: unknown = null;
+    for (const p of attempts) {
+      try {
+        const controller = new AbortController();
+        controllers.push(controller);
+        const timer = setTimeout(() => controller.abort(), Math.max(120000, timeoutMs));
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        const res = await undiciFetch(input as any, { 
+          ...(init as any), 
+          dispatcher, 
+          signal: controller.signal,
+          headers: {
+            ...(init?.headers as any),
+            'Content-Type': 'application/json'
+          }
+        });
+        clearTimeout(timer);
+        return res;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('All Gemini proxy attempts failed');
+  }) as unknown as typeof fetch;
+}
+
 function createProxiedFetchForOpenAI(proxies: string[], timeoutMs: number) {
   return (async (input: RequestInfo, init?: RequestInit) => {
     const controllers: Array<AbortController> = [];
@@ -9292,13 +9322,18 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
   }
 });
 
-// Streaming TTS endpoint через Gemini SDK
+// Streaming TTS endpoint через Gemini SDK с прокси
 app.post('/api/tts-stream', async (req, res) => {
   try {
     const { text, voiceName, modelName } = req.body;
     
     if (!text || typeof text !== 'string') {
       return res.status(400).json({ error: 'text_required', message: 'Текст для синтеза обязателен' });
+    }
+    
+    // Минимальная длина текста (как в примере)
+    if (text.length < 5) {
+      return res.status(400).json({ error: 'text_too_short', message: 'Текст должен быть не менее 5 символов' });
     }
     
     const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
@@ -9309,36 +9344,10 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Получаем прокси для Gemini (как в обычном TTS)
-    const proxies = parseGeminiProxies();
-    const attempts = proxies.length ? proxies : ['__direct__'];
-    
-    console.log('[GEMINI-TTS-STREAM] 🔄 Proxies available:', attempts.length);
-    
-    // НЕ используем SDK - используем прямой REST API с прокси как в обычном TTS
-    // SDK не поддерживает прокси правильно, поэтому делаем запрос напрямую через undiciFetch
     const finalModelName = modelName || 'gemini-2.5-flash-preview-tts';
     const finalVoiceName = voiceName || 'Aoede';
     
-    // Тело запроса для streaming TTS (как в обычном TTS, но для streaming endpoint)
-    const requestBody = {
-      contents: [{
-        role: 'user',
-        parts: [{ text }]
-      }],
-      generationConfig: {
-        responseModalities: ['AUDIO'], // КРИТИЧЕСКИ ВАЖНО: только аудио
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: finalVoiceName
-            }
-          }
-        }
-      }
-    };
-    
-    // Устанавливаем заголовки для streaming (PCM audio, не WAV, так как не знаем размер заранее)
+    // Устанавливаем заголовки для streaming (PCM audio)
     res.setHeader('Content-Type', 'audio/pcm');
     res.setHeader('Transfer-Encoding', 'chunked');
     res.setHeader('Cache-Control', 'no-cache');
@@ -9352,152 +9361,77 @@ app.post('/api/tts-stream', async (req, res) => {
     console.log('[GEMINI-TTS-STREAM] Voice:', finalVoiceName);
     console.log('[GEMINI-TTS-STREAM] Model:', finalModelName);
     
+    // Получаем прокси для Gemini
+    const proxies = parseGeminiProxies();
+    const attempts = proxies.length ? proxies : ['__direct__'];
+    console.log('[GEMINI-TTS-STREAM] 🔄 Proxies available:', attempts.length);
+    
     // Пробуем каждый прокси
     for (const p of attempts) {
       try {
-        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${finalModelName}:streamGenerateContent?alt=sse`;
+        // Создаем кастомный fetch с прокси
+        const timeoutMs = 120000;
+        const proxiedFetch = p !== '__direct__' 
+          ? createProxiedFetchForGemini([p], timeoutMs)
+          : createProxiedFetchForGemini([], timeoutMs);
         
-        console.log(`[GEMINI-TTS-STREAM] 🎤 Attempting streaming via ${finalModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
-        console.log(`[GEMINI-TTS-STREAM] Request body:`, JSON.stringify(requestBody, null, 2).slice(0, 500));
-        
-        const response = await undiciFetch(url, {
-          method: 'POST',
-          dispatcher,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': geminiApiKey
-          },
-          body: JSON.stringify(requestBody),
-          signal: AbortSignal.timeout(120000)
+        // Создаем клиент Gemini с кастомным fetch
+        const genAI = new GoogleGenerativeAI(geminiApiKey);
+        const model = genAI.getGenerativeModel({ 
+          model: finalModelName,
+          // @ts-ignore - SDK поддерживает fetch опцию
+          fetch: proxiedFetch
         });
         
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => '');
-          console.warn(`[GEMINI-TTS-STREAM] ${finalModelName} returned ${response.status}:`, errorText.slice(0, 500));
-          if (response.status === 400 && errorText.includes('location is not supported')) {
-            console.warn(`[GEMINI-TTS-STREAM] ⚠️ Location not supported for ${p === '__direct__' ? 'direct' : 'proxy'}, trying next...`);
-            continue;
+        console.log(`[GEMINI-TTS-STREAM] 🎤 Attempting streaming via ${finalModelName} (${p === '__direct__' ? 'direct' : 'proxy'})`);
+        
+        // Запускаем streaming через SDK
+        const result = await model.generateContentStream({
+          contents: [{ role: 'user', parts: [{ text }] }],
+          generationConfig: {
+            // Важно: используем "audio" (не "AUDIO")
+            responseModalities: ['audio'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: finalVoiceName
+                }
+              }
+            }
           }
-          continue;
-        }
-        
-        console.log(`[GEMINI-TTS-STREAM] ✅ Response OK, Content-Type: ${response.headers.get('content-type')}`);
-        
-        // Читаем SSE stream
-        const reader = response.body;
-        if (!reader) {
-          console.warn('[GEMINI-TTS-STREAM] ⚠️ No response body');
-          continue;
-        }
+        });
         
         let totalAudioSize = 0;
         let chunkCount = 0;
         let hasAudio = false;
-        let buffer = '';
-        let sseLineCount = 0;
         
-        console.log('[GEMINI-TTS-STREAM] 📡 Reading SSE stream...');
+        console.log('[GEMINI-TTS-STREAM] 📡 Reading stream from SDK...');
         
-        let rawChunkCount = 0;
-        let totalRawBytes = 0;
-        
-        // Парсим SSE stream
-        for await (const chunk of reader) {
-          rawChunkCount++;
-          // Конвертируем Buffer/Uint8Array в строку правильно
-          const chunkStr = Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : 
-                          chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf-8') :
-                          typeof chunk === 'string' ? chunk : String(chunk);
-          totalRawBytes += chunk.length || chunkStr.length;
-          
-          // Логируем первые несколько сырых чанков
-          if (rawChunkCount <= 3) {
-            console.log(`[GEMINI-TTS-STREAM] 📥 Raw chunk ${rawChunkCount} (${chunk.length} bytes):`, chunkStr.slice(0, 500));
-          }
-          
-          buffer += chunkStr;
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || ''; // Оставляем неполную строку в буфере
-          
-          // Логируем количество строк после парсинга
-          if (rawChunkCount <= 3) {
-            console.log(`[GEMINI-TTS-STREAM] 📋 Parsed ${lines.length} lines from chunk ${rawChunkCount}`);
-          }
-          
-          for (const line of lines) {
-            if (line.trim() === '') continue; // Пропускаем пустые строки
+        // Читаем stream и отправляем аудио сразу клиенту (настоящий streaming)
+        for await (const chunk of result.stream) {
+          if (chunk.candidates && chunk.candidates[0]?.content?.parts) {
+            const audioPart = chunk.candidates[0].content.parts.find((p: any) => p.inlineData);
             
-            if (line.startsWith('data: ')) {
-              sseLineCount++;
-              try {
-                const jsonData = line.slice(6); // Убираем "data: "
-                const data = JSON.parse(jsonData);
+            if (audioPart && audioPart.inlineData) {
+              const mimeType = audioPart.inlineData.mimeType || '';
+              const data = audioPart.inlineData.data;
+              
+              if (mimeType.includes('audio') && data) {
+                // Декодируем base64 в Buffer
+                const audioBuffer = Buffer.from(data, 'base64');
+                hasAudio = true;
+                totalAudioSize += audioBuffer.length;
+                chunkCount++;
                 
-                // Логируем структуру первых нескольких сообщений
-                if (sseLineCount <= 3) {
-                  console.log(`[GEMINI-TTS-STREAM] 📨 SSE message ${sseLineCount} structure:`, JSON.stringify(data, null, 2).slice(0, 500));
-                }
+                // Отправляем чанк сразу клиенту (настоящий streaming)
+                res.write(audioBuffer);
                 
-                const candidates = data.candidates;
-                if (candidates && candidates.length > 0) {
-                  const content = candidates[0].content;
-                  if (content && content.parts) {
-                    for (const part of content.parts) {
-                      if (part.inlineData) {
-                        const mimeType = part.inlineData.mimeType || '';
-                        const data = part.inlineData.data;
-                        
-                        if (mimeType.includes('audio') && data) {
-                          const audioBuffer = Buffer.from(data, 'base64');
-                          hasAudio = true;
-                          totalAudioSize += audioBuffer.length;
-                          chunkCount++;
-                          
-                          // Отправляем чанк сразу клиенту (настоящий streaming)
-                          res.write(audioBuffer);
-                          
-                          console.log(`[GEMINI-TTS-STREAM] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
-                        } else if (mimeType) {
-                          console.log(`[GEMINI-TTS-STREAM] ⚠️ Found inlineData but not audio: mimeType=${mimeType}, dataLength=${data ? data.length : 0}`);
-                        }
-                      } else {
-                        // Логируем если есть другие поля
-                        const partKeys = Object.keys(part);
-                        if (partKeys.length > 0 && sseLineCount <= 5) {
-                          console.log(`[GEMINI-TTS-STREAM] 📋 Part keys:`, partKeys);
-                        }
-                      }
-                    }
-                  } else {
-                    if (sseLineCount <= 3) {
-                      console.log(`[GEMINI-TTS-STREAM] ⚠️ Content has no parts:`, JSON.stringify(content, null, 2).slice(0, 300));
-                    }
-                  }
-                } else {
-                  if (sseLineCount <= 3) {
-                    console.log(`[GEMINI-TTS-STREAM] ⚠️ No candidates in data:`, JSON.stringify(data, null, 2).slice(0, 300));
-                  }
+                if (chunkCount <= 3 || chunkCount % 10 === 0) {
+                  console.log(`[GEMINI-TTS-STREAM] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
                 }
-              } catch (e) {
-                console.warn(`[GEMINI-TTS-STREAM] ⚠️ Error parsing SSE line ${sseLineCount}:`, e?.message || String(e), 'Line:', line.slice(0, 200));
-              }
-            } else if (line.startsWith('event:') || line.startsWith('id:')) {
-              // Игнорируем другие SSE поля
-            } else if (line.trim() !== '') {
-              // Логируем неожиданные строки
-              if (sseLineCount < 5) {
-                console.log(`[GEMINI-TTS-STREAM] 📝 Unexpected SSE line:`, line.slice(0, 200));
               }
             }
           }
-        }
-        
-        console.log(`[GEMINI-TTS-STREAM] 📊 SSE stream ended. Raw chunks: ${rawChunkCount}, Raw bytes: ${totalRawBytes}, SSE messages: ${sseLineCount}, Audio chunks: ${chunkCount}`);
-        
-        // Если нет данных, логируем что было в буфере
-        if (sseLineCount === 0 && buffer.length > 0) {
-          console.log(`[GEMINI-TTS-STREAM] ⚠️ No SSE messages but buffer has data (${buffer.length} chars):`, buffer.slice(0, 1000));
         }
         
         if (!hasAudio) {
@@ -9510,7 +9444,16 @@ app.post('/api/tts-stream', async (req, res) => {
         return;
         
       } catch (streamError: any) {
-        console.warn(`[GEMINI-TTS-STREAM] ${finalModelName} error (${p === '__direct__' ? 'direct' : 'proxy'}):`, streamError?.message || String(streamError));
+        const errorMsg = streamError?.message || String(streamError);
+        console.warn(`[GEMINI-TTS-STREAM] ${finalModelName} error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errorMsg);
+        
+        // Если ошибка связана с регионом, пробуем следующий прокси
+        if (errorMsg.includes('location is not supported') || errorMsg.includes('not supported for the API')) {
+          console.warn(`[GEMINI-TTS-STREAM] ⚠️ Location not supported, trying next proxy...`);
+          continue;
+        }
+        
+        // Для других ошибок тоже пробуем следующий прокси
         continue;
       }
     }
@@ -9520,7 +9463,7 @@ app.post('/api/tts-stream', async (req, res) => {
     if (!res.headersSent) {
       return res.status(500).json({ 
         error: 'stream_error', 
-        message: 'Не удалось сгенерировать streaming аудио через все прокси' 
+        message: 'Не удалось сгенерировать streaming аудио через все прокси. Проверьте настройки прокси и API ключ.' 
       });
     }
     res.end();
