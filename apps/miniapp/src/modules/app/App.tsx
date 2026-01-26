@@ -735,13 +735,13 @@ const GameChat: React.FC = () => {
               try { applyBgFromText(fullText); } catch {}
             }
           } else if (event === 'audio_chunk') {
-            // Превращаем base64 в Uint8Array и пушим в очередь с индексом сегмента
+            // Превращаем base64 в Uint8Array и пушим в очередь (без индекса сегмента - один поток)
             const binary = atob(data.data);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) {
               bytes[i] = binary.charCodeAt(i);
             }
-            audioQueue.push(data.index, bytes);
+            audioQueue.push(0, bytes); // Используем индекс 0 для единственного потока
           } else if (event === 'error') {
             console.error('[STREAM] Server error:', data.error);
           }

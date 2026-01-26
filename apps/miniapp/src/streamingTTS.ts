@@ -405,91 +405,13 @@ export function stopAudioQueue() {
 }
 
 /**
- * Продвинутая озвучка: анализирует текст на сервере (разбивает на персонажей)
- * и проигрывает параллельно через AudioQueue.
+ * Простая озвучка без анализа: использует один естественный голос.
  */
 export async function playStreamingTTSSegmented(options: StreamingTTSOptions & { gameId?: string }): Promise<void> {
-  const { text, gameId, onComplete, onError } = options;
-  if (!text.trim()) return;
-
-  // 1. Останавливаем все текущее
-  stopStreamingTTS();
-  stopAudioQueue();
-
-  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  const root = host.split('.').slice(-2).join('.');
-  const apiBase = root === 'localhost' 
-    ? 'http://localhost:4000/api' 
-    : `${typeof window !== 'undefined' ? window.location.protocol : 'https:'}//api.${root}/api`;
-
-  try {
-    const audioContext = initAudioContext();
-    const queue = getAudioQueue(audioContext);
-    
-    // 2. Получаем сегменты текста от сервера
-    const analyzeRes = await fetch(`${apiBase}/tts/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, gameId })
-    });
-
-    if (!analyzeRes.ok) throw new Error('Failed to analyze text for TTS');
-    const { segments } = await analyzeRes.json();
-
-    if (!segments || !Array.isArray(segments) || segments.length === 0) {
-      // Fallback на обычную озвучку если анализ не сработал
-      return playStreamingTTS(options);
-    }
-
-    console.log(`[TTS-SEGMENTED] Playing ${segments.length} segments`);
-
-    // 3. Запускаем стриминг для каждого сегмента ПАРАЛЛЕЛЬНО
-    const segmentPromises = segments.map(async (seg: any, i: number) => {
-      // Определяем голос
-      let voiceName = 'Aoede';
-      if (seg.isNarrator) {
-        voiceName = 'Aoede';
-      } else if (seg.gender?.toLowerCase().includes('жен') || seg.gender?.toLowerCase().includes('female')) {
-        voiceName = 'Kore';
-      } else {
-        const maleVoices = ['Charon', 'Puck', 'Fenrir'];
-        const nameHash = (seg.characterName || 'default').split('').reduce((a: number, b: string) => { 
-          a = ((a << 5) - a) + b.charCodeAt(0); 
-          return a & a; 
-        }, 0);
-        voiceName = maleVoices[Math.abs(nameHash) % maleVoices.length] || 'Charon';
-      }
-
-      const url = `${apiBase}/tts-stream`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: seg.text,
-          voiceName: voiceName,
-          modelName: 'gemini-2.0-flash-exp'
-        })
-      });
-
-      if (!response.ok) return;
-      const reader = response.body?.getReader();
-      if (!reader) return;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value && value.length > 0) {
-          queue.push(i, value);
-        }
-      }
-    });
-
-    // Ждем завершения всех стримов (или хотя бы их запуска)
-    await Promise.all(segmentPromises);
-    onComplete?.();
-
-  } catch (err) {
-    console.error('[TTS-SEGMENTED] Error:', err);
-    onError?.(err instanceof Error ? err : new Error(String(err)));
-  }
+  // Просто используем обычную озвучку без анализа - один естественный голос
+  return playStreamingTTSChunked({
+    ...options,
+    voiceName: 'Aoede', // Естественный женский голос для всего текста
+    wordsPerChunk: 40
+  });
 }
