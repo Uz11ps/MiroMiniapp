@@ -6,9 +6,6 @@ TEXT="${1:-Привет! Это тест streaming TTS через Gemini.}"
 VOICE="${2:-Aoede}"
 MODEL="${3:-gemini-2.5-flash-preview-tts}"
 
-# Прокси для curl (задан напрямую как в docker-compose.yml)
-PROXY_URL="http://user340617:1ju4tp@104.164.11.51:1511"
-
 echo "🧪 Тест streaming TTS endpoint"
 echo "================================"
 echo "URL: ${BASE_URL}/api/tts-stream"
@@ -17,12 +14,10 @@ echo "Голос: ${VOICE}"
 echo "Модель: ${MODEL}"
 echo ""
 
-# Проверяем доступность endpoint
+# Проверяем доступность endpoint (БЕЗ прокси для localhost)
 echo "1️⃣ Проверка доступности endpoint..."
-CURL_PROXY_ARGS="--proxy ${PROXY_URL}"
-echo "🔄 Используется прокси: ${PROXY_URL}"
 
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${CURL_PROXY_ARGS} "${BASE_URL}/api/tts-stream" -X POST \
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/api/tts-stream" -X POST \
   -H "Content-Type: application/json" \
   -d "{\"text\":\"test\"}" 2>/dev/null)
 
@@ -40,8 +35,8 @@ echo ""
 echo "2️⃣ Отправка запроса с детальным выводом..."
 echo ""
 
-# Отправляем запрос с детальным выводом
-curl -v ${CURL_PROXY_ARGS} -X POST "${BASE_URL}/api/tts-stream" \
+# Отправляем запрос с детальным выводом (БЕЗ прокси для localhost)
+curl -v -X POST "${BASE_URL}/api/tts-stream" \
   -H "Content-Type: application/json" \
   -d "{
     \"text\": \"${TEXT}\",
