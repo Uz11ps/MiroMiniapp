@@ -9458,17 +9458,6 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     res.end();
-      
-    } catch (streamError: any) {
-      console.error('[GEMINI-TTS-STREAM] ❌ Streaming error:', streamError?.message || String(streamError));
-      if (!res.headersSent) {
-        return res.status(500).json({ 
-          error: 'stream_error', 
-          message: streamError?.message || 'Ошибка при генерации streaming аудио' 
-        });
-      }
-      res.end();
-    }
     
   } catch (e) {
     console.error('[TTS-STREAM] TTS streaming endpoint error:', e);
