@@ -80,7 +80,10 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       
       // Нормализуем Int16 (-32768..32767) в Float32 (-1.0..1.0)
       for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768.0;
+        const sample = int16Array[i];
+        if (sample !== undefined) {
+          float32Array[i] = sample / 32768.0;
+        }
       }
       
       audioQueue.push(float32Array);
@@ -187,7 +190,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         }
         
         // Ждем окончания воспроизведения всех данных из очереди
-        if (isPlaying && scriptProcessor) {
+        if (isPlaying && scriptProcessor !== null) {
           // Ждем пока очередь не опустеет и ScriptProcessor не обработает все данные
           while (audioQueue.length > 0 || currentQueueBuffer !== null) {
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -196,8 +199,10 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
           // Дополнительная задержка для завершения обработки последнего буфера
           await new Promise(resolve => setTimeout(resolve, 500));
           
-          scriptProcessor.disconnect();
-          scriptProcessor = null;
+          if (scriptProcessor !== null) {
+            scriptProcessor.disconnect();
+            scriptProcessor = null;
+          }
         }
         
         onComplete?.();
@@ -221,8 +226,9 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     }
     
     // Очистка
-    if (scriptProcessor) {
+    if (scriptProcessor !== null) {
       scriptProcessor.disconnect();
+      scriptProcessor = null;
     }
     gainNode.disconnect();
     audioContext.close();
