@@ -63,6 +63,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     
     // Буфер для накопления аудио данных (джиттер-буфер для стабильности)
     let bytesReceived = 0;
+    let chunkCount = 0; // Счетчик чанков для логирования
     const jitterBuffer: ArrayBuffer[] = [];
     const jitterBufferSize = sampleRate * 0.1; // 100ms буфер для стабильности при нестабильном интернете
     let jitterBufferSamples = 0;
@@ -70,6 +71,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     
     // Функция для воспроизведения PCM чанка
     const playPCMChunk = (pcmData: ArrayBuffer) => {
+      chunkCount++;
       bytesReceived += pcmData.byteLength;
       onProgress?.(bytesReceived);
       
@@ -137,19 +139,30 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       body: JSON.stringify({
         text,
         voiceName: voiceName || 'Aoede',
-        modelName: modelName || 'gemini-2.5-flash-preview-tts',
+        modelName: modelName || 'gemini-2.0-flash-exp',
       }),
     });
     
     if (!response.ok) {
-      throw new Error(`TTS streaming failed: ${response.status} ${response.statusText}`);
+      const errorText = await response.text().catch(() => '');
+      throw new Error(`TTS streaming failed: ${response.status} ${response.statusText}. ${errorText.slice(0, 200)}`);
     }
     
-    // Читаем поток данных
+    // Проверяем Content-Type - должен быть audio/pcm для бинарных данных
+    const contentType = response.headers.get('content-type') || '';
+    console.log('[STREAMING-TTS] Response Content-Type:', contentType);
+    
+    if (!contentType.includes('audio/pcm') && !contentType.includes('application/octet-stream')) {
+      console.warn('[STREAMING-TTS] ⚠️ Unexpected Content-Type, expected audio/pcm');
+    }
+    
+    // Читаем поток данных как бинарные (не текст!)
     const reader = response.body?.getReader();
     if (!reader) {
       throw new Error('Response body is not readable');
     }
+    
+    console.log('[STREAMING-TTS] Starting to read binary PCM stream...');
     
     const decoder = new TextDecoder();
     let buffer = new Uint8Array(0);
@@ -189,6 +202,42 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       }
       
       // Объединяем новый чанк с буфером
+      // value - это Uint8Array с бинарными PCM данными (уже декодированными сервером из Base64)
+      // ВАЖНО: Если сервер отправляет Base64 строку вместо бинарных данных, нужно декодировать
+      // Но по логике сервера, он должен декодировать Base64 и отправлять сырые PCM
+      
+      // Проверяем, что value определен (TypeScript guard)
+      if (!value) {
+        console.warn('[STREAMING-TTS] ⚠️ Received undefined value, skipping');
+        continue;
+      }
+      
+      // Проверяем, не является ли это текстовыми данными (Base64 строка)
+      // Если первые байты выглядят как Base64 (A-Za-z0-9+/), возможно данные пришли как текст
+      if (value.length > 0 && bytesReceived === 0) {
+        const firstByte = value[0];
+        const isTextData = firstByte !== undefined && (
+          (firstByte >= 65 && firstByte <= 90) || // A-Z
+          (firstByte >= 97 && firstByte <= 122) || // a-z
+          (firstByte >= 48 && firstByte <= 57) || // 0-9
+          firstByte === 43 || firstByte === 47 || firstByte === 61 // + / =
+        );
+        
+        if (isTextData) {
+          console.warn('[STREAMING-TTS] ⚠️ Received text data instead of binary PCM. This might be Base64 string.');
+          console.warn('[STREAMING-TTS] First bytes:', Array.from(value.slice(0, 20)).map(b => String.fromCharCode(b)).join(''));
+          // Попробуем декодировать как Base64 (на случай, если сервер отправляет Base64)
+          try {
+            const text = new TextDecoder().decode(value);
+            if (text.match(/^[A-Za-z0-9+/=]+$/)) {
+              console.warn('[STREAMING-TTS] ⚠️ Data appears to be Base64, but server should decode it. Check server code.');
+            }
+          } catch (e) {
+            // Не Base64, продолжаем как бинарные данные
+          }
+        }
+      }
+      
       const newBuffer = new Uint8Array(buffer.length + value.length);
       newBuffer.set(buffer);
       newBuffer.set(value, buffer.length);
@@ -200,6 +249,14 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       while (buffer.length >= chunkSize) {
         const chunk = buffer.slice(0, chunkSize);
         buffer = buffer.slice(chunkSize);
+        
+        // Логируем первые чанки для отладки
+        if (bytesReceived === 0) {
+          console.log('[STREAMING-TTS] First chunk received:', chunk.length, 'bytes');
+          console.log('[STREAMING-TTS] First bytes (hex):', Array.from(chunk.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+          console.log('[STREAMING-TTS] First bytes (decimal):', Array.from(chunk.slice(0, 8)).join(', '));
+        }
+        
         addAudioChunk(chunk.buffer);
       }
     }
