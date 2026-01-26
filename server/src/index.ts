@@ -4134,91 +4134,8 @@ app.post('/api/chat/welcome', async (req, res) => {
       // ПРЕГЕНЕРАЦИЯ ОЗВУЧКИ для первого сообщения
       // КРИТИЧЕСКИ ВАЖНО: текст и аудио ВСЕГДА идут вместе
       // ИСПРАВЛЕНИЕ: scenarioGameIdForPregen уже определен выше, не нужно определять заново
-      let audioData: { buffer: Buffer; contentType: string } | null = null;
-      if (text) {
-        try {
-          // Прегенерация удалена - генерируем в реальном времени через streaming TTS
-          if (!audioData) {
-            const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-            const ttsUrl = `${apiBase}/api/tts-stream`;
-            console.log('[WELCOME] 🎤 Generating TTS for welcome message, text length:', text.length);
-            
-            const ttsResponse = await undiciFetch(ttsUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                text,
-                voiceName: 'Aoede',
-                modelName: 'gemini-2.5-flash-preview-tts'
-              }),
-              signal: AbortSignal.timeout(60000) // 60 секунд для SSML генерации
-            });
-            
-            if (ttsResponse.ok) {
-              // Собираем все PCM чанки из streaming ответа
-              const reader = ttsResponse.body;
-              if (!reader) {
-                console.warn('[WELCOME] ⚠️ No response body');
-                audioData = null;
-              } else {
-                const audioChunks: Buffer[] = [];
-                for await (const chunk of reader) {
-                  if (Buffer.isBuffer(chunk)) {
-                    audioChunks.push(chunk);
-                  } else if (chunk instanceof Uint8Array) {
-                    audioChunks.push(Buffer.from(chunk));
-                  } else if (chunk instanceof ArrayBuffer) {
-                    audioChunks.push(Buffer.from(chunk));
-                  }
-                }
-                
-                if (audioChunks.length === 0) {
-                  console.warn('[WELCOME] ⚠️ No audio chunks received');
-                  audioData = null;
-                } else {
-                  // Конвертируем PCM в WAV
-                  const pcmAudio = Buffer.concat(audioChunks);
-                  const sampleRate = 24000;
-                  const channels = 1;
-                  const bitsPerSample = 16;
-                  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-                  const blockAlign = channels * (bitsPerSample / 8);
-                  const dataSize = pcmAudio.length;
-                  const fileSize = 36 + dataSize;
-                  
-                  const wavHeader = Buffer.alloc(44);
-                  wavHeader.write('RIFF', 0);
-                  wavHeader.writeUInt32LE(fileSize, 4);
-                  wavHeader.write('WAVE', 8);
-                  wavHeader.write('fmt ', 12);
-                  wavHeader.writeUInt32LE(16, 16);
-                  wavHeader.writeUInt16LE(1, 20);
-                  wavHeader.writeUInt16LE(channels, 22);
-                  wavHeader.writeUInt32LE(sampleRate, 24);
-                  wavHeader.writeUInt32LE(byteRate, 28);
-                  wavHeader.writeUInt16LE(blockAlign, 32);
-                  wavHeader.writeUInt16LE(bitsPerSample, 34);
-                  wavHeader.write('data', 36);
-                  wavHeader.writeUInt32LE(dataSize, 40);
-                  
-                  const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
-                  const contentType = 'audio/wav';
-                  audioData = { buffer: audioBuffer, contentType };
-                  console.log('[WELCOME] ✅ TTS generation successful, audio size:', audioBuffer.byteLength, 'bytes');
-                }
-              }
-            } else {
-              console.warn('[WELCOME] TTS generation failed:', ttsResponse.status);
-            }
-          }
-        } catch (ttsErr: any) {
-          console.warn('[WELCOME] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
-          // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался, audioData остается null
-          // Ответ все равно отправляется, но без аудио (после завершения попытки генерации)
-        }
-      }
-      
-      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS (успешного или с ошибкой)
+      // КРИТИЧЕСКИ ВАЖНО: Отправляем текст СРАЗУ, не ждем TTS
+      // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
       // Не сохраняем "технические ошибки" в историю
       const shouldSaveWelcome = !text || !text.trim().startsWith('Техническая ошибка');
       if (shouldSaveWelcome) {
@@ -4230,18 +4147,9 @@ app.post('/api/chat/welcome', async (req, res) => {
       }
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
-      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-      const response: any = { message: text || '', fallback: !Boolean(apiKey) };
-      if (audioData) {
-        response.audio = {
-          data: audioData.buffer.toString('base64'),
-          contentType: audioData.contentType || 'audio/wav',
-          format: 'base64'
-        };
-        console.log('[WELCOME] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
-      } else {
-        console.warn('[WELCOME] ⚠️ No audio generated - response will be sent without audio');
-      }
+      // Отправляем текст сразу, аудио будет стримиться отдельно
+      const response: any = { message: text || '', fallback: !Boolean(apiKey), audioStream: true };
+      console.log('[WELCOME] ✅ Returning text immediately, audio will stream separately');
       return res.json(response);
     }
     // SOLO: стартуем/возобновляем движок c первой локации и даём описание с действиями из сцены
@@ -5251,52 +5159,9 @@ app.post('/api/chat/reply', async (req, res) => {
     const locationId = locationIdForPregen; // Используем locationIdForPregen, который определен выше
     const characterId = undefined; // Для narrator всегда undefined
     
-    try {
-      // КРИТИЧЕСКИ ВАЖНО: Используем уже определенные переменные из верхнего блока поиска текста!
-      // Прегенерация удалена - генерируем в реальном времени через streaming TTS
-      if (!audioData) {
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const ttsUrl = `${apiBase}/api/tts-stream`;
-        
-        console.log('[REPLY] Calling TTS streaming endpoint for generation...');
-        console.log('[REPLY] TTS params: locationId=', locationId, 'characterId=', characterId, 'depth=', depth, 'choiceIndex=', choiceIndex);
-        const ttsStartTime = Date.now();
-        const ttsResponse = await undiciFetch(ttsUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            text,
-            voiceName: 'Aoede',
-            modelName: 'gemini-2.5-flash-preview-tts'
-          }),
-          signal: AbortSignal.timeout(150000) // 150 секунд таймаут (Gemini TTS может занимать до 120 секунд)
-        });
-        
-        if (ttsResponse.ok) {
-          // Собираем все PCM чанки из streaming ответа
-          const reader = ttsResponse.body;
-          if (!reader) {
-            console.warn('[REPLY] ⚠️ No response body');
-            audioData = null;
-          } else {
-            const audioChunks: Buffer[] = [];
-            for await (const chunk of reader) {
-              if (Buffer.isBuffer(chunk)) {
-                audioChunks.push(chunk);
-              } else if (chunk instanceof Uint8Array) {
-                audioChunks.push(Buffer.from(chunk));
-              } else if (chunk instanceof ArrayBuffer) {
-                audioChunks.push(Buffer.from(chunk));
-              }
-            }
-            
-            if (audioChunks.length === 0) {
-              console.warn('[REPLY] ⚠️ No audio chunks received');
-              audioData = null;
-            } else {
-              // Конвертируем PCM в WAV
+    // КРИТИЧЕСКИ ВАЖНО: НЕ ждем TTS - отправляем текст сразу
+    // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
+    // Удаляем весь блок ожидания TTS
               const pcmAudio = Buffer.concat(audioChunks);
               const sampleRate = 24000;
               const channels = 1;
@@ -5332,39 +5197,9 @@ app.post('/api/chat/reply', async (req, res) => {
               // Это нужно, чтобы потом можно было найти ответ бота по действию игрока
               // КРИТИЧЕСКИ ВАЖНО: Для диалогов внутри локации сохраняем БЕЗ locationId в хеше!
               // locationId используется только для папки, но НЕ в хеше (чтобы диалоги внутри локации находились)
-              if (audioData && scenarioGameIdForPregen) {
-                try {
-                  // Прегенерация удалена
-            } catch (e) {
-                  console.warn('[REPLY] TTS generation error:', e);
-                }
-              }
-            }
-          }
-        } else {
-          const errorText = await ttsResponse.text().catch(() => '');
-          console.warn('[REPLY] TTS generation failed:', ttsResponse.status, errorText.slice(0, 200));
-        }
-      }
-      
-      // Сохраняем аудио в переменную для возврата клиенту
-      audioData = audioData; // Уже установлено выше
-      console.log('[REPLY] ✅ TTS ready, proceeding to send response to client');
-    } catch (ttsErr: any) {
-      const isTimeout = ttsErr?.name === 'TimeoutError' || ttsErr?.message?.includes('timeout') || ttsErr?.message?.includes('aborted');
-      if (isTimeout) {
-        console.error('[REPLY] ❌ TTS generation TIMED OUT - NOT sending response to client');
-      } else {
-      console.warn('[REPLY] TTS generation error (non-critical):', ttsErr?.message || String(ttsErr));
-      }
-      // КРИТИЧЕСКИ ВАЖНО: Если TTS не сгенерировался (включая таймаут), НЕ отправляем ответ
-      // Пользователь должен получить ответ ТОЛЬКО после завершения TTS
-      audioData = null;
-    }
-
-    // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем ответ, если TTS не завершился успешно
-    // Ждем завершения TTS (успешного или с ошибкой) перед отправкой ответа
-    console.log('[REPLY] TTS completed, hasAudio:', !!audioData);
+    // КРИТИЧЕСКИ ВАЖНО: НЕ ждем TTS - отправляем текст сразу
+    // Аудио будет стримиться отдельно через /api/tts-stream на клиенте
+    console.log('[REPLY] ✅ Text ready, sending response immediately (audio will stream separately)');
 
     if (lobbyId) {
       const sess = await prisma.chatSession.upsert({
@@ -5383,22 +5218,9 @@ app.post('/api/chat/reply', async (req, res) => {
       advanceTurn(lobbyId);
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
-      // Возвращаем текст с аудио - ВСЕГДА вместе
-      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-      // КРИТИЧЕСКИ ВАЖНО: Если audioData === null (таймаут или ошибка), НЕ отправляем ответ!
-      if (!audioData) {
-        console.error('[REPLY] ❌ TTS failed or timed out - NOT sending response to client');
-        return res.status(504).json({ error: 'tts_timeout', message: 'TTS generation timed out or failed' });
-      }
-      
-      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-        // Конвертируем аудио в base64 для отправки клиенту
-        response.audio = {
-        data: audioData.buffer.toString('base64'),
-        contentType: audioData.contentType || 'audio/wav',
-          format: 'base64'
-        };
-      console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+      // Отправляем текст сразу, аудио будет стримиться отдельно
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice, audioStream: true };
+      console.log('[REPLY] ✅ Returning text immediately, audio will stream separately');
       return res.json(response);
     } else {
       const uid = await resolveUserIdFromQueryOrBody(req, prisma);
@@ -5418,22 +5240,9 @@ app.post('/api/chat/reply', async (req, res) => {
         await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       }
       
-      // Возвращаем текст с аудио - ВСЕГДА вместе
-      // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-      // КРИТИЧЕСКИ ВАЖНО: Если audioData === null (таймаут или ошибка), НЕ отправляем ответ!
-      if (!audioData) {
-        console.error('[REPLY] ❌ TTS failed or timed out - NOT sending response to client');
-        return res.status(504).json({ error: 'tts_timeout', message: 'TTS generation timed out or failed' });
-      }
-      
-      const response: any = { message: text, fallback: false, requestDice: aiRequestDice };
-        // Конвертируем аудио в base64 для отправки клиенту
-        response.audio = {
-        data: audioData.buffer.toString('base64'),
-        contentType: audioData.contentType || 'audio/wav',
-          format: 'base64'
-        };
-      console.log('[REPLY] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
+      // Отправляем текст сразу, аудио будет стримиться отдельно
+      const response: any = { message: text, fallback: false, requestDice: aiRequestDice, audioStream: true };
+      console.log('[REPLY] ✅ Returning text immediately, audio will stream separately');
       return res.json(response);
     }
   } catch (e) {
@@ -8263,7 +8072,7 @@ app.post('/api/tts-stream', async (req, res) => {
     const finalModelName = modelName || 'gemini-2.5-flash-preview-tts';
     const finalVoiceName = voiceName || 'Aoede';
     
-    // Устанавливаем заголовки для streaming (PCM audio)
+    // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
     res.setHeader('Content-Type', 'audio/pcm');
     res.setHeader('Transfer-Encoding', 'chunked');
     res.setHeader('Cache-Control', 'no-cache');
@@ -8271,6 +8080,12 @@ app.post('/api/tts-stream', async (req, res) => {
     res.setHeader('X-Audio-Sample-Rate', '24000');
     res.setHeader('X-Audio-Channels', '1');
     res.setHeader('X-Audio-Bits-Per-Sample', '16');
+    
+    // КРИТИЧЕСКИ ВАЖНО: Отключаем буферизацию Express для настоящего real-time streaming
+    res.setHeader('X-Accel-Buffering', 'no'); // Отключаем буферизацию nginx (если используется)
+    if (res.flushHeaders) {
+      res.flushHeaders(); // Отправляем заголовки сразу
+    }
     
     console.log('[GEMINI-TTS-STREAM] 🎤 Starting streaming TTS generation...');
     console.log('[GEMINI-TTS-STREAM] Text length:', text.length, 'chars');
@@ -8401,6 +8216,11 @@ app.post('/api/tts-stream', async (req, res) => {
                           // Отправляем чанк сразу клиенту (настоящий streaming)
                           res.write(audioBuffer);
                           
+                          // КРИТИЧЕСКИ ВАЖНО: Принудительно сбрасываем буфер после каждого чанка
+                          if (res.flush && typeof res.flush === 'function') {
+                            res.flush();
+                          }
+                          
                           if (chunkCount <= 3 || chunkCount % 10 === 0) {
                             console.log(`[GEMINI-TTS-STREAM] 📦 Sent chunk ${chunkCount}, size: ${audioBuffer.length} bytes, total: ${totalAudioSize} bytes`);
                           }
@@ -8437,6 +8257,9 @@ app.post('/api/tts-stream', async (req, res) => {
                         totalAudioSize += audioBuffer.length;
                         chunkCount++;
                         res.write(audioBuffer);
+                        if (res.flush && typeof res.flush === 'function') {
+                          res.flush();
+                        }
                         console.log(`[GEMINI-TTS-STREAM] 📦 Sent final chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
                       }
                     }
@@ -10108,18 +9931,9 @@ app.post('/api/chat/dice', async (req, res) => {
       }
     }
     
-    // КРИТИЧЕСКИ ВАЖНО: Ответ отправляется ТОЛЬКО после завершения TTS
-    const response: any = { ok: true, messages: [fmt, narr.text] };
-    if (audioData) {
-      response.audio = {
-        data: audioData.buffer.toString('base64'),
-        contentType: audioData.contentType || 'audio/wav',
-        format: 'base64'
-      };
-      console.log('[DICE] ✅ Returning text + audio together (audio size:', audioData.buffer.byteLength, 'bytes)');
-    } else {
-      console.warn('[DICE] ⚠️ No audio generated - response will be sent without audio');
-    }
+    // Отправляем текст сразу, аудио будет стримиться отдельно
+    const response: any = { ok: true, messages: [fmt, narr.text], audioStream: true };
+    console.log('[DICE] ✅ Returning text immediately, audio will stream separately');
     return res.json(response);
   } catch {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });

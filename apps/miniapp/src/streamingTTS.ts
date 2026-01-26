@@ -88,8 +88,9 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       
       audioQueue.push(float32Array);
       
-      // Если еще не начали проигрывать, начинаем после накопления небольшого буфера
-      const minSamplesToStart = sampleRate * 0.2; // 0.2 секунды буфера
+      // Начинаем воспроизведение сразу при получении первого чанка (real-time)
+      // Минимальный буфер уменьшен для более быстрого старта
+      const minSamplesToStart = sampleRate * 0.05; // 0.05 секунды буфера (1200 samples) для быстрого старта
       if (!isPlaying) {
         const totalSamples = audioQueue.reduce((sum, buf) => sum + buf.length, 0);
         if (totalSamples >= minSamplesToStart) {
@@ -215,8 +216,8 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       buffer = newBuffer;
       
       // Обрабатываем полные PCM чанки (16-bit samples = 2 bytes per sample)
-      // Обрабатываем чанки по 4096 байт (2048 samples) для плавного воспроизведения
-      const chunkSize = 4096;
+      // Уменьшенный размер чанка для более быстрого начала воспроизведения (real-time)
+      const chunkSize = 2048; // 1024 samples = ~42ms при 24kHz (быстрее старт)
       while (buffer.length >= chunkSize) {
         const chunk = buffer.slice(0, chunkSize);
         buffer = buffer.slice(chunkSize);
