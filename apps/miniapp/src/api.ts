@@ -615,22 +615,14 @@ export async function ttsSynthesize(
   } catch { preferOgg = false; }
   const format = options?.format || (preferOgg ? 'oggopus' : 'mp3');
   
+  // Используем streaming TTS endpoint
   const body: any = {
     text,
-    format,
-    lang: 'ru-RU',
+    voiceName: 'Aoede',
+    modelName: 'gemini-2.5-flash-preview-tts'
   };
   
-  // Передаем контекст для выбора голоса и анализа через LLM
-  if (options?.gameId) body.gameId = options.gameId;
-  if (options?.characterId) body.characterId = options.characterId;
-  if (options?.locationId) body.locationId = options.locationId;
-  if (options?.gender) body.gender = options.gender;
-  if (options?.isNarrator !== undefined) body.isNarrator = options.isNarrator;
-  if (options?.voice) body.voice = options.voice;
-  if (options?.segmentMode !== undefined) body.segmentMode = options.segmentMode;
-  
-  const res = await fetch(`${apiBase}/tts`, { 
+  const res = await fetch(`${apiBase}/tts-stream`, { 
     method: 'POST', 
     headers: { 'Content-Type': 'application/json' }, 
     body: JSON.stringify(body) 
@@ -641,8 +633,33 @@ export async function ttsSynthesize(
     throw new Error(`TTS failed: ${errText}`);
   }
   
-  return await res.blob();
+  // Собираем все PCM чанки из streaming ответа
+  const reader = res.body?.getReader();
+  if (!reader) {
+    throw new Error('No response body reader');
+  }
+  
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  
+  // Объединяем все чанки в один Blob (PCM формат)
+  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  
+  return new Blob([combined], { type: 'audio/pcm' });
 }
+
+// Экспортируем streaming TTS функцию
+export { playStreamingTTS } from './streamingTTS';
 
 export async function generateBackground(prompt: string, size?: { width: number; height: number }): Promise<string> {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
