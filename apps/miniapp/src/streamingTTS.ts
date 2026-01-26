@@ -150,9 +150,15 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       };
 
       const now = audioContext.currentTime;
-      if (nextStartTime < now) {
-        nextStartTime = now + 0.05; 
+      
+      // КРИТИЧЕСКИ ВАЖНО: Для максимально быстрого старта воспроизведения
+      // Если это первый чанк или мы отстали - начинаем почти сразу
+      if (nextStartTime <= now + 0.01) {
+        // Первый чанк или если мы отстали - начинаем с минимальной задержкой
+        nextStartTime = now + 0.01; // Минимальная задержка для стабильности (10мс)
       }
+      // Если nextStartTime уже в будущем (последующие чанки), используем его как есть
+      // Это обеспечивает плавное воспроизведение без пропусков
 
       source.start(nextStartTime);
       nextStartTime += audioBuffer.duration;
