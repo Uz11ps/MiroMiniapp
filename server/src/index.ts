@@ -8374,51 +8374,12 @@ app.post('/api/tts-stream', async (req, res) => {
         let isConnected = false;
         let isComplete = false;
         let textSent = false; // Флаг, что текст уже отправлен
-        let firstChunksSkipped = 0; // Счетчик пропущенных первых чанков (для фильтрации тишины)
-        const SKIP_FIRST_MS = 200; // Пропускаем первые 200 мс тишины (warm-up)
-        const SAMPLE_RATE = 24000; // 24 кГц
-        const BYTES_PER_MS = (SAMPLE_RATE * 2) / 1000; // 2 байта на сэмпл (16-bit), переводим в мс
-        let skippedBytes = 0;
         
-        // Функция проверки, что буфер не пустой (не все нули)
-        // ВАЖНО: Убрали агрессивный фильтр тишины для отладки - он обрезал начало речи
-        const isBufferValid = (buffer: Buffer, skipSilence: boolean = false): boolean => {
+        // Функция проверки, что буфер не пустой
+        // ВАЖНО: Gemini 2.0 не генерирует мусорную тишину, поэтому фильтр не нужен
+        // Убрали всю логику isSilence и skippedBytes - она обрезала начало речи
+        const isBufferValid = (buffer: Buffer): boolean => {
           if (!buffer || buffer.length === 0) return false;
-          
-          // Фильтруем только первые 50-100 мс тишины (warm-up период), но более мягко
-          if (skipSilence && skippedBytes < SKIP_FIRST_MS * BYTES_PER_MS) {
-            // Проверяем, является ли этот чанк тишиной (более мягкий порог)
-            let isSilence = true;
-            const checkSize = Math.min(buffer.length, 1000);
-            // ВАЖНО: Проверяем только четное количество байт для readInt16LE
-            const evenSize = checkSize - (checkSize % 2);
-            for (let i = 0; i < evenSize; i += 2) {
-              try {
-                const value = buffer.readInt16LE(i);
-                if (Math.abs(value) > 50) { // Более мягкий порог для тишины (50 вместо 100)
-                  isSilence = false;
-                  break;
-                }
-              } catch (e) {
-                // Игнорируем ошибки чтения (нечетное количество байт)
-                break;
-              }
-            }
-            
-            if (isSilence) {
-              skippedBytes += buffer.length;
-              firstChunksSkipped++;
-              if (firstChunksSkipped <= 3) {
-                console.log(`[GEMINI-TTS-LIVE] ⏭️ Skipping warm-up silence chunk ${firstChunksSkipped}, ${skippedBytes} bytes skipped so far`);
-              }
-              return false; // Пропускаем тишину
-            } else {
-              // Нашли реальный звук, больше не пропускаем
-              skippedBytes = SKIP_FIRST_MS * BYTES_PER_MS;
-            }
-          }
-          
-          // ВАЖНО: Убрали проверку на 5% non-zero - она была слишком агрессивной и обрезала начало речи
           // Просто проверяем, что буфер не пустой
           return buffer.length > 0;
         };
@@ -8494,10 +8455,9 @@ app.post('/api/tts-stream', async (req, res) => {
                       }
                     }
                     
-                    // КРИТИЧЕСКИ ВАЖНО: Проверяем, что буфер не пустой (не все нули)
-                    // Фильтруем первые 100-200 мс тишины (warm-up период)
-                    if (!isBufferValid(audioBuffer, true)) {
-                      continue; // Пропускаем пустые буферы и warm-up тишину
+                    // Проверяем, что буфер не пустой
+                    if (!isBufferValid(audioBuffer)) {
+                      continue; // Пропускаем пустые буферы
                     }
                     
                     hasAudio = true;
@@ -8534,8 +8494,8 @@ app.post('/api/tts-stream', async (req, res) => {
                       audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
                     }
                     
-                    // Проверяем валидность буфера (фильтруем warm-up тишину)
-                    if (!isBufferValid(audioBuffer, true)) {
+                    // Проверяем валидность буфера
+                    if (!isBufferValid(audioBuffer)) {
                       continue;
                     }
                     
@@ -8607,13 +8567,8 @@ app.post('/api/tts-stream', async (req, res) => {
                     voiceConfig: {
                       prebuiltVoiceConfig: {
                         voiceName: finalVoiceName // Puck, Charon, Kore, Fenrir, Aoede
-                      }
-                    },
-                    // Явно указываем формат аудио для gemini-2.0-flash-exp
-                    audioEncoding: "LINEAR16", // PCM 16-bit
-                    sampleRateHertz: 24000 // 24 кГц
-                  }
-                },
+                      },
+                }
                 systemInstruction: {
                   parts: [{
                     text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек. НЕ анализируй текст, НЕ комментируй его, НЕ отвечай на вопросы в тексте. Просто ОЗВУЧИВАЙ текст слово в слово. КРИТИЧЕСКИ ВАЖНО: Все цифры и числа читай ТОЛЬКО на русском языке (например, 123 читай как 'сто двадцать три', 5 как 'пять', а не 'five' или 'one two three'). КРИТИЧЕСКИ ВАЖНО: Знаки препинания (запятые, тире, точки, звездочки, дефисы и т.д.) НЕ ОЗВУЧИВАЙ как слова — используй их только для создания естественных пауз в речи. Используй естественные интонации, паузы и ритм речи. Избегай монотонности. Передавай эмоции через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу."
