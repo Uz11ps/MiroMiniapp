@@ -5685,77 +5685,28 @@ app.post('/api/chat/transcribe', upload.single('audio'), async (req, res) => {
       originalname: req.file.originalname
     });
     
-    // Пробуем Gemini в первую очередь (если настроен)
+    // Используем только Gemini STT
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
-    if (geminiKey) {
-      console.log('[TRANSCRIBE] 🔄 Trying Gemini STT...');
-      try {
-        const gtext = await transcribeViaGemini(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', geminiKey);
-        if (gtext && gtext.trim()) {
-          console.log('[TRANSCRIBE] ✅ Gemini STT succeeded, text length:', gtext.length);
-          return res.json({ text: gtext });
-        } else {
-          console.warn('[TRANSCRIBE] ⚠️ Gemini STT returned empty text');
-        }
-      } catch (e: any) {
-        console.error('[TRANSCRIBE] ❌ Gemini STT failed:', e?.message || String(e));
-        if (e?.stack) console.error('[TRANSCRIBE] Stack:', e.stack);
-      }
-    } else {
-      console.log('[TRANSCRIBE] ⏭️ Gemini key not found, skipping');
+    if (!geminiKey) {
+      console.error('[TRANSCRIBE] ❌ Gemini API key not found');
+      return res.status(200).json({ text: '', error: 'no_gemini_key' });
     }
     
-    // Fallback на Yandex
-    const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
-    if (yandexKey) {
-      console.log('[TRANSCRIBE] 🔄 Trying Yandex STT...');
-      try {
-        const ytext = await transcribeYandex(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/ogg', yandexKey);
-        if (ytext && ytext.trim()) {
-          console.log('[TRANSCRIBE] ✅ Yandex STT succeeded, text length:', ytext.length);
-          return res.json({ text: ytext });
-        } else {
-          console.warn('[TRANSCRIBE] ⚠️ Yandex STT returned empty text');
-        }
-      } catch (e: any) {
-        console.error('[TRANSCRIBE] ❌ Yandex STT failed:', e?.message || String(e));
-      }
-    } else {
-      console.log('[TRANSCRIBE] ⏭️ Yandex key not found, skipping');
-    }
-    
-    // Fallback на OpenAI Whisper
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
-    if (!apiKey) {
-      console.error('[TRANSCRIBE] ❌ No API keys available (Gemini, Yandex, OpenAI)');
-      return res.status(200).json({ text: '', error: 'no_api_key' });
-    }
-    console.log('[TRANSCRIBE] 🔄 Trying OpenAI Whisper...');
-    const client = createOpenAIClient(apiKey);
-    const tryModels = [
-      'whisper-1',
-      process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
-      'gpt-4o-transcribe',
-    ];
-    const file = await toFile(req.file.buffer, req.file.originalname || 'audio', { type: req.file.mimetype || 'audio/webm' });
-    let lastErr: unknown = null;
-    for (const model of tryModels) {
-      try {
-        const r = await client.audio.transcriptions.create({ model, file, language: 'ru', response_format: 'json' as any });
-        const text = (r as any)?.text || '';
-        if (text && String(text).trim()) return res.json({ text });
-      } catch (e) {
-        lastErr = e;
-        console.error('Transcribe attempt failed:', model, e);
-      }
-    }
+    console.log('[TRANSCRIBE] 🔄 Using Gemini STT...');
     try {
-      const raw = await transcribeViaHttp(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', apiKey);
-      if (raw && raw.trim()) return res.json({ text: raw });
-    } catch {}
-    console.error('Transcribe failed (all models):', lastErr);
-    const detail = (lastErr && typeof lastErr === 'object' ? JSON.stringify(lastErr) : String(lastErr || ''));
-    return res.status(200).json({ text: '', error: 'transcribe_failed', detail });
+      const gtext = await transcribeViaGemini(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', geminiKey);
+      if (gtext && gtext.trim()) {
+        console.log('[TRANSCRIBE] ✅ Gemini STT succeeded, text length:', gtext.length);
+        return res.json({ text: gtext });
+      } else {
+        console.warn('[TRANSCRIBE] ⚠️ Gemini STT returned empty text');
+        return res.status(200).json({ text: '', error: 'empty_transcription' });
+      }
+    } catch (e: any) {
+      console.error('[TRANSCRIBE] ❌ Gemini STT failed:', e?.message || String(e));
+      if (e?.stack) console.error('[TRANSCRIBE] Stack:', e.stack);
+      return res.status(200).json({ text: '', error: 'transcribe_failed', detail: e?.message || String(e) });
+    }
   } catch (e) {
     console.error('Transcribe failed:', e);
     return res.status(200).json({ text: '', error: 'transcribe_failed' });
@@ -5841,7 +5792,11 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
           }
         };
         
-        const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent';
+        // Используем gemini-1.5-flash для STT (быстрее и поддерживает generateContent)
+        // Также пробуем v1 API вместо v1beta
+        const modelName = process.env.GEMINI_STT_MODEL || 'gemini-1.5-flash';
+        const apiVersion = 'v1'; // Используем v1 вместо v1beta
+        const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
         console.log('[GEMINI-STT] Sending request to:', url);
         
         const r = await undiciFetch(url, {
