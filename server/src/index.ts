@@ -5819,10 +5819,10 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
           }
         };
         
-        // Используем gemini-1.5-flash для STT (быстрее и поддерживает generateContent)
-        // Модель gemini-1.5-flash доступна только в v1beta API
-        const modelName = process.env.GEMINI_STT_MODEL || 'gemini-1.5-flash';
-        const apiVersion = 'v1beta'; // gemini-1.5-flash доступна только в v1beta
+        // Используем gemini-1.5-flash-latest для STT (последняя версия, быстрее и поддерживает generateContent)
+        // Модель gemini-1.5-flash-latest доступна только в v1beta API
+        const modelName = process.env.GEMINI_STT_MODEL || 'gemini-1.5-flash-latest';
+        const apiVersion = 'v1beta'; // gemini-1.5-flash-latest доступна только в v1beta
         const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
         console.log('[GEMINI-STT] Sending request to:', url);
         
