@@ -1118,7 +1118,7 @@ const GameChat: React.FC = () => {
                       await sendText(text.trim());
                     } else {
                       console.warn('[VOICE-INPUT] ⚠️ Empty transcription result');
-                      alert('Не удалось распознать голос. Возможные причины:\n1. Слишком тихая запись\n2. Не настроены API ключи (Gemini/Yandex/OpenAI)\n3. Проблемы с сетью\n\nПопробуйте говорить чётче или ближе к микрофону.');
+                      alert('Не удалось распознать голос. Возможные причины:\n1. Слишком тихая запись\n2. Проблемы с сетью\n\nПопробуйте говорить чётче или ближе к микрофону.');
                       const input = (document.querySelector('.composer .input') as HTMLInputElement | null);
                       input?.focus();
                     }

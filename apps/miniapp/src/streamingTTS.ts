@@ -2,6 +2,7 @@
 let globalAudioContext: AudioContext | null = null;
 let activeSources: AudioBufferSourceNode[] = [];
 let currentAbortController: AbortController | null = null;
+let isFirstMessageInSession = true; // Флаг первого сообщения в сессии приложения
 
 // Типы для TTS
 export interface StreamingTTSOptions {
@@ -33,6 +34,7 @@ export function stopStreamingTTS() {
   if (globalAudioQueue) {
     globalAudioQueue.stop();
   }
+  // НЕ сбрасываем isFirstMessageInSession - он должен оставаться false после первого сообщения
   console.log('[STREAMING-TTS] Playback stopped and cleared');
 }
 
@@ -134,6 +136,22 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     const audioContext = initAudioContext();
     const sampleRate = 24000; // Gemini Live по умолчанию шлет 24кГц
     
+    // КРИТИЧЕСКИ ВАЖНО: Для первого сообщения убеждаемся, что AudioContext разблокирован и готов
+    if (isFirstMessageInSession) {
+      // Разблокируем аудио перед первым сообщением
+      unlockAudioContext();
+      
+      // Ждем, пока AudioContext перейдет в состояние 'running'
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+      
+      // Даем дополнительное время для инициализации AudioContext (особенно важно для первого сообщения)
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
+      console.log('[STREAMING-TTS] 🎯 First message in session - AudioContext prepared, state:', audioContext.state);
+    }
+    
     const gainNode = audioContext.createGain();
     gainNode.gain.value = 1.0;
     gainNode.connect(audioContext.destination);
@@ -225,11 +243,13 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
       // КРИТИЧЕСКИ ВАЖНО: Простая и надежная очередь без лишней логики
       // 1. Инициализация (самый первый чанк в сессии или очередь пуста/простояла слишком долго)
       if (nextStartTime === 0 || nextStartTime < now) {
-        // Если очередь пуста или мы "простояли" слишком долго — 
-        // даем небольшой запас (100мс) и стартуем
-        nextStartTime = now + 0.1;
+        // Для первого сообщения в сессии даем больший буфер (200мс) для надежной инициализации
+        // Для последующих сообщений достаточно 100мс
+        const bufferTime = isFirstMessageInSession && chunksReceived === 1 ? 0.2 : 0.1;
+        nextStartTime = now + bufferTime;
+        
         if (chunksReceived === 1) {
-          console.log('[STREAMING-TTS] 🎵 First chunk - starting playback with 100ms buffer, samples:', float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's');
+          console.log(`[STREAMING-TTS] 🎵 First chunk - starting playback with ${(bufferTime * 1000).toFixed(0)}ms buffer, samples:`, float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's, AudioContext state:', audioContext.state);
         }
       }
       
@@ -279,6 +299,12 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
           while (isProcessing || processingQueue.length > 0) {
             await new Promise(r => setTimeout(r, 10));
           }
+          // Сбрасываем флаг первого сообщения после успешного завершения первого потока
+          if (isFirstMessageInSession && chunksReceived > 0) {
+            isFirstMessageInSession = false;
+            console.log('[STREAMING-TTS] ✅ First message completed, session flag reset');
+          }
+          
           const wait = (nextStartTime - audioContext.currentTime) * 1000 + 100;
           setTimeout(() => {
             if (!signal.aborted) onComplete?.();
