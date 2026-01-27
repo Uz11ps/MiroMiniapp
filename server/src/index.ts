@@ -10067,16 +10067,26 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
         characterNames: playableCharacters.map(c => c.name)
       };
       
+      console.log(`[buildGptSceneContext] 🔍 Используем RAG для игры ${game.id} (найдено ${chunkCount} чанков в БД)`);
       const relevantChunks = await findRelevantRuleChunks(prisma, game.id, sceneContext);
       
       const rulesParts: string[] = [];
       if (relevantChunks.worldRules) {
+        const worldRulesLength = relevantChunks.worldRules.length;
         rulesParts.push(`Правила мира (релевантные для текущей сцены): ${relevantChunks.worldRules}`);
+        console.log(`[buildGptSceneContext] ✅ Добавлены правила мира из RAG (${worldRulesLength.toLocaleString()} символов)`);
       }
       if (relevantChunks.gameplayRules) {
+        const gameplayRulesLength = relevantChunks.gameplayRules.length;
         rulesParts.push(`Правила процесса (релевантные для текущей сцены): ${relevantChunks.gameplayRules}`);
+        console.log(`[buildGptSceneContext] ✅ Добавлены правила процесса из RAG (${gameplayRulesLength.toLocaleString()} символов)`);
       }
-      if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+      if (rulesParts.length > 0) {
+        gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+        console.log(`[buildGptSceneContext] ✅ RAG контекст добавлен в промпт (общая длина правил: ${gameRulesInfo.length.toLocaleString()} символов)`);
+      } else {
+        console.log(`[buildGptSceneContext] ⚠️ RAG не вернул релевантных чанков`);
+      }
     } else {
       // Fallback: читаем из PDF файлов (если RAG еще не настроен)
       const worldRulesText = await readPdfText((game as any)?.worldRulesPdfPath || null);
