@@ -326,7 +326,8 @@ const DEFAULT_SYSTEM_PROMPT =
   'Твоя задача — вести игроков через ЕДИНЫЙ БЕСШОВНЫЙ МИР. ' +
   'ОСОБЕННОСТИ ТВОЕЙ РАБОТЫ: ' +
   '1. МИР: Не воспринимай локации как изолированные комнаты. Это части одного большого мира. Переходы между ними должны быть плавными и описываться как движение персонажа. ' +
-  '2. ПРАВИЛА: Строго соблюдай правила D&D 5e. Используй характеристики персонажей (STR, DEX, CON, INT, WIS, CHA), классы и навыки. ' +
+  '2. ПЕРСОНАЖИ: КРИТИЧЕСКИ ВАЖНО - Используй ТОЛЬКО данные об игровых персонажах из базы данных! В контексте указаны имена, классы, расы, характеристики, способности и оружие персонажей. НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО то, что указано в контексте. Подбирай оружие и экипировку согласно классу и расе персонажа из базы данных. Если персонаж - маг, используй его магические способности из abilities. Если воин - его оружие и боевые навыки из abilities. ' +
+  '3. ПРАВИЛА: Строго соблюдай правила D&D 5e. Используй характеристики персонажей (STR, DEX, CON, INT, WIS, CHA), классы и навыки. ' +
   'ВАЖНО: Когда в контексте указаны "Правила мира" или "Правила процесса" - СОПОСТАВЛЯЙ их с текущей сценой и сценарием, а не просто обобщай. ' +
   'Например, если в правилах написано "Мир D&D основан на ключевых предположениях: боги реальны..." - это обобщение. ' +
   'Вместо этого используй конкретные детали из текущей сцены: какие боги упомянуты в этой локации, какие фракции действуют здесь, какая атмосфера именно в этой сцене. ' +
@@ -4428,7 +4429,7 @@ app.post('/api/chat/reply', async (req, res) => {
           }
         } catch {}
         
-        context.push('Игровые персонажи D&D 5e (ТЕКУЩЕЕ СОСТОЯНИЕ):\n' + playable.map((p: any) => {
+        context.push('ИГРОВЫЕ ПЕРСОНАЖИ D&D 5e (ТЕКУЩЕЕ СОСТОЯНИЕ из базы данных):\nКРИТИЧЕСКИ ВАЖНО: Используй ЭТИ данные о персонажах! НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО имена, классы, расы, характеристики, способности и оружие, которые указаны ниже. Если персонаж - маг, используй его магические способности из abilities. Если воин - его оружие и боевые навыки из abilities. Подбирай оружие и экипировку согласно классу и расе персонажа.\n' + playable.map((p: any) => {
           const charState = characterStates[p.id] || {};
           // Используем состояние из сессии, если есть, иначе базовые значения
           const currentHp = typeof charState.hp === 'number' ? charState.hp : p.hp;
@@ -8214,6 +8215,22 @@ app.post('/api/tts-stream', async (req, res) => {
         let hasAudio = false;
         let isConnected = false;
         let isComplete = false;
+        let textSent = false; // Флаг, что текст уже отправлен
+        
+        // Функция проверки, что буфер не пустой (не все нули)
+        const isBufferValid = (buffer: Buffer): boolean => {
+          if (!buffer || buffer.length === 0) return false;
+          // Проверяем, что не все байты нули (допускаем до 10% нулей как нормальное тишина)
+          let nonZeroCount = 0;
+          const sampleSize = Math.min(buffer.length, 1000); // Проверяем первые 1000 байт
+          for (let i = 0; i < sampleSize; i += 2) { // Проверяем каждое 16-битное значение
+            const value = buffer.readInt16LE(i);
+            if (Math.abs(value) > 10000) { // Порог для тишины (10000 из 32767)
+              nonZeroCount++;
+            }
+          }
+          return nonZeroCount > sampleSize / 20; // Хотя бы 5% должны быть не нулями
+        };
         
         // Обработка сообщений от Gemini
         ws.on('message', (data: Buffer) => {
@@ -8227,25 +8244,39 @@ app.post('/api/tts-stream', async (req, res) => {
             }
             
             // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
+            // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем данные до получения setupComplete
             if (message.setupComplete) {
               isConnected = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
+              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, ready to send text');
               
-              // Отправляем текст для генерации в правильном формате Live API
-              ws.send(JSON.stringify({
-                client_content: {
-                  turns: [{
-                    role: "user",
-                    parts: [{ text }]
-                  }],
-                  turn_complete: true
-                }
-              }));
+              // Отправляем текст ТОЛЬКО один раз после получения setupComplete
+              if (!textSent) {
+                textSent = true;
+                console.log('[GEMINI-TTS-LIVE] 📤 Sending text to Gemini...');
+                
+                // Отправляем текст для генерации в правильном формате Live API
+                // ВАЖНО: НЕ отправляем turn_complete: true - модель сама решит, когда завершить
+                ws.send(JSON.stringify({
+                  client_content: {
+                    turns: [{
+                      role: "user",
+                      parts: [{ text }]
+                    }]
+                    // УБРАНО: turn_complete: true - модель сама решает, когда завершить turn
+                  }
+                }));
+              }
               
               return;
             }
             
             // ШАГ 3: Получение аудио-чанков из serverContent.modelTurn
+            // КРИТИЧЕСКИ ВАЖНО: Обрабатываем аудио ТОЛЬКО после получения setupComplete
+            if (!isConnected) {
+              console.warn('[GEMINI-TTS-LIVE] ⚠️ Received audio before setupComplete, ignoring');
+              return;
+            }
+            
             // ВАЖНО: Проверяем все возможные пути к аудио-данным
             if (message.serverContent) {
               // Проверяем modelTurn (основной путь)
@@ -8261,6 +8292,15 @@ app.post('/api/tts-stream', async (req, res) => {
                   if (part.inlineData && part.inlineData.data) {
                     // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
                     const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                    
+                    // КРИТИЧЕСКИ ВАЖНО: Проверяем, что буфер не пустой (не все нули)
+                    if (!isBufferValid(audioBuffer)) {
+                      if (chunkCount < 3) {
+                        console.warn(`[GEMINI-TTS-LIVE] ⚠️ Skipping empty/silent chunk ${chunkCount + 1}, size: ${audioBuffer.length} bytes`);
+                      }
+                      continue; // Пропускаем пустые буферы
+                    }
+                    
                     hasAudio = true;
                     totalAudioSize += audioBuffer.length;
                     chunkCount++;
@@ -8281,12 +8321,19 @@ app.post('/api/tts-stream', async (req, res) => {
               }
               
               // Проверяем другие возможные пути к аудио (на случай, если формат изменился)
+              // ВАЖНО: Проверяем только если еще не получили аудио через modelTurn
               if (!hasAudio && message.serverContent.parts) {
                 console.log('[GEMINI-TTS-LIVE] ⚠️ Found serverContent.parts (alternative path)');
                 const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
                 for (const part of parts) {
                   if (part.inlineData && part.inlineData.data) {
                     const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                    
+                    // Проверяем валидность буфера
+                    if (!isBufferValid(audioBuffer)) {
+                      continue;
+                    }
+                    
                     hasAudio = true;
                     totalAudioSize += audioBuffer.length;
                     chunkCount++;
@@ -8299,7 +8346,7 @@ app.post('/api/tts-stream', async (req, res) => {
               }
             }
             
-            // Проверяем, завершен ли turn (завершение определяется через turnComplete, а не modelTurn.complete)
+            // Проверяем, завершен ли turn (завершение определяется через turnComplete)
             if (message.serverContent && message.serverContent.turnComplete) {
               isComplete = true;
               console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
@@ -9356,11 +9403,12 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     playerCharacterData = { name: params.characterName, id: params.characterId };
   }
   
-  // ОПТИМИЗАЦИЯ: Параллельно получаем location и npcs (npcs не зависит от location)
+  // ОПТИМИЗАЦИЯ: Параллельно получаем location, npcs и игровых персонажей
   let loc: any = null;
   let npcs: any[] = [];
+  let playableCharacters: any[] = [];
   
-  const [locationResult, npcsResult] = await Promise.all([
+  const [locationResult, npcsResult, playableResult] = await Promise.all([
     (async () => {
       try {
         if (sess?.currentLocationId) {
@@ -9372,11 +9420,13 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
         return null;
       }
     })(),
-    prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 50 }).catch(() => [])
+    prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 50 }).catch(() => []),
+    prisma.character.findMany({ where: { gameId, isPlayable: true }, take: 20 }).catch(() => [])
   ]);
   
   loc = locationResult;
   npcs = npcsResult;
+  playableCharacters = playableResult;
   
   // ОПТИМИЗАЦИЯ: Параллельно получаем exits и targets (targets зависит от exits, но можем начать после получения targetIds)
   let exits: any[] = [];
@@ -9437,8 +9487,21 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     playerCharacterInfo = `\n\nИГРОК УПРАВЛЯЕТ ПЕРСОНАЖЕМ:\nИмя: ${playerCharacterData.name}${playerCharacterData.persona ? `\nХарактер/Персона: ${playerCharacterData.persona}` : ''}${playerCharacterData.stats ? `\nХарактеристики D&D 5e: ${playerCharacterData.stats}` : ''}\n\nКРИТИЧЕСКИ ВАЖНО: Всегда используй имя персонажа "${playerCharacterData.name}" когда обращаешься к игроку или описываешь его действия. НЕ спрашивай имя персонажа - ты его уже знаешь! Обращайся напрямую: "${playerCharacterData.name}, ты видишь...", "Обращаясь к ${playerCharacterData.name}, мастер говорит...", "${playerCharacterData.name} делает..." и т.д.`;
   }
   
+  // Добавляем информацию о ВСЕХ игровых персонажах (isPlayable: true)
+  let playableCharactersInfo = '';
+  if (playableCharacters.length > 0) {
+    playableCharactersInfo = '\n\nИГРОВЫЕ ПЕРСОНАЖИ (из базы данных сценария):\n' + playableCharacters.map((p: any) => {
+      const traits = [p.class, p.race, p.gender].filter(Boolean).join(', ');
+      const stats = `HP: ${p.hp}/${p.maxHp}, AC: ${p.ac}, STR:${p.str}, DEX:${p.dex}, CON:${p.con}, INT:${p.int}, WIS:${p.wis}, CHA:${p.cha}`;
+      const extras = [p.persona, p.origin, p.role].filter(Boolean).join('. ');
+      const abilities = p.abilities ? `\n  Способности/Оружие: ${String(p.abilities).slice(0, 300)}` : '';
+      return `- ${p.name} (Ур.${p.level || 1} ${traits || 'Персонаж'}) — ${stats}. ${extras ? `Характер: ${extras}` : ''}${abilities}`;
+    }).join('\n') + '\n\nКРИТИЧЕСКИ ВАЖНО: Используй ЭТИ данные о персонажах из базы данных! НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО имена, классы, расы, характеристики, способности и оружие, которые указаны выше. Если персонаж - маг, используй его магические способности. Если воин - его оружие и боевые навыки. Если персонаж имеет способности в abilities - используй их при описании действий.';
+  }
+  
   const gptContext = [
     `SCENE_JSON:\n${JSON.stringify(sceneJson, null, 2)}`,
+    playableCharactersInfo,
     playerCharacterInfo,
     historyLines ? `История:\n${historyLines}` : '',
   ].filter(Boolean).join('\n\n');
