@@ -691,6 +691,14 @@ const GameChat: React.FC = () => {
     const trimmed = text.trim();
     if (!trimmed) return;
     
+    // Автоматически разблокируем аудио при отправке сообщения (любое взаимодействие пользователя)
+    try {
+      initAudioContext();
+      // unlockAudioContext вызывается автоматически через initAudioContext если нужно
+    } catch (e) {
+      console.warn('[TTS-CLIENT] Audio init warning:', e);
+    }
+    
     // КРИТИЧЕСКИ ВАЖНО: Останавливаем текущее воспроизведение TTS при отправке нового сообщения
     try {
       stopStreamingTTS();
@@ -1084,6 +1092,8 @@ const GameChat: React.FC = () => {
             try {
               if (lobbyId && !isMyTurn) return;
               if (!recOn) {
+                // Останавливаем стриминг TTS при начале записи голоса
+                stopStreamingTTS();
                 const mr = await chooseRecorder();
                 recChunksRef.current = [];
                 mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) recChunksRef.current.push(e.data); };

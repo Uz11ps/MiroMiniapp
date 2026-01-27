@@ -36,12 +36,46 @@ export function stopStreamingTTS() {
   console.log('[STREAMING-TTS] Playback stopped and cleared');
 }
 
+// Функция разблокировки аудио (вызывается при любом пользовательском взаимодействии)
+let audioUnlocked = false;
+export function unlockAudioContext(): void {
+  if (audioUnlocked) return;
+  
+  try {
+    // Создаем контекст напрямую, если его еще нет
+    if (!globalAudioContext) {
+      const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      globalAudioContext = new AudioContextClass({ sampleRate: 24000 });
+      console.log('[STREAMING-TTS] AudioContext created for unlock, state:', globalAudioContext?.state);
+    }
+    
+    const ctx = globalAudioContext;
+    if (!ctx) throw new Error('Failed to create AudioContext');
+    
+    // Хак для iOS/Telegram: проигрываем пустой буфер для разблокировки
+    const dummy = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = dummy;
+    source.connect(ctx.destination);
+    source.start(0);
+    
+    audioUnlocked = true;
+    console.log('[STREAMING-TTS] Audio Unlocked via dummy sound');
+  } catch (e) {
+    console.error('[STREAMING-TTS] Unlock failed:', e);
+  }
+}
+
 // Функция для инициализации контекста (вызывать по жесту пользователя)
 export function initAudioContext(): AudioContext {
   if (!globalAudioContext) {
     const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
     globalAudioContext = new AudioContextClass({ sampleRate: 24000 });
     console.log('[STREAMING-TTS] AudioContext created, state:', globalAudioContext?.state);
+    
+    // Автоматически пытаемся разблокировать при создании контекста
+    // Это сработает, если контекст создан в контексте пользовательского взаимодействия
+    unlockAudioContext();
   }
   
   const ctx = globalAudioContext;
@@ -53,28 +87,30 @@ export function initAudioContext(): AudioContext {
   return ctx;
 }
 
-// Разблокировка при первом тапе (с хаком тишины для iOS/Telegram)
+// Разблокировка при первом тапе/клике (глобальные обработчики)
 if (typeof window !== 'undefined') {
   const unlock = () => {
-    try {
-      const ctx = initAudioContext();
-      
-      // Хак для iOS/Telegram: проигрываем пустой буфер
-      const dummy = ctx.createBuffer(1, 1, 22050);
-      const source = ctx.createBufferSource();
-      source.buffer = dummy;
-      source.connect(ctx.destination);
-      source.start(0);
-      
-      console.log('[STREAMING-TTS] Audio Unlocked via dummy sound');
-      window.removeEventListener('click', unlock);
-      window.removeEventListener('touchstart', unlock);
-    } catch (e) {
-      console.error('[STREAMING-TTS] Unlock failed:', e);
-    }
+    unlockAudioContext();
+    window.removeEventListener('click', unlock);
+    window.removeEventListener('touchstart', unlock);
+    window.removeEventListener('keydown', unlock);
   };
   window.addEventListener('click', unlock);
   window.addEventListener('touchstart', unlock);
+  window.addEventListener('keydown', unlock);
+  
+  // Попытка автоматической разблокировки при загрузке в Telegram Mini App
+  // В Telegram Mini App могут быть более мягкие правила автоплея
+  if ((window as any).Telegram?.WebApp) {
+    try {
+      // Пробуем разблокировать сразу при загрузке (может не сработать в обычных браузерах)
+      setTimeout(() => {
+        unlockAudioContext();
+      }, 100);
+    } catch (e) {
+      // Игнорируем ошибки - разблокировка произойдет при первом взаимодействии
+    }
+  }
 }
 
 export async function playStreamingTTS(options: StreamingTTSOptions): Promise<void> {
