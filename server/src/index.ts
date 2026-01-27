@@ -1014,7 +1014,9 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       }).join('\n');
       return head + tail;
     };
-    const text = stripTocAndLeaders(rawText).slice(0, 200000);
+    // Увеличиваем лимит для больших PDF с правилами (до 70+ страниц = ~500000 символов)
+    // Ограничение нужно только для защиты от переполнения памяти, но должно быть достаточным для больших правил
+    const text = stripTocAndLeaders(rawText).slice(0, 1000000);
     if (!text.trim()) return res.status(400).json({ error: 'pdf_empty' });
     const fast = String(req.query.fast || req.body?.fast || '') === '1';
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
@@ -1065,7 +1067,7 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       }
     }
     const buildScenarioFromText = (srcText: string) => {
-      const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks'): string | null => {
+      const pickBlock = (labelRe: RegExp, labelName?: 'intro' | 'back' | 'hooks', maxLength?: number): string | null => {
         const idx = srcText.search(labelRe);
         if (idx < 0) return null;
         const tail = srcText.slice(idx);
@@ -1082,10 +1084,12 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
           if (/^\s*(Глава|Локация|Сцена|Часть)\b/i.test(ln)) break;
           if (/^\s*\d+[\.\)]\s+[^\n]+$/.test(ln)) break;
           acc.push(ln);
-          if (acc.join('\n').length > 6000) break;
+          // Если maxLength указан, ограничиваем длину. Если не указан - без ограничений (для полных правил)
+          if (maxLength !== undefined && acc.join('\n').length > maxLength) break;
         }
         const s = acc.join('\n').trim();
-        return s ? s.slice(0, 6000) : null;
+        // Если maxLength указан, обрезаем до него. Если не указан - возвращаем полностью (для полных правил)
+        return s ? (maxLength !== undefined ? s.slice(0, maxLength) : s) : null;
       };
       const introduction = pickBlock(/(^|\n)\s*Введение\s*$/im, 'intro') || null;
       const backstory = pickBlock(/(^|\n)\s*Предыстория\s*$/im, 'back') || null;
@@ -1142,8 +1146,12 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
         });
       };
       const sections = extractSections();
-      const worldRules = ((pickBlock(/Правила мира/i) || pickBlock(/Особенности местности/i) || '—').trim()).slice(0, 500);
-      const gameplayRules = ((pickBlock(/Правила игрового процесса/i) || pickBlock(/Дальнейшие события/i) || '—').trim()).slice(0, 500);
+      // Извлекаем полные правила БЕЗ ограничения длины (maxLength не передаем)
+      const worldRulesFull = (pickBlock(/Правила мира/i) || pickBlock(/Особенности местности/i) || '').trim();
+      const gameplayRulesFull = (pickBlock(/Правила игрового процесса/i) || pickBlock(/Дальнейшие события/i) || '').trim();
+      // Краткие версии для UI (максимум 500 символов)
+      const worldRules = worldRulesFull ? worldRulesFull.slice(0, 500) : '—';
+      const gameplayRules = gameplayRulesFull ? gameplayRulesFull.slice(0, 500) : '—';
       const locations = sections.length ? sections.map((s, i) => ({ key: `loc${i + 1}`, order: i + 1, title: s.title, description: s.body, backgroundUrl: null, musicUrl: null })) :
         [{ key: 'start', order: 1, title: 'Стартовая локация', description: srcText.split('\n').slice(0, 8).join('\n'), backgroundUrl: null, musicUrl: null }];
       const exits = locations.length > 1 ? locations.slice(0, -1).map((_, i) => ({ fromKey: `loc${i + 1}`, type: 'BUTTON', buttonText: 'Дальше', triggerText: null, toKey: `loc${i + 2}`, isGameOver: false })) : [];
@@ -1155,8 +1163,8 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
           author: 'GM', 
           worldRules, 
           gameplayRules, 
-          worldRulesFull: worldRules, // Сохраняем полные правила для ИИ
-          gameplayRulesFull: gameplayRules, // Сохраняем полные правила для ИИ
+          worldRulesFull: worldRulesFull || null, // Сохраняем полные правила для ИИ (без ограничения длины)
+          gameplayRulesFull: gameplayRulesFull || null, // Сохраняем полные правила для ИИ (без ограничения длины)
           introduction, 
           backstory, 
           adventureHooks, 
@@ -1171,6 +1179,32 @@ app.post('/api/admin/ingest/pdf', upload.single('file'), async (req, res) => {
       scenario = buildScenarioFromText(text);
     } else {
       if (!scenario.game) scenario.game = {};
+      // Извлекаем полные правила БЕЗ ограничения длины из исходного текста
+      if (!scenario.game.worldRulesFull) {
+        const worldRulesFullMatch = text.match(/Правила мира[\s\S]*?(?=\n\s*(?:Глава|Локация|Сцена|Часть|Введение|Предыстория|Зацепк|Правила игрового процесса|$))/i);
+        if (worldRulesFullMatch && worldRulesFullMatch[0]) {
+          const worldRulesFullBlk = worldRulesFullMatch[0].replace(/^Правила мира\s*/i, '').trim();
+          if (worldRulesFullBlk) {
+            scenario.game.worldRulesFull = worldRulesFullBlk;
+            if (!scenario.game.worldRules) {
+              scenario.game.worldRules = worldRulesFullBlk.slice(0, 500);
+            }
+          }
+        }
+      }
+      if (!scenario.game.gameplayRulesFull) {
+        const gameplayRulesFullMatch = text.match(/Правила игрового процесса[\s\S]*?(?=\n\s*(?:Глава|Локация|Сцена|Часть|Введение|Предыстория|Зацепк|Правила мира|$))/i);
+        if (gameplayRulesFullMatch && gameplayRulesFullMatch[0]) {
+          const gameplayRulesFullBlk = gameplayRulesFullMatch[0].replace(/^Правила игрового процесса\s*/i, '').trim();
+          if (gameplayRulesFullBlk) {
+            scenario.game.gameplayRulesFull = gameplayRulesFullBlk;
+            if (!scenario.game.gameplayRules) {
+              scenario.game.gameplayRules = gameplayRulesFullBlk.slice(0, 500);
+            }
+          }
+        }
+      }
+      // Fallback для кратких версий, если полные не найдены
       if (!scenario.game.worldRules) scenario.game.worldRules = ((): string | null => {
         const blk = (text.match(/Правила мира[\s\S]{0,1000}/i)?.[0] || '').trim();
         return blk ? blk.slice(0, 500) : null;
