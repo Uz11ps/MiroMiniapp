@@ -2621,6 +2621,51 @@ ${loc.description}
   }
 });
 
+// Endpoint для проверки статуса RAG индексации
+app.get('/api/admin/games/:id/rag-status', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({ 
+      where: { id: req.params.id },
+      select: { 
+        id: true, 
+        title: true,
+        worldRulesPdfPath: true,
+        gameplayRulesPdfPath: true
+      }
+    });
+    
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+    
+    const chunks = await prisma.ruleChunk.findMany({
+      where: { gameId: game.id },
+      select: { chunkType: true }
+    });
+    
+    const worldChunks = chunks.filter(c => c.chunkType === 'worldRules').length;
+    const gameplayChunks = chunks.filter(c => c.chunkType === 'gameplayRules').length;
+    const totalChunks = chunks.length;
+    
+    res.json({
+      gameId: game.id,
+      gameTitle: game.title,
+      hasWorldRulesPdf: !!game.worldRulesPdfPath,
+      hasGameplayRulesPdf: !!game.gameplayRulesPdfPath,
+      indexed: {
+        total: totalChunks,
+        worldRules: worldChunks,
+        gameplayRules: gameplayChunks
+      },
+      status: totalChunks > 0 ? 'indexed' : 'not_indexed'
+    });
+  } catch (e: any) {
+    console.error('[RAG-STATUS] Failed to get RAG status:', e);
+    res.status(500).json({ error: 'status_check_failed', details: String(e) });
+  }
+});
+
 app.get('/api/admin/ingest-import/:id', async (req, res) => {
   const j = ingestJobs.get(req.params.id);
   if (!j) return res.status(404).json({ error: 'not_found' });
@@ -9452,15 +9497,30 @@ async function readPdfText(pdfPath: string | null): Promise<string | null> {
  */
 async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesPdfPath: string | null, gameplayRulesPdfPath: string | null): Promise<void> {
   try {
+    console.log(`[RAG-INDEX] 🚀 Начало индексации RAG для игры ${gameId}`);
+    console.log(`[RAG-INDEX] 📄 PDF файлы: worldRules=${worldRulesPdfPath ? 'да' : 'нет'}, gameplayRules=${gameplayRulesPdfPath ? 'да' : 'нет'}`);
+    
     // Удаляем старые чанки для этой игры
-    await prisma.ruleChunk.deleteMany({ where: { gameId } });
+    const deletedCount = await prisma.ruleChunk.deleteMany({ where: { gameId } });
+    if (deletedCount.count > 0) {
+      console.log(`[RAG-INDEX] 🗑️ Удалено старых чанков: ${deletedCount.count}`);
+    }
     
     // Читаем текст из PDF файлов
     const worldRulesFull = await readPdfText(worldRulesPdfPath);
     const gameplayRulesFull = await readPdfText(gameplayRulesPdfPath);
     
+    if (worldRulesFull) {
+      console.log(`[RAG-INDEX] 📖 Правила мира: ${worldRulesFull.length} символов`);
+    }
+    if (gameplayRulesFull) {
+      console.log(`[RAG-INDEX] 📖 Правила процесса: ${gameplayRulesFull.length} символов`);
+    }
+    
     const chunkSize = 10000; // Размер чанка: ~10K символов (оптимально для семантического поиска)
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    let totalChunksCreated = 0;
     
     // Обрабатываем правила мира
     if (worldRulesFull && worldRulesFull.length > 0) {
@@ -9469,7 +9529,11 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
         chunks.push(worldRulesFull.slice(i, i + chunkSize));
       }
       
+      console.log(`[RAG-INDEX] 📦 Правила мира: разбито на ${chunks.length} чанков по ~${chunkSize.toLocaleString()} символов`);
+      const worldIndexStart = Date.now();
+      
       for (let idx = 0; idx < chunks.length; idx++) {
+        const chunkStart = Date.now();
         const chunk = chunks[idx];
         // Извлекаем ключевые слова из чанка (локации, персонажи, механики)
         const keywords = extractKeywords(chunk);
@@ -9478,16 +9542,21 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
         
         if (geminiKey && chunk.length > 200) {
           try {
+            const summaryStart = Date.now();
             const summaryResult = await generateChatCompletion({
               systemPrompt: 'Ты помощник, который создает краткие резюме частей правил игры для семантического поиска.',
               userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента правил мира:\n\n${chunk.slice(0, 5000)}`,
               history: []
             });
+            const summaryTime = Date.now() - summaryStart;
             if (summaryResult?.text) {
               summary = summaryResult.text.trim().slice(0, 500);
             }
+            if ((idx + 1) % 5 === 0) {
+              console.log(`[RAG-INDEX] ⏳ Правила мира: обработано ${idx + 1}/${chunks.length} чанков (резюме: ${summaryTime}мс)`);
+            }
           } catch (e) {
-            console.warn('[RAG] Failed to generate summary for worldRules chunk:', e);
+            console.warn(`[RAG-INDEX] ⚠️ Ошибка создания резюме для чанка ${idx + 1}:`, e);
           }
         }
         
@@ -9501,7 +9570,15 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
             summary
           }
         });
+        totalChunksCreated++;
+        worldChunksCount++;
+        const chunkTime = Date.now() - chunkStart;
+        if ((idx + 1) % 10 === 0 || idx === chunks.length - 1) {
+          console.log(`[RAG-INDEX] ✅ Правила мира: ${idx + 1}/${chunks.length} чанков создано (${chunkTime}мс/чанк)`);
+        }
       }
+      const worldIndexTime = Date.now() - worldIndexStart;
+      console.log(`[RAG-INDEX] ✅ Правила мира: создано ${chunks.length} чанков за ${worldIndexTime}мс (${Math.round(worldIndexTime / chunks.length)}мс/чанк)`);
     }
     
     // Обрабатываем правила игрового процесса
@@ -9511,23 +9588,32 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
         chunks.push(gameplayRulesFull.slice(i, i + chunkSize));
       }
       
+      console.log(`[RAG-INDEX] 📦 Правила процесса: разбито на ${chunks.length} чанков по ~${chunkSize.toLocaleString()} символов`);
+      const gameplayIndexStart = Date.now();
+      
       for (let idx = 0; idx < chunks.length; idx++) {
+        const chunkStart = Date.now();
         const chunk = chunks[idx];
         const keywords = extractKeywords(chunk);
         let summary = chunk.slice(0, 500);
         
         if (geminiKey && chunk.length > 200) {
           try {
+            const summaryStart = Date.now();
             const summaryResult = await generateChatCompletion({
               systemPrompt: 'Ты помощник, который создает краткие резюме частей правил игры для семантического поиска.',
               userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента правил игрового процесса:\n\n${chunk.slice(0, 5000)}`,
               history: []
             });
+            const summaryTime = Date.now() - summaryStart;
             if (summaryResult?.text) {
               summary = summaryResult.text.trim().slice(0, 500);
             }
+            if ((idx + 1) % 5 === 0) {
+              console.log(`[RAG-INDEX] ⏳ Правила процесса: обработано ${idx + 1}/${chunks.length} чанков (резюме: ${summaryTime}мс)`);
+            }
           } catch (e) {
-            console.warn('[RAG] Failed to generate summary for gameplayRules chunk:', e);
+            console.warn(`[RAG-INDEX] ⚠️ Ошибка создания резюме для чанка ${idx + 1}:`, e);
           }
         }
         
@@ -9541,10 +9627,23 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
             summary
           }
         });
+        totalChunksCreated++;
+        gameplayChunksCount++;
+        const chunkTime = Date.now() - chunkStart;
+        if ((idx + 1) % 10 === 0 || idx === chunks.length - 1) {
+          console.log(`[RAG-INDEX] ✅ Правила процесса: ${idx + 1}/${chunks.length} чанков создано (${chunkTime}мс/чанк)`);
+        }
       }
+      const gameplayIndexTime = Date.now() - gameplayIndexStart;
+      console.log(`[RAG-INDEX] ✅ Правила процесса: создано ${chunks.length} чанков за ${gameplayIndexTime}мс (${Math.round(gameplayIndexTime / chunks.length)}мс/чанк)`);
     }
     
-    console.log(`[RAG] ✅ Indexed rules for game ${gameId}`);
+    const totalTime = Date.now() - startTime;
+    const finalCount = await prisma.ruleChunk.count({ where: { gameId } });
+    console.log(`[RAG-INDEX] 🎉 ========== ИНДЕКСАЦИЯ ЗАВЕРШЕНА ==========`);
+    console.log(`[RAG-INDEX] 📊 Итого: ${finalCount} чанков (worldRules: ${worldChunksCount}, gameplayRules: ${gameplayChunksCount})`);
+    console.log(`[RAG-INDEX] ⏱️ Время индексации: ${totalTime}мс (${(totalTime / 1000).toFixed(1)}сек)`);
+    console.log(`[RAG-INDEX] 📈 Скорость: ${finalCount > 0 ? Math.round(totalTime / finalCount) : 0}мс/чанк`);
   } catch (e) {
     console.error('[RAG] Failed to index rules:', e);
   }
@@ -9588,7 +9687,14 @@ async function findRelevantRuleChunks(
   gameId: string,
   sceneContext: { locationTitle?: string; locationDescription?: string; npcNames?: string[]; characterNames?: string[] }
 ): Promise<{ worldRules: string; gameplayRules: string }> {
+  const searchStart = Date.now();
   try {
+    console.log(`[RAG-SEARCH] 🔍 ========== ПОИСК РЕЛЕВАНТНЫХ ПРАВИЛ ==========`);
+    console.log(`[RAG-SEARCH] 🎮 Игра: ${gameId}`);
+    console.log(`[RAG-SEARCH] 📍 Локация: ${sceneContext.locationTitle || 'не указана'}`);
+    console.log(`[RAG-SEARCH] 👥 NPC: ${sceneContext.npcNames?.length || 0} (${sceneContext.npcNames?.join(', ') || 'нет'})`);
+    console.log(`[RAG-SEARCH] 🎭 Персонажи: ${sceneContext.characterNames?.length || 0} (${sceneContext.characterNames?.join(', ') || 'нет'})`);
+    
     const searchTerms: string[] = [];
     
     // Добавляем ключевые слова из контекста сцены
@@ -9622,12 +9728,25 @@ async function findRelevantRuleChunks(
     }
     
     // Ищем релевантные чанки по ключевым словам
+    const dbStart = Date.now();
     const allChunks = await prisma.ruleChunk.findMany({
       where: { gameId },
       orderBy: { chunkIndex: 'asc' }
     });
+    const dbTime = Date.now() - dbStart;
+    
+    if (allChunks.length === 0) {
+      console.log(`[RAG-SEARCH] ⚠️ Чанки не найдены! Возможно, индексация еще не завершена.`);
+      return { worldRules: '', gameplayRules: '' };
+    }
+    
+    console.log(`[RAG-SEARCH] 📚 Найдено чанков в БД: ${allChunks.length} (запрос: ${dbTime}мс)`);
+    const worldChunks = allChunks.filter(c => c.chunkType === 'worldRules');
+    const gameplayChunks = allChunks.filter(c => c.chunkType === 'gameplayRules');
+    console.log(`[RAG-SEARCH] 📊 Распределение: worldRules=${worldChunks.length}, gameplayRules=${gameplayChunks.length}`);
     
     // Оцениваем релевантность каждого чанка
+    const scoreStart = Date.now();
     const scoredChunks = allChunks.map(chunk => {
       let score = 0;
       const chunkText = (chunk.content + ' ' + (chunk.summary || '') + ' ' + chunk.keywords.join(' ')).toLowerCase();
@@ -9651,6 +9770,8 @@ async function findRelevantRuleChunks(
     
     // Сортируем по релевантности и берем топ-5 чанков каждого типа
     scoredChunks.sort((a, b) => b.score - a.score);
+    const scoreTime = Date.now() - scoreStart;
+    console.log(`[RAG-SEARCH] 🎯 Оценка релевантности завершена (${scoreTime}мс)`);
     
     const topWorldChunks = scoredChunks
       .filter(sc => sc.chunk.chunkType === 'worldRules')
@@ -9669,6 +9790,7 @@ async function findRelevantRuleChunks(
         .slice(0, 2)
         .map(c => c.content);
       topWorldChunks.push(...firstWorldChunks);
+      console.log(`[RAG-SEARCH] ⚠️ Мало релевантных чанков правил мира, добавлены первые 2`);
     }
     
     if (topGameplayChunks.length < 2) {
@@ -9677,7 +9799,16 @@ async function findRelevantRuleChunks(
         .slice(0, 2)
         .map(c => c.content);
       topGameplayChunks.push(...firstGameplayChunks);
+      console.log(`[RAG-SEARCH] ⚠️ Мало релевантных чанков правил процесса, добавлены первые 2`);
     }
+    
+    const totalSearchTime = Date.now() - searchStart;
+    const worldRulesLength = topWorldChunks.join('\n\n').length;
+    const gameplayRulesLength = topGameplayChunks.join('\n\n').length;
+    
+    console.log(`[RAG-SEARCH] ✅ ========== ПОИСК ЗАВЕРШЕН ==========`);
+    console.log(`[RAG-SEARCH] 📊 Выбрано чанков: worldRules=${topWorldChunks.length} (${worldRulesLength.toLocaleString()} символов), gameplayRules=${topGameplayChunks.length} (${gameplayRulesLength.toLocaleString()} символов)`);
+    console.log(`[RAG-SEARCH] ⏱️ Время поиска: ${totalSearchTime}мс`);
     
     return {
       worldRules: topWorldChunks.join('\n\n'),
