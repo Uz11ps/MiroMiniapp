@@ -8117,22 +8117,47 @@ Tone: Character-appropriate based on class, race, personality, and stats. Real v
   }
 });
 
+// Защита от дублирования подключений (race condition)
+const activeTtsStreams = new Map<string, boolean>();
+
 // Streaming TTS endpoint через прямой REST API (как обычный TTS, но с SSE парсингом)
 app.post('/api/tts-stream', async (req, res) => {
+  // Создаем уникальный ключ для этого запроса (на основе текста и времени)
+  const streamKey = `${req.body?.text?.slice(0, 50)}_${Date.now()}`;
+  
+  // Проверяем, не обрабатывается ли уже такой запрос
+  if (activeTtsStreams.has(streamKey)) {
+    console.warn('[GEMINI-TTS-LIVE] ⚠️ Duplicate request detected, ignoring');
+    return res.status(429).json({ error: 'duplicate_request', message: 'Запрос уже обрабатывается' });
+  }
+  
+  // Помечаем запрос как обрабатываемый
+  activeTtsStreams.set(streamKey, true);
+  
+  // Очищаем ключ после завершения (с таймаутом на случай зависания)
+  const cleanup = () => {
+    setTimeout(() => {
+      activeTtsStreams.delete(streamKey);
+    }, 60000); // 60 секунд
+  };
+  
   try {
     const { text, voiceName, modelName } = req.body;
     
     if (!text || typeof text !== 'string') {
+      cleanup();
       return res.status(400).json({ error: 'text_required', message: 'Текст для синтеза обязателен' });
     }
     
     // Минимальная длина текста
     if (text.length < 5) {
+      cleanup();
       return res.status(400).json({ error: 'text_too_short', message: 'Текст должен быть не менее 5 символов' });
     }
     
     const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     if (!geminiApiKey) {
+      cleanup();
       return res.status(500).json({ 
         error: 'tts_key_missing', 
         message: 'Необходимо настроить GEMINI_API_KEY для генерации речи через Gemini.' 
@@ -8216,16 +8241,48 @@ app.post('/api/tts-stream', async (req, res) => {
         let isConnected = false;
         let isComplete = false;
         let textSent = false; // Флаг, что текст уже отправлен
+        let firstChunksSkipped = 0; // Счетчик пропущенных первых чанков (для фильтрации тишины)
+        const SKIP_FIRST_MS = 200; // Пропускаем первые 200 мс тишины (warm-up)
+        const SAMPLE_RATE = 24000; // 24 кГц
+        const BYTES_PER_MS = (SAMPLE_RATE * 2) / 1000; // 2 байта на сэмпл (16-bit), переводим в мс
+        let skippedBytes = 0;
         
         // Функция проверки, что буфер не пустой (не все нули)
-        const isBufferValid = (buffer: Buffer): boolean => {
+        const isBufferValid = (buffer: Buffer, skipSilence: boolean = false): boolean => {
           if (!buffer || buffer.length === 0) return false;
-          // Проверяем, что не все байты нули (допускаем до 10% нулей как нормальное тишина)
+          
+          // Фильтруем первые 100-200 мс тишины (warm-up период)
+          if (skipSilence && skippedBytes < SKIP_FIRST_MS * BYTES_PER_MS) {
+            // Проверяем, является ли этот чанк тишиной
+            let isSilence = true;
+            const checkSize = Math.min(buffer.length, 1000);
+            for (let i = 0; i < checkSize; i += 2) {
+              const value = buffer.readInt16LE(i);
+              if (Math.abs(value) > 100) { // Порог для тишины
+                isSilence = false;
+                break;
+              }
+            }
+            
+            if (isSilence) {
+              skippedBytes += buffer.length;
+              firstChunksSkipped++;
+              if (firstChunksSkipped <= 3) {
+                console.log(`[GEMINI-TTS-LIVE] ⏭️ Skipping warm-up silence chunk ${firstChunksSkipped}, ${skippedBytes} bytes skipped so far`);
+              }
+              return false; // Пропускаем тишину
+            } else {
+              // Нашли реальный звук, больше не пропускаем
+              skippedBytes = SKIP_FIRST_MS * BYTES_PER_MS;
+            }
+          }
+          
+          // Проверяем, что не все байты нули
           let nonZeroCount = 0;
           const sampleSize = Math.min(buffer.length, 1000); // Проверяем первые 1000 байт
           for (let i = 0; i < sampleSize; i += 2) { // Проверяем каждое 16-битное значение
             const value = buffer.readInt16LE(i);
-            if (Math.abs(value) > 10000) { // Порог для тишины (10000 из 32767)
+            if (Math.abs(value) > 100) { // Порог для тишины (100 из 32767)
               nonZeroCount++;
             }
           }
@@ -8255,14 +8312,14 @@ app.post('/api/tts-stream', async (req, res) => {
                 console.log('[GEMINI-TTS-LIVE] 📤 Sending text to Gemini...');
                 
                 // Отправляем текст для генерации в правильном формате Live API
-                // ВАЖНО: НЕ отправляем turn_complete: true - модель сама решит, когда завершить
+                // КРИТИЧЕСКИ ВАЖНО: turn_complete: true ОБЯЗАТЕЛЕН для TTS - без него модель ждет и начинает генерацию с задержкой
                 ws.send(JSON.stringify({
                   client_content: {
                     turns: [{
                       role: "user",
                       parts: [{ text }]
-                    }]
-                    // УБРАНО: turn_complete: true - модель сама решает, когда завершить turn
+                    }],
+                    turn_complete: true // ОБЯЗАТЕЛЬНО для TTS - сигнализирует модели, что текст завершен и можно начинать генерацию
                   }
                 }));
               }
@@ -8294,11 +8351,9 @@ app.post('/api/tts-stream', async (req, res) => {
                     const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
                     
                     // КРИТИЧЕСКИ ВАЖНО: Проверяем, что буфер не пустой (не все нули)
-                    if (!isBufferValid(audioBuffer)) {
-                      if (chunkCount < 3) {
-                        console.warn(`[GEMINI-TTS-LIVE] ⚠️ Skipping empty/silent chunk ${chunkCount + 1}, size: ${audioBuffer.length} bytes`);
-                      }
-                      continue; // Пропускаем пустые буферы
+                    // Фильтруем первые 100-200 мс тишины (warm-up период)
+                    if (!isBufferValid(audioBuffer, true)) {
+                      continue; // Пропускаем пустые буферы и warm-up тишину
                     }
                     
                     hasAudio = true;
@@ -8329,8 +8384,8 @@ app.post('/api/tts-stream', async (req, res) => {
                   if (part.inlineData && part.inlineData.data) {
                     const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
                     
-                    // Проверяем валидность буфера
-                    if (!isBufferValid(audioBuffer)) {
+                    // Проверяем валидность буфера (фильтруем warm-up тишину)
+                    if (!isBufferValid(audioBuffer, true)) {
                       continue;
                     }
                     
@@ -8369,6 +8424,7 @@ app.post('/api/tts-stream', async (req, res) => {
         
         // Обработка закрытия соединения
         ws.on('close', () => {
+          cleanup(); // Очищаем ключ из activeTtsStreams
           if (hasAudio) {
             console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
             res.end();
@@ -8388,6 +8444,7 @@ app.post('/api/tts-stream', async (req, res) => {
             console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
             
             // ШАГ 1: Отправка конфигурации (setup) для Live API
+            // КРИТИЧЕСКИ ВАЖНО: Для gemini-2.0-flash-exp нужно явно указать формат аудио в setup
             ws.send(JSON.stringify({
               setup: {
                 model: `models/${finalModelName}`,
@@ -8398,7 +8455,10 @@ app.post('/api/tts-stream', async (req, res) => {
                       prebuilt_voice_config: {
                         voice_name: finalVoiceName // Puck, Charon, Kore, Fenrir, Aoede
                       }
-                    }
+                    },
+                    // Явно указываем формат аудио для gemini-2.0-flash-exp
+                    audio_encoding: "LINEAR16", // PCM 16-bit
+                    sample_rate_hertz: 24000 // 24 кГц
                   }
                 },
                 system_instruction: {
@@ -8445,10 +8505,12 @@ app.post('/api/tts-stream', async (req, res) => {
         });
         
         if (hasAudio) {
+          cleanup(); // Очищаем ключ из activeTtsStreams
           return; // Успешно завершили
         }
         
       } catch (wsError: any) {
+        cleanup(); // Очищаем ключ при ошибке
         const errorMsg = wsError?.message || String(wsError);
         console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errorMsg);
         
@@ -8465,6 +8527,7 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     
     // Если WebSocket не сработал, пробуем fallback на SSE
+    cleanup(); // Очищаем ключ перед fallback
     console.log('[GEMINI-TTS-LIVE] ⚠️ WebSocket failed, trying SSE fallback...');
     
     const finalModelNameFallback = modelName || 'gemini-2.5-flash-preview-tts';
@@ -8579,16 +8642,19 @@ app.post('/api/tts-stream', async (req, res) => {
         }
         
         if (hasAudio) {
+          cleanup(); // Очищаем ключ из activeTtsStreams
           console.log(`[GEMINI-TTS-STREAM] ✅ Fallback SSE complete: ${chunkCount} chunks, ${totalAudioSize} bytes`);
           res.end();
           return;
         }
       } catch (e) {
+        cleanup(); // Очищаем ключ при ошибке
         console.warn(`[GEMINI-TTS-STREAM] Fallback SSE error:`, e?.message || String(e));
       }
     }
     
     // Если все не сработало
+    cleanup(); // Очищаем ключ из activeTtsStreams
     console.error('[GEMINI-TTS-LIVE] ❌ All methods failed');
     if (!res.headersSent) {
       return res.status(500).json({ 
@@ -8599,6 +8665,7 @@ app.post('/api/tts-stream', async (req, res) => {
     res.end();
     
   } catch (e) {
+    cleanup(); // Очищаем ключ при ошибке
     console.error('[TTS-STREAM] TTS streaming endpoint error:', e);
     if (!res.headersSent) {
       return res.status(500).json({ error: 'tts_error', details: String(e) });
