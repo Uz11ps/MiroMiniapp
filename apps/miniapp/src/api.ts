@@ -351,7 +351,16 @@ export async function transcribeAudio(blob: Blob): Promise<string> {
   const res = await fetch(`${apiBase}/chat/transcribe`, { method: 'POST', body: form });
   if (!res.ok) throw new Error(`Transcribe failed: ${res.status}`);
   const data = await res.json().catch(() => ({} as { text?: string }));
-  return String((data as { text?: string }).text || '');
+  const text = String((data as { text?: string }).text || '');
+  
+  // КРИТИЧЕСКИ ВАЖНО: Гарантируем, что возвращаем ТОЛЬКО ТЕКСТ, а не аудио
+  if (text && (text.startsWith('data:audio') || text.startsWith('data:application/octet-stream'))) {
+    console.error('[TRANSCRIBE-CLIENT] ❌ Server returned audio instead of text! This should never happen.');
+    return ''; // Возвращаем пустую строку вместо аудио
+  }
+  
+  console.log('[TRANSCRIBE-CLIENT] ✅ Received TEXT from STT:', text ? `"${text.slice(0, 50)}${text.length > 50 ? '...' : ''}"` : 'empty');
+  return text; // ГАРАНТИРОВАННО ТОЛЬКО ТЕКСТ
 }
 
 export type NewUser = {

@@ -4279,6 +4279,10 @@ app.post('/api/chat/reply', async (req, res) => {
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
   const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
   const characterName = typeof req.body?.characterName === 'string' ? req.body.characterName : undefined;
+  
+  // КРИТИЧЕСКИ ВАЖНО: Логируем, что получаем ТЕКСТ (должен быть расшифрован через STT)
+  console.log('[REPLY] 📥 Received userText (should be TEXT from STT):', typeof userText === 'string' ? `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"` : `type: ${typeof userText}`);
+  
   const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
   try {
     const prisma = getPrisma();
@@ -5111,10 +5115,14 @@ app.post('/api/chat/reply', async (req, res) => {
         create: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown', history: [] as any },
       });
       const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+      
+      // КРИТИЧЕСКИ ВАЖНО: Логируем, что получаем ТЕКСТ (должен быть расшифрован через STT)
+      console.log('[REPLY] 📥 Received userText (should be TEXT from STT):', typeof userText === 'string' ? `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"` : `type: ${typeof userText}`);
+      
       // Не сохраняем "технические ошибки" и сообщения об ошибке распознавания в историю
       const shouldSaveBotMessage = !text || (!text.trim().startsWith('Техническая ошибка') && text.trim() !== 'Не распознали ваш ответ, выберите вариант корректно!');
       const newHist = prev.concat([
-        (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)),
+        (actingUserId ? ({ from: 'user', userId: actingUserId, text: userText } as any) : ({ from: 'me', text: userText } as any)), // ТОЛЬКО ТЕКСТ!
         ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
       ]);
       await prisma.chatSession.update({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
@@ -5134,10 +5142,26 @@ app.post('/api/chat/reply', async (req, res) => {
           create: { userId: uid, gameId: gameId || 'unknown', history: [] as any },
         });
         const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+        
+        // КРИТИЧЕСКИ ВАЖНО: Проверяем, что userText - это ТЕКСТ (расшифрованный через STT), а не аудио
+        if (typeof userText !== 'string') {
+          console.error('[REPLY] ❌ userText is not a string:', typeof userText);
+          return res.status(400).json({ error: 'invalid_user_text', message: 'userText must be a string (text), not audio. Audio must be transcribed via STT first.' });
+        }
+        
+        // Проверяем, что это не base64 аудио
+        if (userText.startsWith('data:audio') || userText.startsWith('data:application/octet-stream') || 
+            (userText.length > 1000 && /^[A-Za-z0-9+/=]+$/.test(userText.replace(/\s/g, '')))) {
+          console.error('[REPLY] ❌ Received AUDIO instead of TEXT in userText!');
+          return res.status(400).json({ error: 'audio_received', message: 'Received audio instead of text. Audio must be transcribed via STT first.' });
+        }
+        
+        console.log('[REPLY] ✅ userText is valid TEXT:', `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"`);
+        
         // Не сохраняем "технические ошибки" в историю
         const shouldSaveBotMessage = !text || !text.trim().startsWith('Техническая ошибка');
         const newHist = prev.concat([
-          { from: 'me', text: userText } as any,
+          { from: 'me', text: userText } as any, // ТОЛЬКО ТЕКСТ!
           ...(shouldSaveBotMessage ? [{ from: 'bot', text } as any] : []),
         ]);
         await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
@@ -5160,6 +5184,9 @@ app.post('/api/chat/reply-stream', async (req, res) => {
   const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
   const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
+  
+  // КРИТИЧЕСКИ ВАЖНО: Логируем историю (должна содержать только ТЕКСТ, расшифрованный через STT)
+  console.log('[REPLY-STREAM] 📥 History items count:', history.length);
   
     // Настраиваем SSE
     res.setHeader('Content-Type', 'text/event-stream');
@@ -5185,12 +5212,15 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     const game = gameId ? await prisma.game.findUnique({ where: { id: gameId } }) : null;
     const sys = game?.systemPrompt || getSysPrompt();
     
+    // КРИТИЧЕСКИ ВАЖНО: Логируем, что передаем ТЕКСТ в ИИ (должен быть расшифрован через STT)
+    console.log('[REPLY-STREAM] ✅ Sending TEXT to AI (from STT):', typeof userText === 'string' ? `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"` : `type: ${typeof userText}`);
+    
     // Генерируем текст через Gemini 2.5 Pro (используем generateChatCompletion, который уже использует gemini-2.5-pro)
     sendSSE('status', { type: 'generating_text' });
     const { text: generatedText } = await generateChatCompletion({
       systemPrompt: sys,
-      userPrompt: userText,
-      history: history
+      userPrompt: userText, // ТОЛЬКО ТЕКСТ, не аудио!
+      history: history // История тоже должна содержать только текст
     });
     const fullText = generatedText || '';
     sendSSE('text_complete', { text: fullText });
@@ -5723,9 +5753,18 @@ app.post('/api/chat/transcribe', upload.single('audio'), async (req, res) => {
     console.log('[TRANSCRIBE] 🔄 Using Gemini STT...');
     try {
       const gtext = await transcribeViaGemini(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', geminiKey);
-      if (gtext && gtext.trim()) {
-        console.log('[TRANSCRIBE] ✅ Gemini STT succeeded, text length:', gtext.length);
-        return res.json({ text: gtext });
+      
+      // КРИТИЧЕСКИ ВАЖНО: Гарантируем, что возвращаем ТОЛЬКО ТЕКСТ, а не аудио
+      if (gtext && typeof gtext === 'string' && gtext.trim()) {
+        // Финальная проверка - это должен быть текст, а не base64 аудио
+        const finalText = gtext.trim();
+        if (finalText.startsWith('data:audio') || finalText.startsWith('data:application/octet-stream')) {
+          console.error('[TRANSCRIBE] ❌ STT returned audio data instead of text! This should never happen.');
+          return res.status(200).json({ text: '', error: 'stt_returned_audio' });
+        }
+        
+        console.log('[TRANSCRIBE] ✅ Gemini STT succeeded, returning TEXT (not audio):', finalText.length, 'chars');
+        return res.json({ text: finalText }); // ГАРАНТИРОВАННО ТОЛЬКО ТЕКСТ
       } else {
         console.warn('[TRANSCRIBE] ⚠️ Gemini STT returned empty text');
         return res.status(200).json({ text: '', error: 'empty_transcription' });
@@ -5886,11 +5925,31 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
           }
           
           const parts = data?.candidates?.[0]?.content?.parts || [];
-          const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+          
+          // КРИТИЧЕСКИ ВАЖНО: Извлекаем ТОЛЬКО ТЕКСТ из ответа, игнорируем любые аудио данные
+          let text = '';
+          for (const part of parts) {
+            // Берем ТОЛЬКО текстовые части, игнорируем inlineData (аудио)
+            if (part.text && typeof part.text === 'string') {
+              text += part.text + '\n';
+            }
+            // ЯВНО игнорируем inlineData - это не текст!
+            if (part.inlineData) {
+              console.warn('[GEMINI-STT] ⚠️ Ignoring inlineData in response (this is audio, not text)');
+            }
+          }
+          text = text.trim();
+          
+          // КРИТИЧЕСКИ ВАЖНО: Проверяем, что получили ТЕКСТ, а не base64 аудио
+          if (text && (text.startsWith('data:audio') || text.startsWith('data:application/octet-stream') || 
+              (text.length > 1000 && /^[A-Za-z0-9+/=]+$/.test(text.replace(/\s/g, ''))))) {
+            console.error('[GEMINI-STT] ❌ Gemini returned AUDIO instead of TEXT! This should never happen.');
+            throw new Error('Gemini STT returned audio instead of text. This is a bug.');
+          }
           
           if (text) {
-            console.log('[GEMINI-STT] ✅ Transcribed successfully, text length:', text.length, 'preview:', text.slice(0, 100));
-            return text;
+            console.log('[GEMINI-STT] ✅ Transcribed successfully, returning TEXT (not audio):', text.length, 'chars, preview:', text.slice(0, 100));
+            return text; // ГАРАНТИРОВАННО ТОЛЬКО ТЕКСТ
           }
           
           lastErr = 'empty_text';
