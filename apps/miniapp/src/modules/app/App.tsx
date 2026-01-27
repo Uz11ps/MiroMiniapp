@@ -1092,12 +1092,23 @@ const GameChat: React.FC = () => {
                     const blob = new Blob(recChunksRef.current, { type: (mr as any).mimeType || 'audio/webm' });
                     let text = '';
                     if (blob.size > 0) {
-                      text = await transcribeAudio(blob).catch(() => '');
+                      console.log('[VOICE-INPUT] 📤 Sending audio for transcription, size:', blob.size, 'type:', blob.type);
+                      try {
+                        text = await transcribeAudio(blob);
+                        console.log('[VOICE-INPUT] 📥 Received transcription:', text ? `"${text.slice(0, 50)}..."` : 'empty');
+                      } catch (e: any) {
+                        console.error('[VOICE-INPUT] ❌ Transcription error:', e?.message || String(e));
+                        alert(`Ошибка распознавания голоса: ${e?.message || 'Неизвестная ошибка'}. Проверьте настройки API ключей на сервере.`);
+                        return;
+                      }
+                    } else {
+                      console.warn('[VOICE-INPUT] ⚠️ Empty audio blob');
                     }
                     if (text && text.trim()) {
                       await sendText(text.trim());
                     } else {
-                      alert('Не удалось распознать голос. Попробуйте говорить чётче или ближе к микрофону.');
+                      console.warn('[VOICE-INPUT] ⚠️ Empty transcription result');
+                      alert('Не удалось распознать голос. Возможные причины:\n1. Слишком тихая запись\n2. Не настроены API ключи (Gemini/Yandex/OpenAI)\n3. Проблемы с сетью\n\nПопробуйте говорить чётче или ближе к микрофону.');
                       const input = (document.querySelector('.composer .input') as HTMLInputElement | null);
                       input?.focus();
                     }

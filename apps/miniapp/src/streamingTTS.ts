@@ -142,21 +142,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         return;
       }
       
-      // Проверяем, не является ли первый чанк полностью тишиной (все байты равны 0 или близки к 0)
-      if (isFirstChunk && combined.length >= 2) {
-        const checkArray = new Int16Array(combined.buffer, combined.byteOffset, Math.min(combined.length / 2, 100));
-        let allZero = true;
-        for (let i = 0; i < checkArray.length; i++) {
-          const val = checkArray[i];
-          if (val !== undefined && Math.abs(val) > 100) { // Порог для определения тишины
-            allZero = false;
-            break;
-          }
-        }
-        if (allZero) {
-          console.warn('[STREAMING-TTS] ⚠️ First chunk appears to be silence, but playing anyway to avoid skipping audio');
-        }
-      }
+      // УБРАНО: Проверка на тишину удалена - все чанки проигрываются, чтобы не пропускать необходимые аудиофайлы TTS LIVE
 
       // 3. КРИТИЧНО: Используем byteOffset и длину в конструкторе
       const int16Array = new Int16Array(

@@ -5670,36 +5670,63 @@ app.post('/api/engine/reset', async (req, res) => {
 
 app.post('/api/chat/transcribe', upload.single('audio'), async (req, res) => {
   try {
-    if (!req.file || !req.file.buffer) return res.status(200).json({ text: '', error: 'no_audio' });
+    if (!req.file || !req.file.buffer) {
+      console.error('[TRANSCRIBE] ❌ No audio file received');
+      return res.status(200).json({ text: '', error: 'no_audio' });
+    }
+    
+    console.log('[TRANSCRIBE] 📥 Received audio:', {
+      size: req.file.buffer.length,
+      mime: req.file.mimetype,
+      originalname: req.file.originalname
+    });
     
     // Пробуем Gemini в первую очередь (если настроен)
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     if (geminiKey) {
+      console.log('[TRANSCRIBE] 🔄 Trying Gemini STT...');
       try {
         const gtext = await transcribeViaGemini(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', geminiKey);
         if (gtext && gtext.trim()) {
-          console.log('[TRANSCRIBE] ✅ Gemini STT succeeded');
+          console.log('[TRANSCRIBE] ✅ Gemini STT succeeded, text length:', gtext.length);
           return res.json({ text: gtext });
+        } else {
+          console.warn('[TRANSCRIBE] ⚠️ Gemini STT returned empty text');
         }
-      } catch (e) {
-        console.error('[TRANSCRIBE] Gemini STT failed:', e);
+      } catch (e: any) {
+        console.error('[TRANSCRIBE] ❌ Gemini STT failed:', e?.message || String(e));
+        if (e?.stack) console.error('[TRANSCRIBE] Stack:', e.stack);
       }
+    } else {
+      console.log('[TRANSCRIBE] ⏭️ Gemini key not found, skipping');
     }
     
     // Fallback на Yandex
     const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
     if (yandexKey) {
+      console.log('[TRANSCRIBE] 🔄 Trying Yandex STT...');
       try {
         const ytext = await transcribeYandex(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/ogg', yandexKey);
-        if (ytext && ytext.trim()) return res.json({ text: ytext });
-      } catch (e) {
-        console.error('[TRANSCRIBE] Yandex STT failed:', e);
+        if (ytext && ytext.trim()) {
+          console.log('[TRANSCRIBE] ✅ Yandex STT succeeded, text length:', ytext.length);
+          return res.json({ text: ytext });
+        } else {
+          console.warn('[TRANSCRIBE] ⚠️ Yandex STT returned empty text');
+        }
+      } catch (e: any) {
+        console.error('[TRANSCRIBE] ❌ Yandex STT failed:', e?.message || String(e));
       }
+    } else {
+      console.log('[TRANSCRIBE] ⏭️ Yandex key not found, skipping');
     }
     
     // Fallback на OpenAI Whisper
     const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
-    if (!apiKey) return res.status(200).json({ text: '', error: 'no_api_key' });
+    if (!apiKey) {
+      console.error('[TRANSCRIBE] ❌ No API keys available (Gemini, Yandex, OpenAI)');
+      return res.status(200).json({ text: '', error: 'no_api_key' });
+    }
+    console.log('[TRANSCRIBE] 🔄 Trying OpenAI Whisper...');
     const client = createOpenAIClient(apiKey);
     const tryModels = [
       'whisper-1',
@@ -5763,16 +5790,25 @@ async function transcribeViaHttp(buffer: Buffer, filename: string, mime: string,
 
 async function transcribeViaGemini(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
   try {
-    // Gemini 1.5 Pro и новее поддерживают мультимодальные запросы с аудио
+    console.log('[GEMINI-STT] Starting transcription, buffer size:', buffer.length, 'mime:', mime);
+    
+    // Проверяем размер файла (Gemini имеет лимиты)
+    if (buffer.length > 20 * 1024 * 1024) { // 20MB лимит для Gemini
+      console.warn('[GEMINI-STT] ⚠️ Audio file too large:', buffer.length, 'bytes');
+      throw new Error('Audio file too large for Gemini API');
+    }
+    
     // Конвертируем аудио в base64
     const base64Audio = buffer.toString('base64');
     
-    // Определяем MIME тип для Gemini
+    // Определяем MIME тип для Gemini (Gemini поддерживает: audio/mpeg, audio/mp3, audio/wav, audio/webm, audio/ogg)
     let geminiMime = 'audio/webm';
     if (mime.includes('mp4') || mime.includes('m4a')) geminiMime = 'audio/mp4';
     else if (mime.includes('ogg')) geminiMime = 'audio/ogg';
     else if (mime.includes('wav')) geminiMime = 'audio/wav';
     else if (mime.includes('mpeg') || mime.includes('mp3')) geminiMime = 'audio/mpeg';
+    
+    console.log('[GEMINI-STT] Using MIME type:', geminiMime);
     
     const proxies = parseGeminiProxies();
     const attempts = proxies.length ? proxies : ['__direct__'];
@@ -5780,6 +5816,7 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
     
     for (const p of attempts) {
       try {
+        console.log('[GEMINI-STT] Trying proxy:', p === '__direct__' ? 'direct' : 'proxy');
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
@@ -5792,16 +5829,17 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
                 data: base64Audio
               }
             }, {
-              text: 'Распознай речь на русском языке. Верни только текст без дополнительных комментариев.'
+              text: 'Распознай речь на русском языке из этого аудио. Верни только распознанный текст без дополнительных комментариев или объяснений.'
             }]
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 1024,
           }
         };
         
         const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent';
+        console.log('[GEMINI-STT] Sending request to:', url);
+        
         const r = await undiciFetch(url, {
           method: 'POST',
           dispatcher,
@@ -5816,26 +5854,60 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
         
         if (!r.ok) {
           const errorText = await r.text().catch(() => '');
-          console.error('[GEMINI-STT] HTTP error:', r.status, errorText.slice(0, 200));
+          let errorData: any = {};
+          try {
+            if (errorText) errorData = JSON.parse(errorText) || {};
+          } catch {}
+          
+          console.error('[GEMINI-STT] ❌ HTTP error:', r.status, {
+            statusText: r.statusText,
+            error: errorData.error || errorText.slice(0, 500)
+          });
+          
+          // Если это ошибка авторизации или доступа - не пробуем другие прокси
+          if (r.status === 401 || r.status === 403) {
+            throw new Error(`Gemini API authentication failed: ${r.status} ${errorData.error?.message || errorText.slice(0, 200)}`);
+          }
+          
           continue; // Пробуем следующий прокси
         }
         
         const data = await r.json() as any;
+        console.log('[GEMINI-STT] Response structure:', {
+          hasCandidates: !!data?.candidates,
+          candidatesCount: data?.candidates?.length || 0,
+          hasContent: !!data?.candidates?.[0]?.content,
+          partsCount: data?.candidates?.[0]?.content?.parts?.length || 0
+        });
+        
+        // Проверяем на ошибки в ответе
+        if (data?.promptFeedback?.blockReason) {
+          console.error('[GEMINI-STT] ❌ Content blocked:', data.promptFeedback.blockReason);
+          throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
+        }
+        
         const parts = data?.candidates?.[0]?.content?.parts || [];
         const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+        
         if (text) {
-          console.log('[GEMINI-STT] ✅ Transcribed:', text.slice(0, 100));
+          console.log('[GEMINI-STT] ✅ Transcribed successfully, text length:', text.length, 'preview:', text.slice(0, 100));
           return text;
+        } else {
+          console.warn('[GEMINI-STT] ⚠️ No text in response, full response:', JSON.stringify(data).slice(0, 500));
         }
-      } catch (e) {
-        console.error('[GEMINI-STT] Error:', e);
+      } catch (e: any) {
+        console.error('[GEMINI-STT] ❌ Error with proxy', p === '__direct__' ? 'direct' : 'proxy', ':', e?.message || String(e));
+        if (e?.stack) console.error('[GEMINI-STT] Stack:', e.stack);
         if (p === attempts[attempts.length - 1]) throw e; // Если это последний прокси, пробрасываем ошибку
       }
     }
+    
+    console.warn('[GEMINI-STT] ⚠️ All attempts failed, returning empty string');
     return '';
-  } catch (e) {
-    console.error('[GEMINI-STT] Fatal error:', e);
-    return '';
+  } catch (e: any) {
+    console.error('[GEMINI-STT] ❌ Fatal error:', e?.message || String(e));
+    if (e?.stack) console.error('[GEMINI-STT] Stack:', e.stack);
+    throw e; // Пробрасываем ошибку, чтобы fallback мог сработать
   }
 }
 
