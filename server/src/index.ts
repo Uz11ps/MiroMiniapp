@@ -9790,7 +9790,8 @@ function extractKeywords(text: string): string[] {
 }
 
 /**
- * Находит релевантные чанки правил на основе текущей сцены (RAG)
+ * Находит релевантные чанки правил на основе текущей сцены через СЕМАНТИЧЕСКИЙ поиск (RAG)
+ * Использует Gemini API для понимания СМЫСЛА книги мастера, а не простой поиск по словам
  */
 async function findRelevantRuleChunks(
   prisma: ReturnType<typeof getPrisma>,
@@ -9798,103 +9799,289 @@ async function findRelevantRuleChunks(
   sceneContext: { locationTitle?: string; locationDescription?: string; npcNames?: string[]; characterNames?: string[] }
 ): Promise<{ worldRules: string; gameplayRules: string }> {
   try {
-    const searchTerms: string[] = [];
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     
-    // Добавляем ключевые слова из контекста сцены
-    if (sceneContext.locationTitle) {
-      searchTerms.push(sceneContext.locationTitle.toLowerCase());
-      // Извлекаем отдельные слова из названия локации
-      sceneContext.locationTitle.split(/\s+/).forEach(word => {
-        if (word.length > 3) searchTerms.push(word.toLowerCase());
-      });
-    }
-    
-    if (sceneContext.locationDescription) {
-      // Извлекаем ключевые слова из описания локации
-      const descKeywords = extractKeywords(sceneContext.locationDescription);
-      searchTerms.push(...descKeywords.slice(0, 10));
-    }
-    
-    if (sceneContext.npcNames) {
-      sceneContext.npcNames.forEach(name => {
-        searchTerms.push(name.toLowerCase());
-        name.split(/\s+/).forEach(word => {
-          if (word.length > 2) searchTerms.push(word.toLowerCase());
-        });
-      });
-    }
-    
-    if (sceneContext.characterNames) {
-      sceneContext.characterNames.forEach(name => {
-        searchTerms.push(name.toLowerCase());
-      });
-    }
-    
-    // Ищем релевантные чанки по ключевым словам
+    // Получаем все чанки
     const allChunks = await prisma.ruleChunk.findMany({
       where: { gameId },
       orderBy: { chunkIndex: 'asc' }
     });
     
-    // Оцениваем релевантность каждого чанка
-    const scoredChunks = allChunks.map(chunk => {
-      let score = 0;
-      const chunkText = (chunk.content + ' ' + (chunk.summary || '') + ' ' + chunk.keywords.join(' ')).toLowerCase();
-      
-      // Подсчитываем совпадения ключевых слов
-      for (const term of searchTerms) {
-        if (chunkText.includes(term)) {
-          score += term.length; // Более длинные совпадения дают больше очков
-        }
-      }
-      
-      // Бонус за совпадения в keywords
-      for (const keyword of chunk.keywords) {
-        if (searchTerms.includes(keyword)) {
-          score += 10;
-        }
-      }
-      
-      return { chunk, score };
-    });
-    
-    // Сортируем по релевантности и берем топ-5 чанков каждого типа
-    scoredChunks.sort((a, b) => b.score - a.score);
-    
-    const topWorldChunks = scoredChunks
-      .filter(sc => sc.chunk.chunkType === 'worldRules')
-      .slice(0, 5)
-      .map(sc => sc.chunk.content);
-    
-    const topGameplayChunks = scoredChunks
-      .filter(sc => sc.chunk.chunkType === 'gameplayRules')
-      .slice(0, 5)
-      .map(sc => sc.chunk.content);
-    
-    // Если релевантных чанков мало, добавляем первые чанки (общие правила)
-    if (topWorldChunks.length < 2) {
-      const firstWorldChunks = allChunks
-        .filter(c => c.chunkType === 'worldRules')
-        .slice(0, 2)
-        .map(c => c.content);
-      topWorldChunks.push(...firstWorldChunks);
+    if (allChunks.length === 0) {
+      return { worldRules: '', gameplayRules: '' };
     }
     
-    if (topGameplayChunks.length < 2) {
-      const firstGameplayChunks = allChunks
-        .filter(c => c.chunkType === 'gameplayRules')
-        .slice(0, 2)
-        .map(c => c.content);
-      topGameplayChunks.push(...firstGameplayChunks);
+    // Формируем контекст сцены для семантического поиска
+    const sceneDescription = [
+      sceneContext.locationTitle ? `Локация: ${sceneContext.locationTitle}` : '',
+      sceneContext.locationDescription ? `Описание: ${sceneContext.locationDescription.slice(0, 1000)}` : '',
+      sceneContext.npcNames && sceneContext.npcNames.length > 0 ? `NPC в сцене: ${sceneContext.npcNames.join(', ')}` : '',
+      sceneContext.characterNames && sceneContext.characterNames.length > 0 ? `Персонажи игроков: ${sceneContext.characterNames.join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+    
+    // Разделяем чанки по типам
+    const worldChunks = allChunks.filter(c => c.chunkType === 'worldRules');
+    const gameplayChunks = allChunks.filter(c => c.chunkType === 'gameplayRules');
+    
+    // Если есть Gemini API ключ, используем СЕМАНТИЧЕСКИЙ поиск через AI
+    if (geminiKey && (worldChunks.length > 0 || gameplayChunks.length > 0)) {
+      try {
+        // Для правил мира
+        let selectedWorldChunks: string[] = [];
+        if (worldChunks.length > 0) {
+          // Если чанков много (>10), используем двухэтапный поиск: сначала выбираем топ-15 через AI, потом из них топ-5
+          if (worldChunks.length > 10) {
+            // Этап 1: Выбираем топ-15 наиболее релевантных чанков через семантический поиск
+            const chunksForSelection = worldChunks.map((c, idx) => ({
+              index: idx,
+              summary: c.summary || c.content.slice(0, 500),
+              content: c.content
+            }));
+            
+            const selectionPrompt = `Ты помощник для семантического поиска в книге мастера D&D 5e (322+ страниц).
+
+КОНТЕКСТ ТЕКУЩЕЙ СЦЕНЫ:
+${sceneDescription}
+
+СПИСОК ЧАНКОВ ПРАВИЛ МИРА (всего ${chunksForSelection.length}):
+${chunksForSelection.map((c, i) => `${i + 1}. ${c.summary}`).join('\n')}
+
+ЗАДАЧА: Выбери ТОП-15 наиболее релевантных чанков для текущей сцены на основе СМЫСЛА и СЕМАНТИКИ, а не просто совпадения слов.
+Учитывай:
+- Тему сцены (локация, атмосфера, окружение, сеттинг)
+- Персонажей и NPC в сцене (их классы, расы, способности)
+- Механики, которые могут понадобиться (бои, проверки, взаимодействия, магия, состояния)
+- Сеттинг и правила мира, относящиеся к этой сцене
+- Контекст D&D 5e и как правила применяются к конкретной ситуации
+
+Верни ТОЛЬКО JSON массив номеров выбранных чанков (индексы с 1, не с 0):
+[1, 5, 12, ...]`;
+
+            const selectionResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник для семантического поиска в комплексной книге мастера D&D 5e. Понимай СМЫСЛ, а не просто ищи слова. Отвечай ТОЛЬКО валидным JSON массивом номеров.',
+              userPrompt: selectionPrompt,
+              history: []
+            });
+            
+            let selectedIndices: number[] = [];
+            try {
+              const jsonMatch = selectionResult?.text?.match(/\[[\d\s,]+\]/);
+              if (jsonMatch) {
+                selectedIndices = JSON.parse(jsonMatch[0]).map((n: number) => n - 1).filter((n: number) => n >= 0 && n < chunksForSelection.length);
+              }
+            } catch (e) {
+              console.warn('[RAG] Failed to parse selection indices:', e);
+            }
+            
+            // Если AI не выбрал достаточно, берем первые 15
+            if (selectedIndices.length < 10) {
+              selectedIndices = Array.from({ length: Math.min(15, chunksForSelection.length) }, (_, i) => i);
+            }
+            
+            // Этап 2: Из выбранных 15 выбираем топ-5 наиболее релевантных через детальный анализ
+            const selectedChunks = selectedIndices.map(idx => chunksForSelection[idx]).filter(Boolean);
+            
+            if (selectedChunks.length > 5) {
+              const finalSelectionPrompt = `Ты помощник для финального выбора релевантных правил из книги мастера D&D 5e.
+
+КОНТЕКСТ СЦЕНЫ:
+${sceneDescription}
+
+ВЫБРАННЫЕ ЧАНКИ ПРАВИЛ МИРА (${selectedChunks.length}, выбраны из ${worldChunks.length}):
+${selectedChunks.map((c, i) => `${i + 1}.\n${c.content.slice(0, 2000)}`).join('\n\n---\n\n')}
+
+Выбери ТОП-5 наиболее релевантных чанков для генерации сцены на основе СМЫСЛА и КОНТЕКСТА.
+Учитывай комплексность книги мастера - правила взаимосвязаны, выбирай те, что действительно нужны для этой сцены.
+
+Верни ТОЛЬКО JSON массив номеров: [1, 3, 5, ...]`;
+              
+              const finalResult = await generateChatCompletion({
+                systemPrompt: 'Ты помощник для финального выбора из комплексной книги мастера. Понимай семантику и контекст. Отвечай ТОЛЬКО валидным JSON массивом номеров.',
+                userPrompt: finalSelectionPrompt,
+                history: []
+              });
+              
+              try {
+                const finalJsonMatch = finalResult?.text?.match(/\[[\d\s,]+\]/);
+                if (finalJsonMatch) {
+                  const finalIndices = JSON.parse(finalJsonMatch[0]).map((n: number) => n - 1).filter((n: number) => n >= 0 && n < selectedChunks.length);
+                  selectedWorldChunks = finalIndices.map(idx => selectedChunks[idx]?.content).filter(Boolean);
+                }
+              } catch (e) {
+                console.warn('[RAG] Failed to parse final selection:', e);
+                // Fallback: берем первые 5 из выбранных
+                selectedWorldChunks = selectedChunks.slice(0, 5).map(c => c.content);
+              }
+            } else {
+              selectedWorldChunks = selectedChunks.map(c => c.content);
+            }
+          } else {
+            // Если чанков <= 10, выбираем напрямую топ-5 через семантический поиск
+            const directPrompt = `Ты помощник для семантического поиска в книге мастера D&D 5e.
+
+КОНТЕКСТ ТЕКУЩЕЙ СЦЕНЫ:
+${sceneDescription}
+
+СПИСОК ЧАНКОВ ПРАВИЛ МИРА (всего ${worldChunks.length}):
+${worldChunks.map((c, i) => `${i + 1}.\n${c.content.slice(0, 2000)}`).join('\n\n---\n\n')}
+
+Выбери ТОП-5 наиболее релевантных чанков для генерации сцены на основе СМЫСЛА и КОНТЕКСТА, а не просто совпадения слов.
+Учитывай комплексность книги мастера - правила взаимосвязаны, выбирай те, что действительно нужны для этой конкретной сцены.
+
+Верни ТОЛЬКО JSON массив номеров выбранных чанков: [1, 3, 5, 7, 9]`;
+
+            const directResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник для семантического поиска в комплексной книге мастера D&D 5e. Понимай СМЫСЛ и КОНТЕКСТ. Отвечай ТОЛЬКО валидным JSON массивом номеров.',
+              userPrompt: directPrompt,
+              history: []
+            });
+            
+            try {
+              const jsonMatch = directResult?.text?.match(/\[[\d\s,]+\]/);
+              if (jsonMatch) {
+                const indices = JSON.parse(jsonMatch[0]).map((n: number) => n - 1).filter((n: number) => n >= 0 && n < worldChunks.length);
+                selectedWorldChunks = indices.map(idx => worldChunks[idx]?.content).filter(Boolean);
+              }
+            } catch (e) {
+              console.warn('[RAG] Failed to parse world chunks selection:', e);
+            }
+          }
+          
+          // Fallback: если AI не выбрал достаточно, берем первые 3 чанка
+          if (selectedWorldChunks.length < 2) {
+            selectedWorldChunks = worldChunks.slice(0, 3).map(c => c.content);
+          }
+        }
+        
+        // Аналогично для правил игрового процесса
+        let selectedGameplayChunks: string[] = [];
+        if (gameplayChunks.length > 0) {
+          if (gameplayChunks.length > 10) {
+            // Двухэтапный поиск для gameplay
+            const chunksForSelection = gameplayChunks.map((c, idx) => ({
+              index: idx,
+              summary: c.summary || c.content.slice(0, 500),
+              content: c.content
+            }));
+            
+            const selectionPrompt = `Ты помощник для семантического поиска в книге мастера D&D 5e (322+ страниц).
+
+КОНТЕКСТ ТЕКУЩЕЙ СЦЕНЫ:
+${sceneDescription}
+
+СПИСОК ЧАНКОВ ПРАВИЛ ИГРОВОГО ПРОЦЕССА (всего ${chunksForSelection.length}):
+${chunksForSelection.map((c, i) => `${i + 1}. ${c.summary}`).join('\n')}
+
+Выбери ТОП-15 наиболее релевантных чанков для текущей сцены на основе СМЫСЛА и СЕМАНТИКИ.
+Учитывай механики игры, которые могут понадобиться в этой сцене (бои, проверки, взаимодействия, состояния, урон, лечение, заклинания, способности и т.д.).
+Понимай комплексность книги мастера - правила взаимосвязаны.
+
+Верни ТОЛЬКО JSON массив номеров: [1, 5, 12, ...]`;
+
+            const selectionResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник для семантического поиска в комплексной книге мастера. Понимай СМЫСЛ. Отвечай ТОЛЬКО валидным JSON массивом номеров.',
+              userPrompt: selectionPrompt,
+              history: []
+            });
+            
+            let selectedIndices: number[] = [];
+            try {
+              const jsonMatch = selectionResult?.text?.match(/\[[\d\s,]+\]/);
+              if (jsonMatch) {
+                selectedIndices = JSON.parse(jsonMatch[0]).map((n: number) => n - 1).filter((n: number) => n >= 0 && n < chunksForSelection.length);
+              }
+            } catch (e) {
+              console.warn('[RAG] Failed to parse gameplay selection indices:', e);
+            }
+            
+            if (selectedIndices.length < 10) {
+              selectedIndices = Array.from({ length: Math.min(15, chunksForSelection.length) }, (_, i) => i);
+            }
+            
+            const selectedChunks = selectedIndices.map(idx => chunksForSelection[idx]).filter(Boolean);
+            
+            if (selectedChunks.length > 5) {
+              const finalSelectionPrompt = `КОНТЕКСТ СЦЕНЫ:
+${sceneDescription}
+
+ВЫБРАННЫЕ ЧАНКИ ПРАВИЛ ИГРОВОГО ПРОЦЕССА (${selectedChunks.length}, выбраны из ${gameplayChunks.length}):
+${selectedChunks.map((c, i) => `${i + 1}.\n${c.content.slice(0, 2000)}`).join('\n\n---\n\n')}
+
+Выбери ТОП-5 наиболее релевантных на основе СМЫСЛА и КОНТЕКСТА. Учитывай комплексность книги мастера.
+Верни ТОЛЬКО JSON: [1, 3, 5, ...]`;
+              
+              const finalResult = await generateChatCompletion({
+                systemPrompt: 'Ты помощник для финального выбора из комплексной книги мастера. Понимай семантику. Отвечай ТОЛЬКО валидным JSON массивом номеров.',
+                userPrompt: finalSelectionPrompt,
+                history: []
+              });
+              
+              try {
+                const finalJsonMatch = finalResult?.text?.match(/\[[\d\s,]+\]/);
+                if (finalJsonMatch) {
+                  const finalIndices = JSON.parse(finalJsonMatch[0]).map((n: number) => n - 1).filter((n: number) => n >= 0 && n < selectedChunks.length);
+                  selectedGameplayChunks = finalIndices.map(idx => selectedChunks[idx]?.content).filter(Boolean);
+                }
+              } catch (e) {
+                selectedGameplayChunks = selectedChunks.slice(0, 5).map(c => c.content);
+              }
+            } else {
+              selectedGameplayChunks = selectedChunks.map(c => c.content);
+            }
+          } else {
+            // Прямой выбор для <= 10 чанков
+            const directPrompt = `КОНТЕКСТ СЦЕНЫ:
+${sceneDescription}
+
+ЧАНКИ ПРАВИЛ ИГРОВОГО ПРОЦЕССА (${gameplayChunks.length}):
+${gameplayChunks.map((c, i) => `${i + 1}.\n${c.content.slice(0, 2000)}`).join('\n\n---\n\n')}
+
+Выбери ТОП-5 наиболее релевантных на основе СМЫСЛА и КОНТЕКСТА, а не просто совпадения слов.
+Учитывай комплексность книги мастера - правила взаимосвязаны.
+
+Верни ТОЛЬКО JSON: [1, 3, 5, ...]`;
+
+            const directResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник для семантического поиска в комплексной книге мастера. Понимай СМЫСЛ. Отвечай ТОЛЬКО валидным JSON массивом номеров.',
+              userPrompt: directPrompt,
+              history: []
+            });
+            
+            try {
+              const jsonMatch = directResult?.text?.match(/\[[\d\s,]+\]/);
+              if (jsonMatch) {
+                const indices = JSON.parse(jsonMatch[0]).map((n: number) => n - 1).filter((n: number) => n >= 0 && n < gameplayChunks.length);
+                selectedGameplayChunks = indices.map(idx => gameplayChunks[idx]?.content).filter(Boolean);
+              }
+            } catch (e) {
+              console.warn('[RAG] Failed to parse gameplay chunks selection:', e);
+            }
+          }
+          
+          if (selectedGameplayChunks.length < 2) {
+            selectedGameplayChunks = gameplayChunks.slice(0, 3).map(c => c.content);
+          }
+        }
+        
+        console.log(`[RAG] ✅ Selected ${selectedWorldChunks.length} world chunks and ${selectedGameplayChunks.length} gameplay chunks via semantic search`);
+        
+        return {
+          worldRules: selectedWorldChunks.join('\n\n'),
+          gameplayRules: selectedGameplayChunks.join('\n\n')
+        };
+      } catch (e) {
+        console.error('[RAG] Semantic search failed, using fallback:', e);
+        // Fallback на простой метод
+      }
     }
     
+    // Fallback: если нет Gemini API или произошла ошибка, используем первые чанки
     return {
-      worldRules: topWorldChunks.join('\n\n'),
-      gameplayRules: topGameplayChunks.join('\n\n')
+      worldRules: worldChunks.slice(0, 3).map(c => c.content).join('\n\n'),
+      gameplayRules: gameplayChunks.slice(0, 3).map(c => c.content).join('\n\n')
     };
   } catch (e) {
     console.error('[RAG] Failed to find relevant chunks:', e);
-    // Fallback: возвращаем пустые строки, будет использован обычный метод
     return { worldRules: '', gameplayRules: '' };
   }
 }
