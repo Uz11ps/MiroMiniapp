@@ -4357,11 +4357,37 @@ app.post('/api/chat/reply', async (req, res) => {
       gameId ? prisma.character.findMany({ where: { gameId, OR: [{ isPlayable: false }, { isPlayable: null }] }, take: 6 }).catch(() => []) : Promise.resolve([])
     ]);
     const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
+    
+    // Получаем данные персонажа из БД, если передан characterId
+    let finalCharacterName = characterName;
+    let characterPersona = '';
+    if (characterId && !finalCharacterName) {
+      try {
+        const char = await prisma.character.findUnique({ where: { id: characterId } });
+        if (char) {
+          finalCharacterName = char.name || undefined;
+          characterPersona = char.persona || '';
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to fetch character:', e);
+      }
+    } else if (characterId && finalCharacterName) {
+      // Если есть и ID и имя, получаем дополнительную информацию (persona, stats)
+      try {
+        const char = await prisma.character.findUnique({ where: { id: characterId } });
+        if (char) {
+          characterPersona = char.persona || '';
+        }
+      } catch (e) {
+        console.warn('[REPLY] Failed to fetch character details:', e);
+      }
+    }
+    
     const sys = getSysPrompt();
     // Добавляем информацию о персонаже игрока в системный промпт
     let characterInfo = '';
-    if (characterName) {
-      characterInfo = `\n\nВАЖНО: Игрок управляет персонажем по имени "${characterName}". Всегда обращайся к персонажу по его имени, когда описываешь его действия или обращаешься к нему. Например: "${characterName} делает...", "${characterName}, ты видишь...", "Обращаясь к ${characterName}, мастер говорит...". Используй имя персонажа естественно в тексте, не только в начале предложения.`;
+    if (finalCharacterName) {
+      characterInfo = `\n\nКРИТИЧЕСКИ ВАЖНО: Игрок управляет персонажем по имени "${finalCharacterName}". Ты УЖЕ ЗНАЕШЬ имя персонажа из базы данных - НЕ спрашивай его! Всегда обращайся к персонажу по его имени "${finalCharacterName}", когда описываешь его действия или обращаешься к нему. Например: "${finalCharacterName} делает...", "${finalCharacterName}, ты видишь...", "Обращаясь к ${finalCharacterName}, мастер говорит...". Используй имя персонажа "${finalCharacterName}" естественно в тексте, не только в начале предложения.${characterPersona ? ` Характер персонажа: ${characterPersona}` : ''}`;
     }
     const sysWithCharacter = sys + characterInfo +
       'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
@@ -4581,6 +4607,7 @@ app.post('/api/chat/reply', async (req, res) => {
     };
 
     // ОПТИМИЗАЦИЯ: Передаем кэшированные данные в buildGptSceneContext
+    // Используем finalCharacterName, если он был получен из БД выше
     const sc = await (async () => {
       try {
         if (gameId) {
@@ -4591,7 +4618,7 @@ app.post('/api/chat/reply', async (req, res) => {
             history: baseHistory,
             cachedGameSession: cachedGameSession, // Передаем кэшированную сессию
             characterId, // Передаем ID персонажа
-            characterName, // Передаем имя персонажа
+            characterName: finalCharacterName || characterName, // Используем имя из БД, если получено
           });
         }
       } catch {}
@@ -9290,6 +9317,28 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     } catch {}
   }
   
+  // Получаем данные персонажа игрока из БД, если передан characterId
+  let playerCharacterData: { id?: string; name?: string; persona?: string; stats?: string } | null = null;
+  if (params.characterId) {
+    try {
+      const char = await prisma.character.findUnique({ where: { id: params.characterId } });
+      if (char) {
+        playerCharacterData = {
+          id: char.id,
+          name: char.name || params.characterName,
+          persona: char.persona || undefined,
+          stats: char.isPlayable ? `HP: ${char.hp}/${char.maxHp}, AC: ${char.ac}, STR:${char.str}, DEX:${char.dex}, CON:${char.con}, INT:${char.int}, WIS:${char.wis}, CHA:${char.cha}` : undefined
+        };
+      }
+    } catch (e) {
+      console.warn('[buildGptSceneContext] Failed to fetch character:', e);
+    }
+  }
+  // Если characterName передан, но данных из БД нет, используем переданное имя
+  if (!playerCharacterData && params.characterName) {
+    playerCharacterData = { name: params.characterName, id: params.characterId };
+  }
+  
   // ОПТИМИЗАЦИЯ: Параллельно получаем location и npcs (npcs не зависит от location)
   let loc: any = null;
   let npcs: any[] = [];
@@ -9357,10 +9406,23 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     buttons,
     triggers,
     isGameOver,
-    playerCharacter: params.characterName ? { name: params.characterName, id: params.characterId } : undefined,
+    playerCharacter: playerCharacterData ? {
+      name: playerCharacterData.name,
+      id: playerCharacterData.id,
+      persona: playerCharacterData.persona,
+      stats: playerCharacterData.stats
+    } : undefined,
   };
+  
+  // Добавляем явную информацию о персонаже игрока в контекст
+  let playerCharacterInfo = '';
+  if (playerCharacterData?.name) {
+    playerCharacterInfo = `\n\nИГРОК УПРАВЛЯЕТ ПЕРСОНАЖЕМ:\nИмя: ${playerCharacterData.name}${playerCharacterData.persona ? `\nХарактер/Персона: ${playerCharacterData.persona}` : ''}${playerCharacterData.stats ? `\nХарактеристики D&D 5e: ${playerCharacterData.stats}` : ''}\n\nКРИТИЧЕСКИ ВАЖНО: Всегда используй имя персонажа "${playerCharacterData.name}" когда обращаешься к игроку или описываешь его действия. НЕ спрашивай имя персонажа - ты его уже знаешь! Обращайся напрямую: "${playerCharacterData.name}, ты видишь...", "Обращаясь к ${playerCharacterData.name}, мастер говорит...", "${playerCharacterData.name} делает..." и т.д.`;
+  }
+  
   const gptContext = [
     `SCENE_JSON:\n${JSON.stringify(sceneJson, null, 2)}`,
+    playerCharacterInfo,
     historyLines ? `История:\n${historyLines}` : '',
   ].filter(Boolean).join('\n\n');
   return gptContext;
