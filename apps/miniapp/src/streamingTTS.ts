@@ -191,13 +191,13 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
 
       const now = audioContext.currentTime;
       
-      // КРИТИЧЕСКИ ВАЖНО: Для максимально быстрого старта воспроизведения
-      // Первый чанк должен начать воспроизводиться СРАЗУ, без задержек
+      // КРИТИЧЕСКИ ВАЖНО: Для стабильного старта без потери первой буквы
+      // Первый чанк должен иметь запас 100 мс (0.1 секунды) для надежной инициализации AudioContext
       if (isFirstChunk) {
-        // Первый чанк - начинаем воспроизведение немедленно
-        nextStartTime = now;
+        // Первый чанк - начинаем с запасом 0.1 секунды для стабильного старта
+        nextStartTime = now + 0.1;
         isFirstChunk = false;
-        console.log('[STREAMING-TTS] 🎵 First chunk - starting playback immediately, samples:', float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's');
+        console.log('[STREAMING-TTS] 🎵 First chunk - starting playback with 100ms buffer, samples:', float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's');
       } else if (nextStartTime < now) {
         // Если мы отстали (например, из-за задержек сети) - начинаем сразу
         nextStartTime = now;
@@ -286,50 +286,14 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
 }
 
 /**
- * Разбивает текст на части по предложениям и проигрывает последовательно.
+ * Обертка над playStreamingTTS для обратной совместимости.
+ * УДАЛЕНО: Разбиение на предложения создавало паузы и проблемы с синхронизацией.
+ * Gemini Live API может обработать весь текст сразу со стримингом.
  */
 export async function playStreamingTTSChunked(options: StreamingTTSOptions & { wordsPerChunk?: number }): Promise<void> {
-  const { text, wordsPerChunk = 40, ...rest } = options;
-  
-  // Регулярка для разбивки по предложениям, сохраняя знаки препинания
-  // Разбиваем по . ! ? \n, но следим за длиной
-  const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
-  
-  const chunks: string[] = [];
-  let currentChunk = '';
-  
-  for (const sentence of sentences) {
-    const trimmed = sentence.trim();
-    if (!trimmed) continue;
-    
-    // Если добавление предложения не превышает лимит слов (примерно)
-    if ((currentChunk + ' ' + trimmed).split(/\s+/).length <= wordsPerChunk) {
-      currentChunk += (currentChunk ? ' ' : '') + trimmed;
-    } else {
-      if (currentChunk) chunks.push(currentChunk);
-      currentChunk = trimmed;
-    }
-  }
-  if (currentChunk) chunks.push(currentChunk);
-  
-  // Перед началом новой очереди останавливаем старую
-  stopStreamingTTS();
-  
-  const abortController = currentAbortController; // Запоминаем текущий контроллер
-
-  for (const chunkText of chunks) {
-    if (!chunkText) continue;
-    if (abortController?.signal.aborted) break;
-
-    await new Promise<void>((resolve, reject) => {
-      playStreamingTTS({
-        ...rest,
-        text: chunkText,
-        onComplete: () => resolve(),
-        onError: (err) => reject(err)
-      });
-    });
-  }
+  // Просто вызываем playStreamingTTS с полным текстом
+  // Gemini Live API сам обработает весь текст со стримингом
+  return playStreamingTTS(options);
 }
 
 /**
@@ -343,6 +307,7 @@ class AudioQueue {
   private nextStartTime = 0;
   private currentSegmentIndex = 0;
   private segmentLeftover: Map<number, Uint8Array | null> = new Map();
+  private isFirstChunk = true; // Флаг для первого чанка - нужен запас 100 мс
 
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
@@ -366,12 +331,12 @@ class AudioQueue {
       
       // Если у нас нет данных для текущего сегмента, но есть для следующих - ждем
       if (!segmentChunks || segmentChunks.length === 0) {
-        // Проверяем, есть ли вообще данные в очереди (для отладки)
+        // Проверяем, есть ли вообще данные в очереди
         const hasAnyData = Array.from(this.segments.values()).some(q => q.length > 0);
         if (!hasAnyData) break;
         
-        // Ждем немного появления данных для текущего сегмента
-        await new Promise(r => setTimeout(r, 50));
+        // Используем requestAnimationFrame вместо setTimeout для более быстрой реакции
+        await new Promise(r => requestAnimationFrame(r));
         continue;
       }
 
@@ -413,35 +378,38 @@ class AudioQueue {
       
       source.onended = () => {
         activeSources = activeSources.filter(s => s !== source);
-        
-        // Если сегмент закончился (на сервере пришел turnComplete и очередь пуста)
-        // ВАЖНО: Мы переходим к следующему сегменту, когда текущий проигран полностью
-        // Но так как у нас стриминг, мы просто продолжаем пока есть данные.
-        // Переход к следующему сегменту осуществляется когда текущий ПУСТ и мы получили сигнал о конце (но тут мы упростим)
       };
 
       const now = this.ctx.currentTime;
-      if (this.nextStartTime < now) {
+      
+      // КРИТИЧЕСКИ ВАЖНО: Для стабильного старта без потери первой буквы
+      // Первый чанк должен иметь запас 100 мс (0.1 секунды) для надежной инициализации AudioContext
+      if (this.isFirstChunk) {
+        this.nextStartTime = now + 0.1;
+        this.isFirstChunk = false;
+        console.log('[AUDIO-QUEUE] 🎵 First chunk - starting playback with 100ms buffer');
+      } else if (this.nextStartTime < now) {
         this.nextStartTime = now + 0.05;
       }
 
       source.start(this.nextStartTime);
       this.nextStartTime += audioBuffer.duration;
 
-      // Если в текущем сегменте больше нет чанков, пробуем заглянуть в следующий
+      // Если в текущем сегменте больше нет чанков, проверяем следующий сегмент
       if (segmentChunks.length === 0) {
-        // Даем небольшую фору серверу
-        await new Promise(r => setTimeout(r, 50));
-        if (segmentChunks.length === 0) {
-          // Если все еще пусто, проверяем наличие следующего сегмента
-          if (this.segments.has(this.currentSegmentIndex + 1)) {
+        // Проверяем следующий сегмент без задержки
+        if (this.segments.has(this.currentSegmentIndex + 1)) {
+          const nextChunks = this.segments.get(this.currentSegmentIndex + 1);
+          if (nextChunks && nextChunks.length > 0) {
             this.currentSegmentIndex++;
             console.log('[AUDIO-QUEUE] Switching to segment:', this.currentSegmentIndex);
           }
         }
       }
 
-      await new Promise(r => setTimeout(r, 10));
+      // Используем requestAnimationFrame для неблокирующей обработки вместо setTimeout
+      // Это позволяет обрабатывать чанки быстрее и без задержек
+      await new Promise(r => requestAnimationFrame(r));
     }
 
     this.isPlaying = false;
@@ -453,6 +421,7 @@ class AudioQueue {
     this.isPlaying = false;
     this.segmentLeftover.clear();
     this.nextStartTime = this.ctx.currentTime;
+    this.isFirstChunk = true; // Сбрасываем флаг при остановке
   }
 }
 
