@@ -2296,20 +2296,31 @@ ${chunkShape}`;
           },
         });
         
-        // АВТОМАТИЧЕСКАЯ индексация правил для RAG сразу после сохранения игры
+        // АВТОМАТИЧЕСКАЯ индексация правил для RAG в ФОНОВОМ режиме (не блокирует создание локаций)
         if (g.worldRulesPdfPath || g.gameplayRulesPdfPath) {
-          set({ progress: 'Индексация правил для RAG...' });
-          try {
-            console.log(`[INGEST-IMPORT] 🔍 Автоматическая индексация RAG для игры ${game.id}...`);
-            await indexRulesForRAG(prisma, game.id, g.worldRulesPdfPath || null, g.gameplayRulesPdfPath || null);
-            const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
-            console.log(`[INGEST-IMPORT] ✅ RAG индексация завершена для игры ${game.id}: ${chunkCount} чанков проиндексировано`);
-            set({ progress: `Индексация завершена: ${chunkCount} чанков` });
-          } catch (e) {
-            console.error(`[INGEST-IMPORT] ❌ Ошибка индексации RAG:`, e);
-            // Не прерываем процесс, если индексация не удалась - игра уже создана
-            set({ progress: 'Индексация не удалась, но игра создана' });
-          }
+          set({ progress: 'Запуск индексации RAG в фоне...' });
+          console.log(`[INGEST-IMPORT] 🔍 Запуск автоматической индексации RAG для игры ${game.id} в фоновом режиме...`);
+          
+          // Запускаем индексацию в фоне, не ждем её завершения
+          setImmediate(async () => {
+            try {
+              console.log(`[INGEST-IMPORT] 🔍 Начало фоновой индексации RAG для игры ${game.id}...`);
+              await indexRulesForRAG(prisma, game.id, g.worldRulesPdfPath || null, g.gameplayRulesPdfPath || null);
+              const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
+              console.log(`[INGEST-IMPORT] ✅ RAG индексация завершена для игры ${game.id}: ${chunkCount} чанков проиндексировано`);
+              
+              // Обновляем прогресс, если job еще активен
+              const currentJob = ingestJobs.get(jobId);
+              if (currentJob && currentJob.status === 'running') {
+                ingestJobs.set(jobId, { ...currentJob, progress: `Индексация RAG завершена: ${chunkCount} чанков` });
+              }
+            } catch (e) {
+              console.error(`[INGEST-IMPORT] ❌ Ошибка индексации RAG:`, e);
+              // Не прерываем процесс, если индексация не удалась - игра уже создана
+            }
+          });
+          
+          console.log(`[INGEST-IMPORT] ✅ Индексация RAG запущена в фоне, продолжаем создание локаций...`);
         }
         const keyToId = new Map<string, string>();
         // Сначала создаем все основные локации (без parentKey)
@@ -9511,16 +9522,43 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
     const gameplayRulesFull = await readPdfText(gameplayRulesPdfPath);
     
     if (worldRulesFull) {
-      console.log(`[RAG-INDEX] 📖 Правила мира: ${worldRulesFull.length} символов`);
+      console.log(`[RAG-INDEX] 📖 Правила мира: ${worldRulesFull.length.toLocaleString()} символов`);
     }
     if (gameplayRulesFull) {
-      console.log(`[RAG-INDEX] 📖 Правила процесса: ${gameplayRulesFull.length} символов`);
+      console.log(`[RAG-INDEX] 📖 Правила процесса: ${gameplayRulesFull.length.toLocaleString()} символов`);
     }
     
     const chunkSize = 10000; // Размер чанка: ~10K символов (оптимально для семантического поиска)
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     
+    // ОЦЕНКА ВРЕМЕНИ ИНДЕКСАЦИИ
+    const estimatedWorldChunks = worldRulesFull ? Math.ceil(worldRulesFull.length / chunkSize) : 0;
+    const estimatedGameplayChunks = gameplayRulesFull ? Math.ceil(gameplayRulesFull.length / chunkSize) : 0;
+    const totalEstimatedChunks = estimatedWorldChunks + estimatedGameplayChunks;
+    
+    // Средняя скорость: ~300-500мс на чанк (включая создание резюме через Gemini API)
+    const avgTimePerChunk = geminiKey ? 400 : 50; // Если есть Gemini API - медленнее из-за создания резюме
+    const estimatedTimeMs = totalEstimatedChunks * avgTimePerChunk;
+    const estimatedTimeSec = Math.ceil(estimatedTimeMs / 1000);
+    const estimatedTimeMin = Math.floor(estimatedTimeSec / 60);
+    const estimatedTimeSecRemainder = estimatedTimeSec % 60;
+    
+    console.log(`[RAG-INDEX] ⏱️ ========== ОЦЕНКА ВРЕМЕНИ ==========`);
+    console.log(`[RAG-INDEX] 📊 Ожидаемое количество чанков: ${totalEstimatedChunks} (worldRules: ${estimatedWorldChunks}, gameplayRules: ${estimatedGameplayChunks})`);
+    if (geminiKey) {
+      console.log(`[RAG-INDEX] 🤖 Режим: с Gemini API (создание резюме для каждого чанка)`);
+      console.log(`[RAG-INDEX] ⏱️ ОЦЕНОЧНОЕ ВРЕМЯ: ~${estimatedTimeMin > 0 ? `${estimatedTimeMin}мин ${estimatedTimeSecRemainder}сек` : `${estimatedTimeSec}сек`} (${estimatedTimeMs.toLocaleString()}мс)`);
+      console.log(`[RAG-INDEX] 💡 Скорость: ~${avgTimePerChunk}мс/чанк (зависит от скорости Gemini API)`);
+    } else {
+      console.log(`[RAG-INDEX] ⚡ Режим: без Gemini API (только ключевые слова, без резюме)`);
+      console.log(`[RAG-INDEX] ⏱️ ОЦЕНОЧНОЕ ВРЕМЯ: ~${estimatedTimeSec}сек (${estimatedTimeMs.toLocaleString()}мс)`);
+      console.log(`[RAG-INDEX] 💡 Скорость: ~${avgTimePerChunk}мс/чанк`);
+    }
+    console.log(`[RAG-INDEX] ⏱️ ====================================`);
+    
     let totalChunksCreated = 0;
+    let worldChunksCount = 0;
+    let gameplayChunksCount = 0;
     
     // Обрабатываем правила мира
     if (worldRulesFull && worldRulesFull.length > 0) {
@@ -9573,8 +9611,18 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
         totalChunksCreated++;
         worldChunksCount++;
         const chunkTime = Date.now() - chunkStart;
+        const elapsed = Date.now() - worldIndexStart;
+        const avgTime = Math.round(elapsed / (idx + 1));
+        const remaining = Math.max(0, chunks.length - (idx + 1));
+        const estimatedRemaining = Math.round(remaining * avgTime);
+        const progressPercent = Math.round(((idx + 1) / chunks.length) * 100);
+        
         if ((idx + 1) % 10 === 0 || idx === chunks.length - 1) {
-          console.log(`[RAG-INDEX] ✅ Правила мира: ${idx + 1}/${chunks.length} чанков создано (${chunkTime}мс/чанк)`);
+          const remainingSec = Math.ceil(estimatedRemaining / 1000);
+          const remainingMin = Math.floor(remainingSec / 60);
+          const remainingSecRemainder = remainingSec % 60;
+          const remainingStr = remainingMin > 0 ? `${remainingMin}мин ${remainingSecRemainder}сек` : `${remainingSec}сек`;
+          console.log(`[RAG-INDEX] ✅ Правила мира: ${idx + 1}/${chunks.length} (${progressPercent}%) | Средняя скорость: ${avgTime}мс/чанк | Осталось: ~${remainingStr}`);
         }
       }
       const worldIndexTime = Date.now() - worldIndexStart;
@@ -9630,8 +9678,18 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
         totalChunksCreated++;
         gameplayChunksCount++;
         const chunkTime = Date.now() - chunkStart;
+        const elapsed = Date.now() - gameplayIndexStart;
+        const avgTime = Math.round(elapsed / (idx + 1));
+        const remaining = Math.max(0, chunks.length - (idx + 1));
+        const estimatedRemaining = Math.round(remaining * avgTime);
+        const progressPercent = Math.round(((idx + 1) / chunks.length) * 100);
+        
         if ((idx + 1) % 10 === 0 || idx === chunks.length - 1) {
-          console.log(`[RAG-INDEX] ✅ Правила процесса: ${idx + 1}/${chunks.length} чанков создано (${chunkTime}мс/чанк)`);
+          const remainingSec = Math.ceil(estimatedRemaining / 1000);
+          const remainingMin = Math.floor(remainingSec / 60);
+          const remainingSecRemainder = remainingSec % 60;
+          const remainingStr = remainingMin > 0 ? `${remainingMin}мин ${remainingSecRemainder}сек` : `${remainingSec}сек`;
+          console.log(`[RAG-INDEX] ✅ Правила процесса: ${idx + 1}/${chunks.length} (${progressPercent}%) | Средняя скорость: ${avgTime}мс/чанк | Осталось: ~${remainingStr}`);
         }
       }
       const gameplayIndexTime = Date.now() - gameplayIndexStart;
