@@ -575,6 +575,14 @@ const GameChat: React.FC = () => {
             });
             const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
             if (lastBot?.text) {
+              // Останавливаем предыдущую озвучку перед новой
+              try {
+                stopStreamingTTS();
+                speakingInFlightRef.current = false;
+                activeSpeakSeqRef.current = 0;
+              } catch (e) {
+                console.warn('[TTS-CLIENT] Error stopping audio:', e);
+              }
               speak(lastBot.text);
               applyBgFromText(lastBot.text);
             }
@@ -615,6 +623,14 @@ const GameChat: React.FC = () => {
           setMessages(h as any);
           const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
           if (lastBot?.text) {
+            // Останавливаем предыдущую озвучку перед новой
+            try {
+              stopStreamingTTS();
+              speakingInFlightRef.current = false;
+              activeSpeakSeqRef.current = 0;
+            } catch (e) {
+              console.warn('[TTS-CLIENT] Error stopping audio:', e);
+            }
             speak(lastBot.text);
             applyBgFromText(lastBot.text);
           }
@@ -1172,6 +1188,14 @@ const GameChat: React.FC = () => {
                     const txt = String(resp.message);
                     setMessages((m) => {
                       const next = [...m, { from: 'bot' as const, text: txt }];
+                      // Останавливаем предыдущую озвучку перед новой
+                      try {
+                        stopStreamingTTS();
+                        speakingInFlightRef.current = false;
+                        activeSpeakSeqRef.current = 0;
+                      } catch (e) {
+                        console.warn('[TTS-CLIENT] Error stopping audio:', e);
+                      }
                       // озвучиваем только последний текст
                       speak(txt);
                       return next;
@@ -1181,6 +1205,14 @@ const GameChat: React.FC = () => {
                     if (arr.length) {
                       setMessages((m) => {
                         const next = [...m, ...arr.map((t) => ({ from: 'bot' as const, text: String(t) }))];
+                        // Останавливаем предыдущую озвучку перед новой
+                        try {
+                          stopStreamingTTS();
+                          speakingInFlightRef.current = false;
+                          activeSpeakSeqRef.current = 0;
+                        } catch (e) {
+                          console.warn('[TTS-CLIENT] Error stopping audio:', e);
+                        }
                         // озвучиваем только последнюю фразу-наратив
                         const last = arr[arr.length - 1];
                         if (last) speak(String(last));
@@ -1194,6 +1226,14 @@ const GameChat: React.FC = () => {
                       : `🎲 Бросок: ${r.notation} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}`;
                     setMessages((m) => {
                       const next = [...m, { from: 'bot' as const, text: msg }];
+                      // Останавливаем предыдущую озвучку перед новой
+                      try {
+                        stopStreamingTTS();
+                        speakingInFlightRef.current = false;
+                        activeSpeakSeqRef.current = 0;
+                      } catch (e) {
+                        console.warn('[TTS-CLIENT] Error stopping audio:', e);
+                      }
                       speak(msg);
                       return next;
                     });
