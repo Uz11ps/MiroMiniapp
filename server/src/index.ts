@@ -4275,13 +4275,50 @@ app.post('/api/chat/welcome', async (req, res) => {
 app.post('/api/chat/reply', async (req, res) => {
   const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
   const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
-  const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
+  let userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
   const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
   const characterName = typeof req.body?.characterName === 'string' ? req.body.characterName : undefined;
   
-  // КРИТИЧЕСКИ ВАЖНО: Логируем, что получаем ТЕКСТ (должен быть расшифрован через STT)
-  console.log('[REPLY] 📥 Received userText (should be TEXT from STT):', typeof userText === 'string' ? `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"` : `type: ${typeof userText}`);
+  // КРИТИЧЕСКИ ВАЖНО: Проверяем, это текст или аудио (base64)
+  // Если аудио - преобразуем через STT в текст
+  if (userText && typeof userText === 'string') {
+    // Проверяем, это base64 аудио или текст
+    const isAudioBase64 = userText.startsWith('data:audio') || 
+                          userText.startsWith('data:application/octet-stream') ||
+                          (userText.length > 1000 && /^[A-Za-z0-9+/=]+$/.test(userText.replace(/\s/g, '')));
+    
+    if (isAudioBase64) {
+      console.log('[REPLY] 🎤 Detected AUDIO in userText, converting to TEXT via STT...');
+      try {
+        const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+        if (geminiKey) {
+          // Извлекаем base64 данные (убираем префикс data:audio/webm;base64,)
+          const base64Data = userText.includes(',') ? userText.split(',')[1] : userText;
+          const audioBuffer = Buffer.from(base64Data, 'base64');
+          
+          // Преобразуем аудио в текст через STT
+          const transcribedText = await transcribeViaGemini(audioBuffer, 'audio.webm', 'audio/webm', geminiKey);
+          
+          if (transcribedText && transcribedText.trim()) {
+            userText = transcribedText.trim();
+            console.log('[REPLY] ✅ Converted AUDIO to TEXT via STT:', `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"`);
+          } else {
+            console.error('[REPLY] ❌ STT returned empty text');
+            return res.status(400).json({ error: 'stt_failed', message: 'Не удалось распознать речь' });
+          }
+        } else {
+          console.error('[REPLY] ❌ No Gemini API key for STT');
+          return res.status(400).json({ error: 'stt_key_missing', message: 'Не настроен API ключ для распознавания речи' });
+        }
+      } catch (e: any) {
+        console.error('[REPLY] ❌ STT error:', e?.message || String(e));
+        return res.status(400).json({ error: 'stt_error', message: `Ошибка распознавания речи: ${e?.message || 'Неизвестная ошибка'}` });
+      }
+    } else {
+      console.log('[REPLY] ✅ Received TEXT (not audio):', `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"`);
+    }
+  }
   
   const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
   try {
@@ -5116,9 +5153,6 @@ app.post('/api/chat/reply', async (req, res) => {
       });
       const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
       
-      // КРИТИЧЕСКИ ВАЖНО: Логируем, что получаем ТЕКСТ (должен быть расшифрован через STT)
-      console.log('[REPLY] 📥 Received userText (should be TEXT from STT):', typeof userText === 'string' ? `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"` : `type: ${typeof userText}`);
-      
       // Не сохраняем "технические ошибки" и сообщения об ошибке распознавания в историю
       const shouldSaveBotMessage = !text || (!text.trim().startsWith('Техническая ошибка') && text.trim() !== 'Не распознали ваш ответ, выберите вариант корректно!');
       const newHist = prev.concat([
@@ -5142,21 +5176,6 @@ app.post('/api/chat/reply', async (req, res) => {
           create: { userId: uid, gameId: gameId || 'unknown', history: [] as any },
         });
         const prev = ((sess.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
-        
-        // КРИТИЧЕСКИ ВАЖНО: Проверяем, что userText - это ТЕКСТ (расшифрованный через STT), а не аудио
-        if (typeof userText !== 'string') {
-          console.error('[REPLY] ❌ userText is not a string:', typeof userText);
-          return res.status(400).json({ error: 'invalid_user_text', message: 'userText must be a string (text), not audio. Audio must be transcribed via STT first.' });
-        }
-        
-        // Проверяем, что это не base64 аудио
-        if (userText.startsWith('data:audio') || userText.startsWith('data:application/octet-stream') || 
-            (userText.length > 1000 && /^[A-Za-z0-9+/=]+$/.test(userText.replace(/\s/g, '')))) {
-          console.error('[REPLY] ❌ Received AUDIO instead of TEXT in userText!');
-          return res.status(400).json({ error: 'audio_received', message: 'Received audio instead of text. Audio must be transcribed via STT first.' });
-        }
-        
-        console.log('[REPLY] ✅ userText is valid TEXT:', `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"`);
         
         // Не сохраняем "технические ошибки" в историю
         const shouldSaveBotMessage = !text || !text.trim().startsWith('Техническая ошибка');
@@ -5182,8 +5201,52 @@ app.post('/api/chat/reply', async (req, res) => {
 app.post('/api/chat/reply-stream', async (req, res) => {
   const gameId = typeof req.body?.gameId === 'string' ? req.body.gameId : undefined;
   const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
-  const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
+  let userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
+  
+  // КРИТИЧЕСКИ ВАЖНО: Проверяем, это текст или аудио (base64)
+  // Если аудио - преобразуем через STT в текст
+  if (userText && typeof userText === 'string') {
+    // Проверяем, это base64 аудио или текст
+    const isAudioBase64 = userText.startsWith('data:audio') || 
+                          userText.startsWith('data:application/octet-stream') ||
+                          (userText.length > 1000 && /^[A-Za-z0-9+/=]+$/.test(userText.replace(/\s/g, '')));
+    
+    if (isAudioBase64) {
+      console.log('[REPLY-STREAM] 🎤 Detected AUDIO in userText, converting to TEXT via STT...');
+      try {
+        const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+        if (geminiKey) {
+          // Извлекаем base64 данные (убираем префикс data:audio/webm;base64,)
+          const base64Data = userText.includes(',') ? userText.split(',')[1] : userText;
+          const audioBuffer = Buffer.from(base64Data, 'base64');
+          
+          // Преобразуем аудио в текст через STT
+          const transcribedText = await transcribeViaGemini(audioBuffer, 'audio.webm', 'audio/webm', geminiKey);
+          
+          if (transcribedText && transcribedText.trim()) {
+            userText = transcribedText.trim();
+            console.log('[REPLY-STREAM] ✅ Converted AUDIO to TEXT via STT:', `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"`);
+            sendSSE('status', { type: 'transcribed', text: userText });
+          } else {
+            console.error('[REPLY-STREAM] ❌ STT returned empty text');
+            sendSSE('error', { error: 'stt_failed', message: 'Не удалось распознать речь' });
+            return;
+          }
+        } else {
+          console.error('[REPLY-STREAM] ❌ No Gemini API key for STT');
+          sendSSE('error', { error: 'stt_key_missing', message: 'Не настроен API ключ для распознавания речи' });
+          return;
+        }
+      } catch (e: any) {
+        console.error('[REPLY-STREAM] ❌ STT error:', e?.message || String(e));
+        sendSSE('error', { error: 'stt_error', message: `Ошибка распознавания речи: ${e?.message || 'Неизвестная ошибка'}` });
+        return;
+      }
+    } else {
+      console.log('[REPLY-STREAM] ✅ Received TEXT (not audio):', `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"`);
+    }
+  }
   
   // КРИТИЧЕСКИ ВАЖНО: Логируем историю (должна содержать только ТЕКСТ, расшифрованный через STT)
   console.log('[REPLY-STREAM] 📥 History items count:', history.length);
@@ -8203,10 +8266,22 @@ app.post('/api/tts-stream', async (req, res) => {
   try {
     const { text, voiceName, modelName } = req.body;
     
+    // КРИТИЧЕСКИ ВАЖНО: Проверяем, что text - это ТЕКСТ, а не аудио
     if (!text || typeof text !== 'string') {
       cleanup();
+      console.error('[GEMINI-TTS-LIVE] ❌ text is not a string:', typeof text);
       return res.status(400).json({ error: 'text_required', message: 'Текст для синтеза обязателен' });
     }
+    
+    // Проверяем, что это не base64 аудио
+    if (text.startsWith('data:audio') || text.startsWith('data:application/octet-stream') || 
+        (text.length > 1000 && /^[A-Za-z0-9+/=]+$/.test(text.replace(/\s/g, '')))) {
+      cleanup();
+      console.error('[GEMINI-TTS-LIVE] ❌ Received AUDIO instead of TEXT!');
+      return res.status(400).json({ error: 'audio_received', message: 'Received audio instead of text. TTS requires text input.' });
+    }
+    
+    console.log('[GEMINI-TTS-LIVE] ✅ Received TEXT (not audio):', `"${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`);
     
     // Минимальная длина текста
     if (text.length < 5) {
@@ -8601,10 +8676,18 @@ app.post('/api/tts-stream', async (req, res) => {
         
         console.log(`[GEMINI-TTS-STREAM] 🎤 Fallback SSE via ${finalModelNameFallback} (${p === '__direct__' ? 'direct' : 'proxy'})`);
         
+        // КРИТИЧЕСКИ ВАЖНО: Проверяем, что text - это ТЕКСТ, а не аудио (дополнительная проверка)
+        if (typeof text !== 'string' || text.startsWith('data:audio') || text.startsWith('data:application/octet-stream')) {
+          console.error('[GEMINI-TTS-STREAM] ❌ Invalid text in fallback:', typeof text);
+          continue;
+        }
+        
+        console.log('[GEMINI-TTS-STREAM] ✅ Using TEXT (not audio) in fallback:', `"${text.slice(0, 50)}${text.length > 50 ? '...' : ''}"`);
+        
         const requestBodyFallback = {
           contents: [{
             role: 'user',
-            parts: [{ text }]
+            parts: [{ text }] // ТОЛЬКО ТЕКСТ, не аудио!
           }],
           systemInstruction: {
             parts: [{
