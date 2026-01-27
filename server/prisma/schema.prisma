@@ -22,8 +22,11 @@ model Game {
   // Сценарий: дополнительные поля
   worldRules       String?    // правила мира (краткая версия для UI, до 500 символов)
   gameplayRules    String?    // правила игрового процесса (краткая версия для UI, до 500 символов)
-  worldRulesFull   String?    @db.Text // полные правила мира для ИИ (не отображаются в UI)
-  gameplayRulesFull String?   @db.Text // полные правила игрового процесса для ИИ (не отображаются в UI)
+  worldRulesFull   String?    @db.Text // полные правила мира для ИИ (не отображаются в UI) - DEPRECATED: используй worldRulesPdfPath
+  gameplayRulesFull String?   @db.Text // полные правила игрового процесса для ИИ (не отображаются в UI) - DEPRECATED: используй gameplayRulesPdfPath
+  worldRulesPdfPath String?    // путь к PDF файлу с правилами мира (хранится на диске)
+  gameplayRulesPdfPath String? // путь к PDF файлу с правилами игрового процесса (хранится на диске)
+  scenarioPdfPath  String?    // путь к PDF файлу со сценарием (хранится на диске)
   introduction     String?    // введение
   backstory        String?    // предыстория
   adventureHooks   String?    // зацепки приключения

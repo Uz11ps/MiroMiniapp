@@ -129,6 +129,14 @@ function createOpenAIClient(apiKey: string) {
   return new OpenAI({ apiKey });
 }
 
+const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
+const PDF_DIR = path.join(UPLOAD_DIR, 'pdfs'); // Директория для хранения PDF файлов
+try { 
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  fs.mkdirSync(PDF_DIR, { recursive: true });
+} catch {}
+
+// Для обычных загрузок используем memoryStorage
 const upload = multer({ 
   storage: multer.memoryStorage(), 
   limits: { 
@@ -136,8 +144,25 @@ const upload = multer({
     files: 10 // max 10 files
   } 
 });
-const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/server/uploads';
-try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
+
+// Для PDF файлов используем diskStorage
+const uploadPdf = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, PDF_DIR);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const ext = path.extname(file.originalname || '');
+      cb(null, `pdf-${uniqueSuffix}${ext}`);
+    }
+  }),
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB
+    files: 10
+  }
+});
+
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 // Прегенерация удалена - используем только streaming TTS
@@ -1332,17 +1357,40 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         // ОБРАБОТКА ДВУХ ФАЙЛОВ: ПРАВИЛА И СЦЕНАРИЙ
         // ═══════════════════════════════════════════════════════════════════════════════
         
-        // Функция для чтения файла
-        const readFile = async (file: Express.Multer.File): Promise<string> => {
-          const fileName = file.originalname || '';
-          const ext = fileName.toLowerCase().split('.').pop() || '';
+        // Сохраняем PDF файлы на диск
+        set({ progress: 'Сохранение файлов...' });
+        const rulesPdfPath = path.join(PDF_DIR, `rules-${Date.now()}-${Math.round(Math.random() * 1E9)}.pdf`);
+        const scenarioPdfPath = path.join(PDF_DIR, `scenario-${Date.now()}-${Math.round(Math.random() * 1E9)}.pdf`);
+        
+        fs.writeFileSync(rulesPdfPath, rulesFile.buffer);
+        fs.writeFileSync(scenarioPdfPath, scenarioFile.buffer);
+        
+        const rulesPdfUrl = `/uploads/pdfs/${path.basename(rulesPdfPath)}`;
+        const scenarioPdfUrl = `/uploads/pdfs/${path.basename(scenarioPdfPath)}`;
+        
+        // Функция для чтения файла из буфера или с диска
+        const readFile = async (file: Express.Multer.File | string): Promise<string> => {
+          let buffer: Buffer;
+          let fileName: string;
+          
+          if (typeof file === 'string') {
+            // Читаем с диска
+            buffer = fs.readFileSync(file);
+            fileName = file;
+          } else {
+            // Читаем из буфера
+            buffer = file.buffer;
+            fileName = file.originalname || '';
+          }
+          
+          const ext = path.extname(fileName).toLowerCase().slice(1) || fileName.toLowerCase().split('.').pop() || '';
           
           if (ext === 'txt') {
-            return file.buffer.toString('utf-8').replace(/\r/g, '\n');
+            return buffer.toString('utf-8').replace(/\r/g, '\n');
           } else {
             // Примечание: pdf-parse может выводить предупреждения "Warning: TT: undefined function" и "Warning: TT: invalid function id"
             // Это не критичные ошибки - они связаны с обработкой шрифтов TrueType в PDF и не влияют на извлечение текста
-            const parsed = await pdfParse(file.buffer).catch(() => null);
+            const parsed = await pdfParse(buffer).catch(() => null);
             if (parsed && parsed.text) {
               return (parsed.text || '').replace(/\r/g, '\n');
             }
@@ -1780,12 +1828,14 @@ ${sourceText}`;
           // Используем краткие версии для UI (они содержат весь смысл в 500 символах)
           if (worldRulesShort) {
             scenario.game.worldRules = worldRulesShort.length > 500 ? worldRulesShort.slice(0, 500) : worldRulesShort;
-            scenario.game.worldRulesFull = worldRulesFull || worldRulesShort; // Сохраняем полные правила для AI
+            // НЕ сохраняем полные правила в БД - они хранятся в PDF файле
+            scenario.game.worldRulesPdfPath = rulesPdfUrl; // Сохраняем путь к PDF
           }
           if (gameplayRulesShort) {
             scenario.game.gameplayRules = gameplayRulesShort.length > 500 ? gameplayRulesShort.slice(0, 500) : gameplayRulesShort;
-            scenario.game.gameplayRulesFull = gameplayRulesFull || gameplayRulesShort; // Сохраняем полные правила для AI
+            scenario.game.gameplayRulesPdfPath = rulesPdfUrl; // Сохраняем путь к PDF (оба типа правил в одном файле)
           }
+          scenario.game.scenarioPdfPath = scenarioPdfUrl; // Сохраняем путь к PDF сценария
           console.log(`[INGEST-IMPORT] Stage 2 complete: Rules extracted from ${rulesChunks.length} chunks with scenario context`);
           
           // ЭТАП 3: Анализ сценария игры
@@ -2227,8 +2277,9 @@ ${chunkShape}`;
             rules: g.rules || '',
             worldRules: g.worldRules || null,
             gameplayRules: g.gameplayRules || null,
-            worldRulesFull: g.worldRulesFull || null, // Полные правила для RAG
-            gameplayRulesFull: g.gameplayRulesFull || null, // Полные правила для RAG
+            worldRulesPdfPath: g.worldRulesPdfPath || null, // Путь к PDF с правилами мира
+            gameplayRulesPdfPath: g.gameplayRulesPdfPath || null, // Путь к PDF с правилами процесса
+            scenarioPdfPath: g.scenarioPdfPath || null, // Путь к PDF со сценарием
             introduction: g.introduction || null,
             backstory: g.backstory || null,
             adventureHooks: g.adventureHooks || null,
@@ -2246,11 +2297,11 @@ ${chunkShape}`;
         });
         
         // Индексируем правила для RAG (в фоне, не блокируем ответ)
-        if (g.worldRulesFull || g.gameplayRulesFull) {
+        if (g.worldRulesPdfPath || g.gameplayRulesPdfPath) {
           setImmediate(async () => {
             try {
               console.log(`[INGEST-IMPORT] Starting RAG indexing for game ${game.id}...`);
-              await indexRulesForRAG(prisma, game.id, g.worldRulesFull || null, g.gameplayRulesFull || null);
+              await indexRulesForRAG(prisma, game.id, g.worldRulesPdfPath || null, g.gameplayRulesPdfPath || null);
               console.log(`[INGEST-IMPORT] ✅ RAG indexing completed for game ${game.id}`);
             } catch (e) {
               console.error(`[INGEST-IMPORT] Failed to index rules for RAG:`, e);
@@ -2581,7 +2632,7 @@ app.post('/api/admin/games/:id/index-rules', async (req, res) => {
     }
     
     console.log(`[RAG] Manual indexing requested for game ${game.id}`);
-    await indexRulesForRAG(prisma, game.id, game.worldRulesFull || null, game.gameplayRulesFull || null);
+    await indexRulesForRAG(prisma, game.id, game.worldRulesPdfPath || null, game.gameplayRulesPdfPath || null);
     
     const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
     
@@ -2748,7 +2799,7 @@ app.post('/api/admin/games/:id/index-rules', async (req, res) => {
     }
     
     console.log(`[RAG] Manual indexing requested for game ${game.id}`);
-    await indexRulesForRAG(prisma, game.id, game.worldRulesFull || null, game.gameplayRulesFull || null);
+    await indexRulesForRAG(prisma, game.id, game.worldRulesPdfPath || null, game.gameplayRulesPdfPath || null);
     
     const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
     
@@ -9422,9 +9473,39 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
 }
 
 /**
- * Разбивает правила на чанки и индексирует их для RAG
+ * Читает текст из PDF файла
  */
-async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesFull: string | null, gameplayRulesFull: string | null): Promise<void> {
+async function readPdfText(pdfPath: string | null): Promise<string | null> {
+  if (!pdfPath) return null;
+  
+  try {
+    // Если путь относительный (начинается с /uploads), преобразуем в абсолютный
+    const absolutePath = pdfPath.startsWith('/uploads') 
+      ? path.join(UPLOAD_DIR, pdfPath.replace('/uploads/', ''))
+      : pdfPath;
+    
+    if (!fs.existsSync(absolutePath)) {
+      console.warn(`[RAG] PDF file not found: ${absolutePath}`);
+      return null;
+    }
+    
+    const buffer = fs.readFileSync(absolutePath);
+    const parsed = await pdfParse(buffer).catch(() => null);
+    if (parsed && parsed.text) {
+      return (parsed.text || '').replace(/\r/g, '\n');
+    }
+    return null;
+  } catch (e) {
+    console.error(`[RAG] Failed to read PDF ${pdfPath}:`, e);
+    return null;
+  }
+}
+
+/**
+ * Разбивает правила на чанки и индексирует их для RAG
+ * Теперь читает из PDF файлов, а не из БД
+ */
+async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesPdfPath: string | null, gameplayRulesPdfPath: string | null): Promise<void> {
   try {
     // Удаляем старые чанки для этой игры
     await prisma.ruleChunk.deleteMany({ where: { gameId } });
@@ -10256,12 +10337,17 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
       }
       if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
     } else {
-      // Fallback: используем полные правила (если RAG еще не настроен)
-      const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
-      const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
+      // Fallback: читаем из PDF файлов (если RAG еще не настроен)
+      const worldRulesText = await readPdfText((game as any)?.worldRulesPdfPath || null);
+      const gameplayRulesText = await readPdfText((game as any)?.gameplayRulesPdfPath || null);
       const rulesParts: string[] = [];
-      if (worldRulesForAI) rulesParts.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesForAI.slice(0, 50000)}`); // Ограничиваем до 50K символов для безопасности
-      if (gameplayRulesForAI) rulesParts.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesForAI.slice(0, 50000)}`);
+      if (worldRulesText) rulesParts.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesText.slice(0, 50000)}`); // Ограничиваем до 50K символов для безопасности
+      if (gameplayRulesText) rulesParts.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesText.slice(0, 50000)}`);
+      // Если PDF нет, используем краткие версии из БД
+      if (rulesParts.length === 0) {
+        if (game.worldRules) rulesParts.push(`Правила мира: ${game.worldRules}`);
+        if (game.gameplayRules) rulesParts.push(`Правила процесса: ${game.gameplayRules}`);
+      }
       if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
     }
   }
