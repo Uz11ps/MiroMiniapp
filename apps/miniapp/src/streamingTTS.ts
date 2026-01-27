@@ -19,6 +19,7 @@ export function stopStreamingTTS() {
     currentAbortController.abort();
     currentAbortController = null;
   }
+  // Останавливаем все активные источники синхронно
   activeSources.forEach(source => {
     try {
       source.stop();
@@ -28,6 +29,10 @@ export function stopStreamingTTS() {
     }
   });
   activeSources = [];
+  // Также останавливаем AudioQueue если он активен
+  if (globalAudioQueue) {
+    globalAudioQueue.stop();
+  }
   console.log('[STREAMING-TTS] Playback stopped and cleared');
 }
 

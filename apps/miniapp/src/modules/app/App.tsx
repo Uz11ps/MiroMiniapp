@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, NavLink, RouteObject, useNavigate, useRoutes, useParams, useLocation } from 'react-router-dom';
-import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, getAudioQueue, initAudioContext, playStreamingTTS } from '../../api';
+import { fetchFriends, fetchGame, fetchGames, fetchProfile, sendFeedback, createUser, findUserByTgId, getChatHistory, saveChatHistory, resetChatHistory, transcribeAudio, createFriendInvite, addFriendByUsername, connectRealtime, inviteToLobby, createLobby, joinLobby, startLobby, getLobby, kickFromLobby, reinviteToLobby, ttsSynthesize, ttsAnalyzeText, generateBackground, rollDiceApi, startEngineSession, getEngineSession, fetchLocations, getMyLobbies, leaveLobby, updateCharacter, stopStreamingTTS, stopAudioQueue, getAudioQueue, initAudioContext, playStreamingTTS } from '../../api';
 
 // CSS импортируется в main.tsx, не нужно дублировать здесь
 
@@ -573,11 +573,26 @@ const GameChat: React.FC = () => {
               }
               return h as any;
             });
+            // Проверяем последнее сообщение от игрока (бросок кубиков) - останавливаем озвучку
+            const lastMe = [...h].reverse().find((m: any) => m.from === 'me' && m.text && m.text.includes('🎲'));
+            if (lastMe?.text) {
+              // Останавливаем озвучку при броске кубиков от игрока
+              try {
+                stopStreamingTTS();
+                stopAudioQueue();
+                speakingInFlightRef.current = false;
+                activeSpeakSeqRef.current = 0;
+                console.log('[TTS-CLIENT] Stopped audio due to player dice roll in lobby');
+              } catch (e) {
+                console.warn('[TTS-CLIENT] Error stopping audio:', e);
+              }
+            }
             const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
             if (lastBot?.text) {
               // Останавливаем предыдущую озвучку перед новой
               try {
                 stopStreamingTTS();
+                stopAudioQueue();
                 speakingInFlightRef.current = false;
                 activeSpeakSeqRef.current = 0;
               } catch (e) {
@@ -621,11 +636,26 @@ const GameChat: React.FC = () => {
         const h = await getChatHistory(id, lobbyId);
         if (Array.isArray(h)) {
           setMessages(h as any);
+          // Проверяем последнее сообщение от игрока (бросок кубиков) - останавливаем озвучку
+          const lastMe = [...h].reverse().find((m: any) => m.from === 'me' && m.text && m.text.includes('🎲'));
+          if (lastMe?.text) {
+            // Останавливаем озвучку при броске кубиков от игрока
+            try {
+              stopStreamingTTS();
+              stopAudioQueue();
+              speakingInFlightRef.current = false;
+              activeSpeakSeqRef.current = 0;
+              console.log('[TTS-CLIENT] Stopped audio due to player dice roll in lobby (fallback polling)');
+            } catch (e) {
+              console.warn('[TTS-CLIENT] Error stopping audio:', e);
+            }
+          }
           const lastBot = [...h].reverse().find((m: any) => m.from === 'bot');
           if (lastBot?.text) {
             // Останавливаем предыдущую озвучку перед новой
             try {
               stopStreamingTTS();
+              stopAudioQueue();
               speakingInFlightRef.current = false;
               activeSpeakSeqRef.current = 0;
             } catch (e) {
@@ -664,6 +694,7 @@ const GameChat: React.FC = () => {
     // КРИТИЧЕСКИ ВАЖНО: Останавливаем текущее воспроизведение TTS при отправке нового сообщения
     try {
       stopStreamingTTS();
+      stopAudioQueue();
       // Сбрасываем флаги воспроизведения
       speakingInFlightRef.current = false;
       activeSpeakSeqRef.current = 0;
@@ -1183,9 +1214,11 @@ const GameChat: React.FC = () => {
                 if (manual.length > 0) payload.manualResults = manual;
                 if (lobbyId) payload.lobbyId = lobbyId;
                 
-                // Останавливаем предыдущую озвучку при действии игрока (бросок кубиков)
+                // КРИТИЧЕСКИ ВАЖНО: Останавливаем предыдущую озвучку при действии игрока (бросок кубиков)
+                // Вызываем синхронно и сразу, до вызова API, чтобы остановить озвучку на телефонах
                 try {
                   stopStreamingTTS();
+                  stopAudioQueue();
                   speakingInFlightRef.current = false;
                   activeSpeakSeqRef.current = 0;
                   console.log('[TTS-CLIENT] Stopped all audio streams due to dice roll');
