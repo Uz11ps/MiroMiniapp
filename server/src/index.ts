@@ -5792,94 +5792,121 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
     
     console.log('[GEMINI-STT] Using MIME type:', geminiMime);
     
-    // Используем только прямой запрос без прокси
+    // Используем тот же подход что и для TTS: прокси, v1beta, retry логика
+    const proxies = parseGeminiProxies();
+    const attempts = proxies.length ? proxies : ['__direct__'];
     const timeoutMs = 60000; // 60 секунд для распознавания речи
+    const maxRetries = 3;
+    const retryableStatuses = [503, 429, 500, 502]; // Перегружен, слишком много запросов, внутренняя ошибка
     
-    try {
-      console.log('[GEMINI-STT] Sending direct request (no proxy)');
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      
-      const body = {
-        contents: [{
-          parts: [{
-            inlineData: {
-              mimeType: geminiMime,
-              data: base64Audio
-            }
-          }, {
-            text: 'Распознай речь на русском языке из этого аудио. Верни только распознанный текст без дополнительных комментариев или объяснений.'
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.1,
-        }
-      };
-      
-      // Используем gemini-1.5-flash-002 для STT через v1 API
-      const modelName = process.env.GEMINI_STT_MODEL || 'gemini-1.5-flash-002';
-      const apiVersion = 'v1'; // Используем v1 API
-      const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
-      console.log('[GEMINI-STT] Sending request to:', url);
-      
-      const r = await undiciFetch(url, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 
-          'Content-Type': 'application/json', 
-          'X-Goog-Api-Key': apiKey 
-        },
-        body: JSON.stringify(body),
-      });
-      clearTimeout(timer);
-      
-      if (!r.ok) {
-        const errorText = await r.text().catch(() => '');
-        let errorData: any = {};
+    // Используем ту же модель что и для текста (gemini-2.5-pro) или можно выбрать через переменную окружения
+    const modelName = process.env.GEMINI_STT_MODEL || 'gemini-2.5-pro';
+    const apiVersion = 'v1beta'; // Используем v1beta как в TTS
+    const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+    
+    const body = {
+      contents: [{
+        parts: [{
+          inlineData: {
+            mimeType: geminiMime,
+            data: base64Audio
+          }
+        }, {
+          text: 'Распознай речь на русском языке из этого аудио. Верни только распознанный текст без дополнительных комментариев или объяснений.'
+        }]
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1024,
+      }
+    };
+    
+    let lastErr: unknown = null;
+    
+    for (const p of attempts) {
+      for (let retry = 0; retry < maxRetries; retry++) {
         try {
-          if (errorText) errorData = JSON.parse(errorText) || {};
-        } catch {}
-        
-        console.error('[GEMINI-STT] ❌ HTTP error:', r.status, {
-          statusText: r.statusText,
-          error: errorData.error || errorText.slice(0, 500)
-        });
-        
-        throw new Error(`Gemini API error: ${r.status} ${errorData.error?.message || errorText.slice(0, 200)}`);
+          if (retry > 0) {
+            const delay = Math.min(1000 * Math.pow(2, retry - 1), 10000); // Экспоненциальная задержка: 1s, 2s, 4s (макс 10s)
+            console.log(`[GEMINI-STT] Retry ${retry}/${maxRetries - 1} for ${p === '__direct__' ? 'direct' : 'proxy'} after ${delay}ms delay`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+          
+          console.log(`[GEMINI-STT] Trying ${p === '__direct__' ? 'direct' : 'proxy'} (attempt ${retry + 1}/${maxRetries})`);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), Math.max(60000, timeoutMs));
+          const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+          
+          const r = await undiciFetch(url, {
+            method: 'POST',
+            dispatcher,
+            signal: controller.signal,
+            headers: { 
+              'Content-Type': 'application/json', 
+              'X-Goog-Api-Key': apiKey 
+            },
+            body: JSON.stringify(body),
+          });
+          clearTimeout(timer);
+          
+          if (!r.ok) {
+            const errorText = await r.text().catch(() => '');
+            let errorData: any = {};
+            try {
+              if (errorText) errorData = JSON.parse(errorText) || {};
+            } catch {}
+            
+            const status = r.status;
+            console.error('[GEMINI-STT] HTTP', status, errorText.slice(0, 200));
+            
+            // Если это retryable ошибка и есть попытки - повторяем
+            if (retryableStatuses.includes(status) && retry < maxRetries - 1) {
+              lastErr = errorData.error || errorText || r.statusText;
+              continue; // Продолжаем retry
+            }
+            
+            // Если не retryable или закончились попытки - переходим к следующему прокси
+            lastErr = errorData.error || errorText || r.statusText;
+            break; // Выходим из retry цикла, переходим к следующему прокси
+          }
+          
+          const data = await r.json() as any;
+          console.log('[GEMINI-STT] Response structure:', {
+            hasCandidates: !!data?.candidates,
+            candidatesCount: data?.candidates?.length || 0,
+            hasContent: !!data?.candidates?.[0]?.content,
+            partsCount: data?.candidates?.[0]?.content?.parts?.length || 0
+          });
+          
+          // Проверяем на ошибки в ответе
+          if (data?.promptFeedback?.blockReason) {
+            console.error('[GEMINI-STT] ❌ Content blocked:', data.promptFeedback.blockReason);
+            throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
+          }
+          
+          const parts = data?.candidates?.[0]?.content?.parts || [];
+          const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+          
+          if (text) {
+            console.log('[GEMINI-STT] ✅ Transcribed successfully, text length:', text.length, 'preview:', text.slice(0, 100));
+            return text;
+          }
+          
+          lastErr = 'empty_text';
+          break; // Успешно получили ответ, но он пустой - не retry
+        } catch (e: any) {
+          lastErr = e;
+          console.error('[GEMINI-STT] Error:', e?.message || String(e));
+          // Если это не последняя попытка и ошибка может быть временной - retry
+          if (retry < maxRetries - 1 && (e instanceof Error && (e.message.includes('aborted') || e.message.includes('timeout')))) {
+            continue; // Retry для таймаутов
+          }
+          break; // Выходим из retry цикла
+        }
       }
-      
-      const data = await r.json() as any;
-      console.log('[GEMINI-STT] Response structure:', {
-        hasCandidates: !!data?.candidates,
-        candidatesCount: data?.candidates?.length || 0,
-        hasContent: !!data?.candidates?.[0]?.content,
-        partsCount: data?.candidates?.[0]?.content?.parts?.length || 0
-      });
-      
-      // Проверяем на ошибки в ответе
-      if (data?.promptFeedback?.blockReason) {
-        console.error('[GEMINI-STT] ❌ Content blocked:', data.promptFeedback.blockReason);
-        throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
-      }
-      
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
-      
-      if (text) {
-        console.log('[GEMINI-STT] ✅ Transcribed successfully, text length:', text.length, 'preview:', text.slice(0, 100));
-        return text;
-      } else {
-        console.warn('[GEMINI-STT] ⚠️ No text in response, full response:', JSON.stringify(data).slice(0, 500));
-        throw new Error('No text in Gemini response');
-      }
-    } catch (e: any) {
-      console.error('[GEMINI-STT] ❌ Error:', e?.message || String(e));
-      if (e?.stack) console.error('[GEMINI-STT] Stack:', e.stack);
-      throw e;
     }
     
-    console.warn('[GEMINI-STT] ⚠️ All attempts failed, returning empty string');
-    return '';
+    throw lastErr || new Error('gemini_stt_failed');
   } catch (e: any) {
     console.error('[GEMINI-STT] ❌ Fatal error:', e?.message || String(e));
     if (e?.stack) console.error('[GEMINI-STT] Stack:', e.stack);
