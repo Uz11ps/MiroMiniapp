@@ -5204,8 +5204,25 @@ app.post('/api/chat/reply-stream', async (req, res) => {
   let userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
   
+    // Настраиваем SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Отключает буферизацию Nginx
+    if (res.flushHeaders) {
+      res.flushHeaders();
+    }
+    
+    const sendSSE = (event: string, data: any) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      if (res.flush && typeof res.flush === 'function') {
+        res.flush();
+      }
+    };
+  
   // КРИТИЧЕСКИ ВАЖНО: Проверяем, это текст или аудио (base64)
-  // Если аудио - преобразуем через STT в текст
+  // Если аудио - преобразуем через STT в текст (STT - это метод получения текста из аудио)
   if (userText && typeof userText === 'string') {
     // Проверяем, это base64 аудио или текст
     const isAudioBase64 = userText.startsWith('data:audio') || 
@@ -5214,6 +5231,7 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     
     if (isAudioBase64) {
       console.log('[REPLY-STREAM] 🎤 Detected AUDIO in userText, converting to TEXT via STT...');
+      sendSSE('status', { type: 'transcribing' });
       try {
         const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
         if (geminiKey) {
@@ -5221,7 +5239,7 @@ app.post('/api/chat/reply-stream', async (req, res) => {
           const base64Data = userText.includes(',') ? userText.split(',')[1] : userText;
           const audioBuffer = Buffer.from(base64Data, 'base64');
           
-          // Преобразуем аудио в текст через STT
+          // Преобразуем аудио в текст через STT (STT - это метод получения текста из аудио)
           const transcribedText = await transcribeViaGemini(audioBuffer, 'audio.webm', 'audio/webm', geminiKey);
           
           if (transcribedText && transcribedText.trim()) {
@@ -5250,23 +5268,6 @@ app.post('/api/chat/reply-stream', async (req, res) => {
   
   // КРИТИЧЕСКИ ВАЖНО: Логируем историю (должна содержать только ТЕКСТ, расшифрованный через STT)
   console.log('[REPLY-STREAM] 📥 History items count:', history.length);
-  
-    // Настраиваем SSE
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Отключает буферизацию Nginx
-    if (res.flushHeaders) {
-      res.flushHeaders();
-    }
-    
-    const sendSSE = (event: string, data: any) => {
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-      if (res.flush && typeof res.flush === 'function') {
-        res.flush();
-      }
-    };
   
   try {
     const prisma = getPrisma();
