@@ -4273,6 +4273,8 @@ app.post('/api/chat/reply', async (req, res) => {
   const lobbyId = typeof req.body?.lobbyId === 'string' ? req.body.lobbyId : undefined;
   const userText = typeof req.body?.userText === 'string' ? req.body.userText : '';
   const history = Array.isArray(req.body?.history) ? req.body.history : [] as Array<{ from: 'bot' | 'me'; text: string }>;
+  const characterId = typeof req.body?.characterId === 'string' ? req.body.characterId : undefined;
+  const characterName = typeof req.body?.characterName === 'string' ? req.body.characterName : undefined;
   const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
   try {
     const prisma = getPrisma();
@@ -4353,9 +4355,15 @@ app.post('/api/chat/reply', async (req, res) => {
     ]);
     const playable = (game?.characters || []).filter((c: any) => c.isPlayable);
     const sys = getSysPrompt();
+    // Добавляем информацию о персонаже игрока в системный промпт
+    let characterInfo = '';
+    if (characterName) {
+      characterInfo = `\n\nВАЖНО: Игрок управляет персонажем по имени "${characterName}". Всегда обращайся к персонажу по его имени, когда описываешь его действия или обращаешься к нему. Например: "${characterName} делает...", "${characterName}, ты видишь...", "Обращаясь к ${characterName}, мастер говорит...". Используй имя персонажа естественно в тексте, не только в начале предложения.`;
+    }
+    const sysWithCharacter = sys + characterInfo +
       'Всегда пиши кинематографично, живо и образно, будто зритель стоит посреди сцены. ' +
       'Всегда учитывай локацию и мини-промпт из сценария — это основа сюжета. ' +
-      'Играй от лица рассказчика, а не игрока: избегай фраз “вы решаете”, “вы начинаете”, “вы выбираете”. ' +
+      'Играй от лица рассказчика, а не игрока: избегай фраз "вы решаете", "вы начинаете", "вы выбираете". ' +
       'Описывай мир так, будто он реагирует сам: свет мерцает, стены шепчут, NPC ведут себя естественно. ' +
       'Если в сцене есть NPC — обязательно отыгрывай их короткими репликами, характером, эмоциями и настроением. Каждый NPC должен говорить в своём стиле (см. persona). ' +
       'Если в сцене есть проверки d20 — объявляй их естественно, как часть происходящего. ' +
@@ -4578,6 +4586,8 @@ app.post('/api/chat/reply', async (req, res) => {
             userId: lobbyId ? undefined : (await getUserId()),
             history: baseHistory,
             cachedGameSession: cachedGameSession, // Передаем кэшированную сессию
+            characterId, // Передаем ID персонажа
+            characterName, // Передаем имя персонажа
           });
         }
       } catch {}
@@ -4709,7 +4719,7 @@ app.post('/api/chat/reply', async (req, res) => {
       }
       
       const { text: generatedText } = await generateChatCompletion({
-        systemPrompt: sys,
+        systemPrompt: sysWithCharacter,
         userPrompt: enhancedUserPrompt + realExitsInfo,
         history: baseHistory
       });
@@ -5660,17 +5670,35 @@ app.post('/api/engine/reset', async (req, res) => {
 
 app.post('/api/chat/transcribe', upload.single('audio'), async (req, res) => {
   try {
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
     if (!req.file || !req.file.buffer) return res.status(200).json({ text: '', error: 'no_audio' });
+    
+    // Пробуем Gemini в первую очередь (если настроен)
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    if (geminiKey) {
+      try {
+        const gtext = await transcribeViaGemini(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/webm', geminiKey);
+        if (gtext && gtext.trim()) {
+          console.log('[TRANSCRIBE] ✅ Gemini STT succeeded');
+          return res.json({ text: gtext });
+        }
+      } catch (e) {
+        console.error('[TRANSCRIBE] Gemini STT failed:', e);
+      }
+    }
+    
+    // Fallback на Yandex
     const yandexKey = process.env.YANDEX_TTS_API_KEY || process.env.YC_TTS_API_KEY || process.env.YC_API_KEY || process.env.YANDEX_API_KEY;
     if (yandexKey) {
       try {
         const ytext = await transcribeYandex(req.file.buffer as Buffer, req.file.originalname || 'audio', req.file.mimetype || 'audio/ogg', yandexKey);
         if (ytext && ytext.trim()) return res.json({ text: ytext });
       } catch (e) {
-        console.error('Yandex STT failed:', e);
+        console.error('[TRANSCRIBE] Yandex STT failed:', e);
       }
     }
+    
+    // Fallback на OpenAI Whisper
+    const apiKey = process.env.OPENAI_API_KEY || process.env.CHAT_GPT_TOKEN || process.env.GPT_API_KEY;
     if (!apiKey) return res.status(200).json({ text: '', error: 'no_api_key' });
     const client = createOpenAIClient(apiKey);
     const tryModels = [
@@ -5731,6 +5759,84 @@ async function transcribeViaHttp(buffer: Buffer, filename: string, mime: string,
   }
   console.error('HTTP fallback transcription failed:', lastErr);
   return '';
+}
+
+async function transcribeViaGemini(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
+  try {
+    // Gemini 1.5 Pro и новее поддерживают мультимодальные запросы с аудио
+    // Конвертируем аудио в base64
+    const base64Audio = buffer.toString('base64');
+    
+    // Определяем MIME тип для Gemini
+    let geminiMime = 'audio/webm';
+    if (mime.includes('mp4') || mime.includes('m4a')) geminiMime = 'audio/mp4';
+    else if (mime.includes('ogg')) geminiMime = 'audio/ogg';
+    else if (mime.includes('wav')) geminiMime = 'audio/wav';
+    else if (mime.includes('mpeg') || mime.includes('mp3')) geminiMime = 'audio/mpeg';
+    
+    const proxies = parseGeminiProxies();
+    const attempts = proxies.length ? proxies : ['__direct__'];
+    const timeoutMs = 60000; // 60 секунд для распознавания речи
+    
+    for (const p of attempts) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
+        
+        const body = {
+          contents: [{
+            parts: [{
+              inlineData: {
+                mimeType: geminiMime,
+                data: base64Audio
+              }
+            }, {
+              text: 'Распознай речь на русском языке. Верни только текст без дополнительных комментариев.'
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 1024,
+          }
+        };
+        
+        const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent';
+        const r = await undiciFetch(url, {
+          method: 'POST',
+          dispatcher,
+          signal: controller.signal,
+          headers: { 
+            'Content-Type': 'application/json', 
+            'X-Goog-Api-Key': apiKey 
+          },
+          body: JSON.stringify(body),
+        });
+        clearTimeout(timer);
+        
+        if (!r.ok) {
+          const errorText = await r.text().catch(() => '');
+          console.error('[GEMINI-STT] HTTP error:', r.status, errorText.slice(0, 200));
+          continue; // Пробуем следующий прокси
+        }
+        
+        const data = await r.json() as any;
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+        if (text) {
+          console.log('[GEMINI-STT] ✅ Transcribed:', text.slice(0, 100));
+          return text;
+        }
+      } catch (e) {
+        console.error('[GEMINI-STT] Error:', e);
+        if (p === attempts[attempts.length - 1]) throw e; // Если это последний прокси, пробрасываем ошибку
+      }
+    }
+    return '';
+  } catch (e) {
+    console.error('[GEMINI-STT] Fatal error:', e);
+    return '';
+  }
 }
 
 async function transcribeYandex(buffer: Buffer, filename: string, mime: string, apiKey: string): Promise<string> {
@@ -9136,6 +9242,8 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
   userId?: string | null;
   history?: Array<{ from?: string; text?: string }>;
   cachedGameSession?: any; // ОПТИМИЗАЦИЯ: Передаем кэшированную сессию
+  characterId?: string; // ID персонажа игрока
+  characterName?: string; // Имя персонажа игрока
 }): Promise<string> {
   const { gameId, lobbyId, userId, cachedGameSession } = params;
   let sess: any = cachedGameSession;
@@ -9218,6 +9326,7 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     buttons,
     triggers,
     isGameOver,
+    playerCharacter: params.characterName ? { name: params.characterName, id: params.characterId } : undefined,
   };
   const gptContext = [
     `SCENE_JSON:\n${JSON.stringify(sceneJson, null, 2)}`,

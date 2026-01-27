@@ -727,6 +727,9 @@ const GameChat: React.FC = () => {
       if (self.tgId) body.tgId = self.tgId;
       if (self.tgUsername) body.tgUsername = self.tgUsername;
       if (!body.userId && !body.tgId && !body.tgUsername) body.deviceId = getDeviceIdLocal();
+      // передаем информацию о персонаже для использования в контексте ИИ
+      if (selectedCharId) body.characterId = selectedCharId;
+      if (charName) body.characterName = charName;
       setIsGenerating(true); // Показываем "генерация"
       
       // Генерируем текст, затем аудио, затем отдаем вместе
@@ -1160,7 +1163,7 @@ const GameChat: React.FC = () => {
           onClick={() => selectedCharId && navigate(`/game/${id}/character/${selectedCharId}`)}
           style={{ 
             position: 'fixed', 
-            bottom: 80, 
+            bottom: 150, 
             right: 16, 
             zIndex: 100,
             cursor: 'pointer',
