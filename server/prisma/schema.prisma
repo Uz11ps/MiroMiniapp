@@ -45,6 +45,7 @@ model Game {
   // Отношения
   locations    Location[]
   characters   Character[]
+  ruleChunks   RuleChunk[] // Чанки правил для RAG
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
@@ -201,6 +202,23 @@ model GameSession {
   state          Json?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+}
+
+// Чанки правил для RAG (Retrieval Augmented Generation)
+model RuleChunk {
+  gameId        String   // ID игры
+  chunkType     String   // 'worldRules' или 'gameplayRules'
+  chunkIndex    Int      // Порядковый номер чанка
+  content       String   @db.Text // Содержимое чанка
+  keywords      String[] // Ключевые слова для быстрого поиска (локации, персонажи, механики)
+  summary       String?  @db.Text // Краткое резюме чанка для семантического поиска
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  game          Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  
+  @@unique([gameId, chunkType, chunkIndex])
+  @@index([gameId, chunkType])
 }
 
 // Персонажи (игровые и NPC)

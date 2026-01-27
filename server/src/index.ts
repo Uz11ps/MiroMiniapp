@@ -2227,6 +2227,8 @@ ${chunkShape}`;
             rules: g.rules || '',
             worldRules: g.worldRules || null,
             gameplayRules: g.gameplayRules || null,
+            worldRulesFull: g.worldRulesFull || null, // Полные правила для RAG
+            gameplayRulesFull: g.gameplayRulesFull || null, // Полные правила для RAG
             introduction: g.introduction || null,
             backstory: g.backstory || null,
             adventureHooks: g.adventureHooks || null,
@@ -2242,6 +2244,19 @@ ${chunkShape}`;
             deathCondition: g.deathCondition || null,
           },
         });
+        
+        // Индексируем правила для RAG (в фоне, не блокируем ответ)
+        if (g.worldRulesFull || g.gameplayRulesFull) {
+          setImmediate(async () => {
+            try {
+              console.log(`[INGEST-IMPORT] Starting RAG indexing for game ${game.id}...`);
+              await indexRulesForRAG(prisma, game.id, g.worldRulesFull || null, g.gameplayRulesFull || null);
+              console.log(`[INGEST-IMPORT] ✅ RAG indexing completed for game ${game.id}`);
+            } catch (e) {
+              console.error(`[INGEST-IMPORT] Failed to index rules for RAG:`, e);
+            }
+          });
+        }
         const keyToId = new Map<string, string>();
         // Сначала создаем все основные локации (без parentKey)
         const locationsWithoutParent = scenario.locations.filter((l: any) => !l.parentKey);
@@ -2552,6 +2567,35 @@ ${loc.description}
   }
 });
 
+// Endpoint для ручной индексации правил для RAG
+app.post('/api/admin/games/:id/index-rules', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({ 
+      where: { id: req.params.id },
+      select: { id: true, worldRulesFull: true, gameplayRulesFull: true }
+    });
+    
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+    
+    console.log(`[RAG] Manual indexing requested for game ${game.id}`);
+    await indexRulesForRAG(prisma, game.id, game.worldRulesFull || null, game.gameplayRulesFull || null);
+    
+    const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
+    
+    res.json({ 
+      success: true, 
+      message: `Rules indexed successfully`,
+      chunksCount: chunkCount
+    });
+  } catch (e: any) {
+    console.error('[RAG] Manual indexing failed:', e);
+    res.status(500).json({ error: 'indexing_failed', details: String(e) });
+  }
+});
+
 app.get('/api/admin/ingest-import/:id', async (req, res) => {
   const j = ingestJobs.get(req.params.id);
   if (!j) return res.status(404).json({ error: 'not_found' });
@@ -2687,6 +2731,35 @@ app.post('/api/admin/locations/:id/generate-background', async (req, res) => {
     return res.json({ ok: true, url });
   } catch (e) {
     return res.status(500).json({ error: 'generate_background_failed', details: String(e) });
+  }
+});
+
+// Endpoint для ручной индексации правил для RAG
+app.post('/api/admin/games/:id/index-rules', async (req, res) => {
+  try {
+    const prisma = getPrisma();
+    const game = await prisma.game.findUnique({ 
+      where: { id: req.params.id },
+      select: { id: true, worldRulesFull: true, gameplayRulesFull: true }
+    });
+    
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+    
+    console.log(`[RAG] Manual indexing requested for game ${game.id}`);
+    await indexRulesForRAG(prisma, game.id, game.worldRulesFull || null, game.gameplayRulesFull || null);
+    
+    const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
+    
+    res.json({ 
+      success: true, 
+      message: `Rules indexed successfully`,
+      chunksCount: chunkCount
+    });
+  } catch (e: any) {
+    console.error('[RAG] Manual indexing failed:', e);
+    res.status(500).json({ error: 'indexing_failed', details: String(e) });
   }
 });
 
@@ -9348,6 +9421,484 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
   return { text: pick, fallback: true };
 }
 
+/**
+ * Разбивает правила на чанки и индексирует их для RAG
+ */
+async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesFull: string | null, gameplayRulesFull: string | null): Promise<void> {
+  try {
+    // Удаляем старые чанки для этой игры
+    await prisma.ruleChunk.deleteMany({ where: { gameId } });
+    
+    const chunkSize = 10000; // Размер чанка: ~10K символов (оптимально для семантического поиска)
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    // Обрабатываем правила мира
+    if (worldRulesFull && worldRulesFull.length > 0) {
+      const chunks: string[] = [];
+      for (let i = 0; i < worldRulesFull.length; i += chunkSize) {
+        chunks.push(worldRulesFull.slice(i, i + chunkSize));
+      }
+      
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunk = chunks[idx];
+        // Извлекаем ключевые слова из чанка (локации, персонажи, механики)
+        const keywords = extractKeywords(chunk);
+        // Создаем краткое резюме для семантического поиска
+        let summary = chunk.slice(0, 500); // Fallback: первые 500 символов
+        
+        if (geminiKey && chunk.length > 200) {
+          try {
+            const summaryResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник, который создает краткие резюме частей правил игры для семантического поиска.',
+              userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента правил мира:\n\n${chunk.slice(0, 5000)}`,
+              history: []
+            });
+            if (summaryResult?.text) {
+              summary = summaryResult.text.trim().slice(0, 500);
+            }
+          } catch (e) {
+            console.warn('[RAG] Failed to generate summary for worldRules chunk:', e);
+          }
+        }
+        
+        await prisma.ruleChunk.create({
+          data: {
+            gameId,
+            chunkType: 'worldRules',
+            chunkIndex: idx,
+            content: chunk,
+            keywords,
+            summary
+          }
+        });
+      }
+    }
+    
+    // Обрабатываем правила игрового процесса
+    if (gameplayRulesFull && gameplayRulesFull.length > 0) {
+      const chunks: string[] = [];
+      for (let i = 0; i < gameplayRulesFull.length; i += chunkSize) {
+        chunks.push(gameplayRulesFull.slice(i, i + chunkSize));
+      }
+      
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunk = chunks[idx];
+        const keywords = extractKeywords(chunk);
+        let summary = chunk.slice(0, 500);
+        
+        if (geminiKey && chunk.length > 200) {
+          try {
+            const summaryResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник, который создает краткие резюме частей правил игры для семантического поиска.',
+              userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента правил игрового процесса:\n\n${chunk.slice(0, 5000)}`,
+              history: []
+            });
+            if (summaryResult?.text) {
+              summary = summaryResult.text.trim().slice(0, 500);
+            }
+          } catch (e) {
+            console.warn('[RAG] Failed to generate summary for gameplayRules chunk:', e);
+          }
+        }
+        
+        await prisma.ruleChunk.create({
+          data: {
+            gameId,
+            chunkType: 'gameplayRules',
+            chunkIndex: idx,
+            content: chunk,
+            keywords,
+            summary
+          }
+        });
+      }
+    }
+    
+    console.log(`[RAG] ✅ Indexed rules for game ${gameId}`);
+  } catch (e) {
+    console.error('[RAG] Failed to index rules:', e);
+  }
+}
+
+/**
+ * Извлекает ключевые слова из текста (локации, персонажи, механики)
+ */
+function extractKeywords(text: string): string[] {
+  const keywords: Set<string> = new Set();
+  const lowerText = text.toLowerCase();
+  
+  // Паттерны для извлечения ключевых слов
+  const patterns = [
+    // Локации (после слов "в", "на", "под", "над")
+    /\b(?:в|на|под|над|около|возле|у)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)*)/g,
+    // Персонажи (после слов "персонаж", "NPC", "враг", "союзник")
+    /\b(?:персонаж|NPC|враг|союзник|маг|воин|жрец|вор|бард|друид|паладин|рейнджер|монах|колдун|волшебник|жрец|варвар|боец|мастер|игрок)\s+([А-ЯЁ][а-яё]+)/g,
+    // Механики (проверки, броски, урон)
+    /\b(?:проверка|бросок|урон|лечение|состояние|эффект|способность|заклинание|оружие|броня|AC|HP|STR|DEX|CON|INT|WIS|CHA|d20|d4|d6|d8|d10|d12|d100)\b/gi,
+  ];
+  
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(lowerText)) !== null) {
+      const keyword = match[1] || match[0];
+      if (keyword && keyword.length > 2 && keyword.length < 50) {
+        keywords.add(keyword.toLowerCase());
+      }
+    }
+  }
+  
+  return Array.from(keywords).slice(0, 20); // Максимум 20 ключевых слов
+}
+
+/**
+ * Находит релевантные чанки правил на основе текущей сцены (RAG)
+ */
+async function findRelevantRuleChunks(
+  prisma: ReturnType<typeof getPrisma>,
+  gameId: string,
+  sceneContext: { locationTitle?: string; locationDescription?: string; npcNames?: string[]; characterNames?: string[] }
+): Promise<{ worldRules: string; gameplayRules: string }> {
+  try {
+    const searchTerms: string[] = [];
+    
+    // Добавляем ключевые слова из контекста сцены
+    if (sceneContext.locationTitle) {
+      searchTerms.push(sceneContext.locationTitle.toLowerCase());
+      // Извлекаем отдельные слова из названия локации
+      sceneContext.locationTitle.split(/\s+/).forEach(word => {
+        if (word.length > 3) searchTerms.push(word.toLowerCase());
+      });
+    }
+    
+    if (sceneContext.locationDescription) {
+      // Извлекаем ключевые слова из описания локации
+      const descKeywords = extractKeywords(sceneContext.locationDescription);
+      searchTerms.push(...descKeywords.slice(0, 10));
+    }
+    
+    if (sceneContext.npcNames) {
+      sceneContext.npcNames.forEach(name => {
+        searchTerms.push(name.toLowerCase());
+        name.split(/\s+/).forEach(word => {
+          if (word.length > 2) searchTerms.push(word.toLowerCase());
+        });
+      });
+    }
+    
+    if (sceneContext.characterNames) {
+      sceneContext.characterNames.forEach(name => {
+        searchTerms.push(name.toLowerCase());
+      });
+    }
+    
+    // Ищем релевантные чанки по ключевым словам
+    const allChunks = await prisma.ruleChunk.findMany({
+      where: { gameId },
+      orderBy: { chunkIndex: 'asc' }
+    });
+    
+    // Оцениваем релевантность каждого чанка
+    const scoredChunks = allChunks.map(chunk => {
+      let score = 0;
+      const chunkText = (chunk.content + ' ' + (chunk.summary || '') + ' ' + chunk.keywords.join(' ')).toLowerCase();
+      
+      // Подсчитываем совпадения ключевых слов
+      for (const term of searchTerms) {
+        if (chunkText.includes(term)) {
+          score += term.length; // Более длинные совпадения дают больше очков
+        }
+      }
+      
+      // Бонус за совпадения в keywords
+      for (const keyword of chunk.keywords) {
+        if (searchTerms.includes(keyword)) {
+          score += 10;
+        }
+      }
+      
+      return { chunk, score };
+    });
+    
+    // Сортируем по релевантности и берем топ-5 чанков каждого типа
+    scoredChunks.sort((a, b) => b.score - a.score);
+    
+    const topWorldChunks = scoredChunks
+      .filter(sc => sc.chunk.chunkType === 'worldRules')
+      .slice(0, 5)
+      .map(sc => sc.chunk.content);
+    
+    const topGameplayChunks = scoredChunks
+      .filter(sc => sc.chunk.chunkType === 'gameplayRules')
+      .slice(0, 5)
+      .map(sc => sc.chunk.content);
+    
+    // Если релевантных чанков мало, добавляем первые чанки (общие правила)
+    if (topWorldChunks.length < 2) {
+      const firstWorldChunks = allChunks
+        .filter(c => c.chunkType === 'worldRules')
+        .slice(0, 2)
+        .map(c => c.content);
+      topWorldChunks.push(...firstWorldChunks);
+    }
+    
+    if (topGameplayChunks.length < 2) {
+      const firstGameplayChunks = allChunks
+        .filter(c => c.chunkType === 'gameplayRules')
+        .slice(0, 2)
+        .map(c => c.content);
+      topGameplayChunks.push(...firstGameplayChunks);
+    }
+    
+    return {
+      worldRules: topWorldChunks.join('\n\n'),
+      gameplayRules: topGameplayChunks.join('\n\n')
+    };
+  } catch (e) {
+    console.error('[RAG] Failed to find relevant chunks:', e);
+    // Fallback: возвращаем пустые строки, будет использован обычный метод
+    return { worldRules: '', gameplayRules: '' };
+  }
+}
+
+/**
+ * Разбивает правила на чанки и индексирует их для RAG
+ */
+async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesFull: string | null, gameplayRulesFull: string | null): Promise<void> {
+  try {
+    // Удаляем старые чанки для этой игры
+    await prisma.ruleChunk.deleteMany({ where: { gameId } });
+    
+    const chunkSize = 10000; // Размер чанка: ~10K символов (оптимально для семантического поиска)
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+    
+    // Обрабатываем правила мира
+    if (worldRulesFull && worldRulesFull.length > 0) {
+      const chunks: string[] = [];
+      for (let i = 0; i < worldRulesFull.length; i += chunkSize) {
+        chunks.push(worldRulesFull.slice(i, i + chunkSize));
+      }
+      
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunk = chunks[idx];
+        // Извлекаем ключевые слова из чанка (локации, персонажи, механики)
+        const keywords = extractKeywords(chunk);
+        // Создаем краткое резюме для семантического поиска
+        let summary = chunk.slice(0, 500); // Fallback: первые 500 символов
+        
+        if (geminiKey && chunk.length > 200) {
+          try {
+            const summaryResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник, который создает краткие резюме частей правил игры для семантического поиска.',
+              userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента правил мира:\n\n${chunk.slice(0, 5000)}`,
+              history: []
+            });
+            if (summaryResult?.text) {
+              summary = summaryResult.text.trim().slice(0, 500);
+            }
+          } catch (e) {
+            console.warn('[RAG] Failed to generate summary for worldRules chunk:', e);
+          }
+        }
+        
+        await prisma.ruleChunk.create({
+          data: {
+            gameId,
+            chunkType: 'worldRules',
+            chunkIndex: idx,
+            content: chunk,
+            keywords,
+            summary
+          }
+        });
+      }
+    }
+    
+    // Обрабатываем правила игрового процесса
+    if (gameplayRulesFull && gameplayRulesFull.length > 0) {
+      const chunks: string[] = [];
+      for (let i = 0; i < gameplayRulesFull.length; i += chunkSize) {
+        chunks.push(gameplayRulesFull.slice(i, i + chunkSize));
+      }
+      
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunk = chunks[idx];
+        const keywords = extractKeywords(chunk);
+        let summary = chunk.slice(0, 500);
+        
+        if (geminiKey && chunk.length > 200) {
+          try {
+            const summaryResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник, который создает краткие резюме частей правил игры для семантического поиска.',
+              userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента правил игрового процесса:\n\n${chunk.slice(0, 5000)}`,
+              history: []
+            });
+            if (summaryResult?.text) {
+              summary = summaryResult.text.trim().slice(0, 500);
+            }
+          } catch (e) {
+            console.warn('[RAG] Failed to generate summary for gameplayRules chunk:', e);
+          }
+        }
+        
+        await prisma.ruleChunk.create({
+          data: {
+            gameId,
+            chunkType: 'gameplayRules',
+            chunkIndex: idx,
+            content: chunk,
+            keywords,
+            summary
+          }
+        });
+      }
+    }
+    
+    console.log(`[RAG] ✅ Indexed rules for game ${gameId}`);
+  } catch (e) {
+    console.error('[RAG] Failed to index rules:', e);
+  }
+}
+
+/**
+ * Извлекает ключевые слова из текста (локации, персонажи, механики)
+ */
+function extractKeywords(text: string): string[] {
+  const keywords: Set<string> = new Set();
+  const lowerText = text.toLowerCase();
+  
+  // Паттерны для извлечения ключевых слов
+  const patterns = [
+    // Локации (после слов "в", "на", "под", "над")
+    /\b(?:в|на|под|над|около|возле|у)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)*)/g,
+    // Персонажи (после слов "персонаж", "NPC", "враг", "союзник")
+    /\b(?:персонаж|NPC|враг|союзник|маг|воин|жрец|вор|бард|друид|паладин|рейнджер|монах|колдун|волшебник|жрец|варвар|боец|мастер|игрок)\s+([А-ЯЁ][а-яё]+)/g,
+    // Механики (проверки, броски, урон)
+    /\b(?:проверка|бросок|урон|лечение|состояние|эффект|способность|заклинание|оружие|броня|AC|HP|STR|DEX|CON|INT|WIS|CHA|d20|d4|d6|d8|d10|d12|d100)\b/gi,
+  ];
+  
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(lowerText)) !== null) {
+      const keyword = match[1] || match[0];
+      if (keyword && keyword.length > 2 && keyword.length < 50) {
+        keywords.add(keyword.toLowerCase());
+      }
+    }
+  }
+  
+  return Array.from(keywords).slice(0, 20); // Максимум 20 ключевых слов
+}
+
+/**
+ * Находит релевантные чанки правил на основе текущей сцены (RAG)
+ */
+async function findRelevantRuleChunks(
+  prisma: ReturnType<typeof getPrisma>,
+  gameId: string,
+  sceneContext: { locationTitle?: string; locationDescription?: string; npcNames?: string[]; characterNames?: string[] }
+): Promise<{ worldRules: string; gameplayRules: string }> {
+  try {
+    const searchTerms: string[] = [];
+    
+    // Добавляем ключевые слова из контекста сцены
+    if (sceneContext.locationTitle) {
+      searchTerms.push(sceneContext.locationTitle.toLowerCase());
+      // Извлекаем отдельные слова из названия локации
+      sceneContext.locationTitle.split(/\s+/).forEach(word => {
+        if (word.length > 3) searchTerms.push(word.toLowerCase());
+      });
+    }
+    
+    if (sceneContext.locationDescription) {
+      // Извлекаем ключевые слова из описания локации
+      const descKeywords = extractKeywords(sceneContext.locationDescription);
+      searchTerms.push(...descKeywords.slice(0, 10));
+    }
+    
+    if (sceneContext.npcNames) {
+      sceneContext.npcNames.forEach(name => {
+        searchTerms.push(name.toLowerCase());
+        name.split(/\s+/).forEach(word => {
+          if (word.length > 2) searchTerms.push(word.toLowerCase());
+        });
+      });
+    }
+    
+    if (sceneContext.characterNames) {
+      sceneContext.characterNames.forEach(name => {
+        searchTerms.push(name.toLowerCase());
+      });
+    }
+    
+    // Ищем релевантные чанки по ключевым словам
+    const allChunks = await prisma.ruleChunk.findMany({
+      where: { gameId },
+      orderBy: { chunkIndex: 'asc' }
+    });
+    
+    // Оцениваем релевантность каждого чанка
+    const scoredChunks = allChunks.map(chunk => {
+      let score = 0;
+      const chunkText = (chunk.content + ' ' + (chunk.summary || '') + ' ' + chunk.keywords.join(' ')).toLowerCase();
+      
+      // Подсчитываем совпадения ключевых слов
+      for (const term of searchTerms) {
+        if (chunkText.includes(term)) {
+          score += term.length; // Более длинные совпадения дают больше очков
+        }
+      }
+      
+      // Бонус за совпадения в keywords
+      for (const keyword of chunk.keywords) {
+        if (searchTerms.includes(keyword)) {
+          score += 10;
+        }
+      }
+      
+      return { chunk, score };
+    });
+    
+    // Сортируем по релевантности и берем топ-5 чанков каждого типа
+    scoredChunks.sort((a, b) => b.score - a.score);
+    
+    const topWorldChunks = scoredChunks
+      .filter(sc => sc.chunk.chunkType === 'worldRules')
+      .slice(0, 5)
+      .map(sc => sc.chunk.content);
+    
+    const topGameplayChunks = scoredChunks
+      .filter(sc => sc.chunk.chunkType === 'gameplayRules')
+      .slice(0, 5)
+      .map(sc => sc.chunk.content);
+    
+    // Если релевантных чанков мало, добавляем первые чанки (общие правила)
+    if (topWorldChunks.length < 2) {
+      const firstWorldChunks = allChunks
+        .filter(c => c.chunkType === 'worldRules')
+        .slice(0, 2)
+        .map(c => c.content);
+      topWorldChunks.push(...firstWorldChunks);
+    }
+    
+    if (topGameplayChunks.length < 2) {
+      const firstGameplayChunks = allChunks
+        .filter(c => c.chunkType === 'gameplayRules')
+        .slice(0, 2)
+        .map(c => c.content);
+      topGameplayChunks.push(...firstGameplayChunks);
+    }
+    
+    return {
+      worldRules: topWorldChunks.join('\n\n'),
+      gameplayRules: topGameplayChunks.join('\n\n')
+    };
+  } catch (e) {
+    console.error('[RAG] Failed to find relevant chunks:', e);
+    // Fallback: возвращаем пустые строки, будет использован обычный метод
+    return { worldRules: '', gameplayRules: '' };
+  }
+}
+
 async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params: {
   gameId: string;
   lobbyId?: string;
@@ -9492,15 +10043,40 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     }).join('\n') + '\n\nКРИТИЧЕСКИ ВАЖНО: Используй ЭТИ данные о персонажах из базы данных! НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО имена, классы, расы, характеристики, способности и оружие, которые указаны выше. Если персонаж - маг, используй его магические способности. Если воин - его оружие и боевые навыки. Если персонаж имеет способности в abilities - используй их при описании действий.';
   }
   
-  // Добавляем правила игры (используем полные версии для ИИ, если есть)
+  // Добавляем правила игры через RAG (Retrieval Augmented Generation)
   let gameRulesInfo = '';
   if (game) {
-    const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
-    const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
-    const rulesParts: string[] = [];
-    if (worldRulesForAI) rulesParts.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesForAI}`);
-    if (gameplayRulesForAI) rulesParts.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesForAI}`);
-    if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+    // Проверяем, есть ли индексированные чанки для RAG
+    const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } }).catch(() => 0);
+    
+    if (chunkCount > 0) {
+      // Используем RAG: ищем релевантные чанки на основе текущей сцены
+      const sceneContext = {
+        locationTitle: loc?.title,
+        locationDescription: loc?.description || loc?.rulesPrompt,
+        npcNames: sceneNpcs.map(n => n.name),
+        characterNames: playableCharacters.map(c => c.name)
+      };
+      
+      const relevantChunks = await findRelevantRuleChunks(prisma, game.id, sceneContext);
+      
+      const rulesParts: string[] = [];
+      if (relevantChunks.worldRules) {
+        rulesParts.push(`Правила мира (релевантные для текущей сцены): ${relevantChunks.worldRules}`);
+      }
+      if (relevantChunks.gameplayRules) {
+        rulesParts.push(`Правила процесса (релевантные для текущей сцены): ${relevantChunks.gameplayRules}`);
+      }
+      if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+    } else {
+      // Fallback: используем полные правила (если RAG еще не настроен)
+      const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
+      const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
+      const rulesParts: string[] = [];
+      if (worldRulesForAI) rulesParts.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesForAI.slice(0, 50000)}`); // Ограничиваем до 50K символов для безопасности
+      if (gameplayRulesForAI) rulesParts.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesForAI.slice(0, 50000)}`);
+      if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+    }
   }
   
   const gptContext = [
