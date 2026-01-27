@@ -1394,6 +1394,7 @@ const CharacterDetails: React.FC = () => {
                   value={nameValue} 
                   onChange={(e) => setNameValue(e.target.value)}
                   placeholder={ch?.name || 'Имя'}
+                  maxLength={30}
                   style={{ flex: 1 }}
                 />
                 <button 
