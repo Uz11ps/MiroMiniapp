@@ -1182,20 +1182,23 @@ const GameChat: React.FC = () => {
                 if (dicePrefill?.context) payload.context = dicePrefill.context;
                 if (manual.length > 0) payload.manualResults = manual;
                 if (lobbyId) payload.lobbyId = lobbyId;
+                
+                // Останавливаем предыдущую озвучку при действии игрока (бросок кубиков)
+                try {
+                  stopStreamingTTS();
+                  speakingInFlightRef.current = false;
+                  activeSpeakSeqRef.current = 0;
+                  console.log('[TTS-CLIENT] Stopped all audio streams due to dice roll');
+                } catch (e) {
+                  console.warn('[TTS-CLIENT] Error stopping audio:', e);
+                }
+                
                 const resp = await rollDiceApi(payload);
                 if (!lobbyId) {
                   if (resp?.ok && resp.message) {
                     const txt = String(resp.message);
                     setMessages((m) => {
-                      const next = [...m, { from: 'bot' as const, text: txt }];
-                      // Останавливаем предыдущую озвучку перед новой
-                      try {
-                        stopStreamingTTS();
-                        speakingInFlightRef.current = false;
-                        activeSpeakSeqRef.current = 0;
-                      } catch (e) {
-                        console.warn('[TTS-CLIENT] Error stopping audio:', e);
-                      }
+                      const next = [...m, { from: 'me' as const, text: txt }];
                       // озвучиваем только последний текст
                       speak(txt);
                       return next;
@@ -1204,15 +1207,14 @@ const GameChat: React.FC = () => {
                     const arr = resp.messages as string[];
                     if (arr.length) {
                       setMessages((m) => {
-                        const next = [...m, ...arr.map((t) => ({ from: 'bot' as const, text: String(t) }))];
-                        // Останавливаем предыдущую озвучку перед новой
-                        try {
-                          stopStreamingTTS();
-                          speakingInFlightRef.current = false;
-                          activeSpeakSeqRef.current = 0;
-                        } catch (e) {
-                          console.warn('[TTS-CLIENT] Error stopping audio:', e);
-                        }
+                        // Первое сообщение (о броске) - от игрока, остальные (наратив) - от бота
+                        const diceMsg = arr[0];
+                        const narrativeMsgs = arr.slice(1);
+                        const next = [
+                          ...m,
+                          ...(diceMsg ? [{ from: 'me' as const, text: String(diceMsg) }] : []),
+                          ...narrativeMsgs.map((t) => ({ from: 'bot' as const, text: String(t) }))
+                        ];
                         // озвучиваем только последнюю фразу-наратив
                         const last = arr[arr.length - 1];
                         if (last) speak(String(last));
@@ -1225,15 +1227,7 @@ const GameChat: React.FC = () => {
                       ? `🎲 Бросок: ${r.notation} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}`
                       : `🎲 Бросок: ${r.notation} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}`;
                     setMessages((m) => {
-                      const next = [...m, { from: 'bot' as const, text: msg }];
-                      // Останавливаем предыдущую озвучку перед новой
-                      try {
-                        stopStreamingTTS();
-                        speakingInFlightRef.current = false;
-                        activeSpeakSeqRef.current = 0;
-                      } catch (e) {
-                        console.warn('[TTS-CLIENT] Error stopping audio:', e);
-                      }
+                      const next = [...m, { from: 'me' as const, text: msg }];
                       speak(msg);
                       return next;
                     });

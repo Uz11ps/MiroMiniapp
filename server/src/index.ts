@@ -9730,7 +9730,7 @@ app.post('/api/lobbies/:id/dice', async (req, res) => {
 
     const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
     const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
-    history.push({ from: 'bot', text: fmt });
+    history.push({ from: 'me', text: fmt });
 
     const gptContext = await buildGptSceneContext(prisma, { gameId, lobbyId, history });
     const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
@@ -9903,7 +9903,7 @@ app.post('/api/chat/dice', async (req, res) => {
     // Прегенерация удалена - генерируем через AI
     let narr: { text: string; fallback: boolean } | null = null;
     if (!narr) {
-    history.push({ from: 'bot', text: fmt });
+    history.push({ from: 'me', text: fmt });
     const gptContext = await buildGptSceneContext(prisma, { gameId, userId: uid, history });
       narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
       console.log('[DICE] ⚠️ Generated NEW text (pre-generated not found) for outcome:', outcomeCode || outcome);
