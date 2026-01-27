@@ -1,8 +1,8 @@
 // Скрипт для просмотра правил игры из базы данных
 import 'dotenv/config';
-import { PrismaClient } from '@prisma/client';
+import { getPrisma } from './dist/prisma.js';
 
-const prisma = new PrismaClient();
+const prisma = getPrisma();
 
 async function viewRules() {
   try {
