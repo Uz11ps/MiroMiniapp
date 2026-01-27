@@ -5792,100 +5792,90 @@ async function transcribeViaGemini(buffer: Buffer, filename: string, mime: strin
     
     console.log('[GEMINI-STT] Using MIME type:', geminiMime);
     
-    const proxies = parseGeminiProxies();
-    const attempts = proxies.length ? proxies : ['__direct__'];
+    // Используем только прямой запрос без прокси
     const timeoutMs = 60000; // 60 секунд для распознавания речи
     
-    for (const p of attempts) {
-      try {
-        console.log('[GEMINI-STT] Trying proxy:', p === '__direct__' ? 'direct' : 'proxy');
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
-        
-        const body = {
-          contents: [{
-            parts: [{
-              inlineData: {
-                mimeType: geminiMime,
-                data: base64Audio
-              }
-            }, {
-              text: 'Распознай речь на русском языке из этого аудио. Верни только распознанный текст без дополнительных комментариев или объяснений.'
-            }]
-          }],
-          generationConfig: {
-            temperature: 0.1,
-          }
-        };
-        
-        // Используем gemini-1.5-flash-latest для STT (последняя версия, быстрее и поддерживает generateContent)
-        // Модель gemini-1.5-flash-latest доступна только в v1beta API
-        const modelName = process.env.GEMINI_STT_MODEL || 'gemini-1.5-flash-latest';
-        const apiVersion = 'v1beta'; // gemini-1.5-flash-latest доступна только в v1beta
-        const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
-        console.log('[GEMINI-STT] Sending request to:', url);
-        
-        const r = await undiciFetch(url, {
-          method: 'POST',
-          dispatcher,
-          signal: controller.signal,
-          headers: { 
-            'Content-Type': 'application/json', 
-            'X-Goog-Api-Key': apiKey 
-          },
-          body: JSON.stringify(body),
-        });
-        clearTimeout(timer);
-        
-        if (!r.ok) {
-          const errorText = await r.text().catch(() => '');
-          let errorData: any = {};
-          try {
-            if (errorText) errorData = JSON.parse(errorText) || {};
-          } catch {}
-          
-          console.error('[GEMINI-STT] ❌ HTTP error:', r.status, {
-            statusText: r.statusText,
-            error: errorData.error || errorText.slice(0, 500)
-          });
-          
-          // Если это ошибка авторизации или доступа - не пробуем другие прокси
-          if (r.status === 401 || r.status === 403) {
-            throw new Error(`Gemini API authentication failed: ${r.status} ${errorData.error?.message || errorText.slice(0, 200)}`);
-          }
-          
-          continue; // Пробуем следующий прокси
+    try {
+      console.log('[GEMINI-STT] Sending direct request (no proxy)');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      
+      const body = {
+        contents: [{
+          parts: [{
+            inlineData: {
+              mimeType: geminiMime,
+              data: base64Audio
+            }
+          }, {
+            text: 'Распознай речь на русском языке из этого аудио. Верни только распознанный текст без дополнительных комментариев или объяснений.'
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.1,
         }
+      };
+      
+      // Используем gemini-1.5-flash-002 для STT через v1 API
+      const modelName = process.env.GEMINI_STT_MODEL || 'gemini-1.5-flash-002';
+      const apiVersion = 'v1'; // Используем v1 API
+      const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+      console.log('[GEMINI-STT] Sending request to:', url);
+      
+      const r = await undiciFetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 
+          'Content-Type': 'application/json', 
+          'X-Goog-Api-Key': apiKey 
+        },
+        body: JSON.stringify(body),
+      });
+      clearTimeout(timer);
+      
+      if (!r.ok) {
+        const errorText = await r.text().catch(() => '');
+        let errorData: any = {};
+        try {
+          if (errorText) errorData = JSON.parse(errorText) || {};
+        } catch {}
         
-        const data = await r.json() as any;
-        console.log('[GEMINI-STT] Response structure:', {
-          hasCandidates: !!data?.candidates,
-          candidatesCount: data?.candidates?.length || 0,
-          hasContent: !!data?.candidates?.[0]?.content,
-          partsCount: data?.candidates?.[0]?.content?.parts?.length || 0
+        console.error('[GEMINI-STT] ❌ HTTP error:', r.status, {
+          statusText: r.statusText,
+          error: errorData.error || errorText.slice(0, 500)
         });
         
-        // Проверяем на ошибки в ответе
-        if (data?.promptFeedback?.blockReason) {
-          console.error('[GEMINI-STT] ❌ Content blocked:', data.promptFeedback.blockReason);
-          throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
-        }
-        
-        const parts = data?.candidates?.[0]?.content?.parts || [];
-        const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
-        
-        if (text) {
-          console.log('[GEMINI-STT] ✅ Transcribed successfully, text length:', text.length, 'preview:', text.slice(0, 100));
-          return text;
-        } else {
-          console.warn('[GEMINI-STT] ⚠️ No text in response, full response:', JSON.stringify(data).slice(0, 500));
-        }
-      } catch (e: any) {
-        console.error('[GEMINI-STT] ❌ Error with proxy', p === '__direct__' ? 'direct' : 'proxy', ':', e?.message || String(e));
-        if (e?.stack) console.error('[GEMINI-STT] Stack:', e.stack);
-        if (p === attempts[attempts.length - 1]) throw e; // Если это последний прокси, пробрасываем ошибку
+        throw new Error(`Gemini API error: ${r.status} ${errorData.error?.message || errorText.slice(0, 200)}`);
       }
+      
+      const data = await r.json() as any;
+      console.log('[GEMINI-STT] Response structure:', {
+        hasCandidates: !!data?.candidates,
+        candidatesCount: data?.candidates?.length || 0,
+        hasContent: !!data?.candidates?.[0]?.content,
+        partsCount: data?.candidates?.[0]?.content?.parts?.length || 0
+      });
+      
+      // Проверяем на ошибки в ответе
+      if (data?.promptFeedback?.blockReason) {
+        console.error('[GEMINI-STT] ❌ Content blocked:', data.promptFeedback.blockReason);
+        throw new Error(`Content blocked: ${data.promptFeedback.blockReason}`);
+      }
+      
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const text = parts.map((p: any) => p?.text).filter(Boolean).join('\n').trim();
+      
+      if (text) {
+        console.log('[GEMINI-STT] ✅ Transcribed successfully, text length:', text.length, 'preview:', text.slice(0, 100));
+        return text;
+      } else {
+        console.warn('[GEMINI-STT] ⚠️ No text in response, full response:', JSON.stringify(data).slice(0, 500));
+        throw new Error('No text in Gemini response');
+      }
+    } catch (e: any) {
+      console.error('[GEMINI-STT] ❌ Error:', e?.message || String(e));
+      if (e?.stack) console.error('[GEMINI-STT] Stack:', e.stack);
+      throw e;
     }
     
     console.warn('[GEMINI-STT] ⚠️ All attempts failed, returning empty string');
