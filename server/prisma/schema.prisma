@@ -206,6 +206,7 @@ model GameSession {
 
 // Чанки правил для RAG (Retrieval Augmented Generation)
 model RuleChunk {
+  id            String   @id @default(cuid())
   gameId        String   // ID игры
   chunkType     String   // 'worldRules' или 'gameplayRules'
   chunkIndex    Int      // Порядковый номер чанка
