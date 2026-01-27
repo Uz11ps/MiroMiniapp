@@ -102,10 +102,9 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
     gainNode.gain.value = 1.0;
     gainNode.connect(audioContext.destination);
     
-    let nextStartTime = audioContext.currentTime;
+    let nextStartTime = 0; // Инициализируем как 0 - признак пустой очереди
     let bytesReceived = 0;
     let leftover: Uint8Array | null = null;
-    let isFirstChunk = true; // Флаг для первого чанка - начинаем воспроизведение сразу
     let chunksReceived = 0; // Счетчик полученных чанков
     const processingQueue: Uint8Array[] = []; // Очередь для последовательной обработки
     let isProcessing = false; // Флаг обработки для предотвращения параллельной обработки
@@ -131,7 +130,7 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         chunksReceived++;
         
         // Логируем первый чанк ДО обработки
-        if (isFirstChunk) {
+        if (nextStartTime === 0) {
           console.log('[STREAMING-TTS] 📦 First chunk received, size:', chunk.length, 'bytes, queue length:', processingQueue.length);
         }
 
@@ -154,10 +153,6 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
         }
 
         if (combined.length === 0) {
-          if (isFirstChunk) {
-            console.warn('[STREAMING-TTS] ⚠️ First chunk is empty after processing, skipping but continuing...');
-            isFirstChunk = false; // Продолжаем, чтобы не застрять
-          }
           continue; // Продолжаем обработку следующего чанка
         }
       
@@ -191,27 +186,21 @@ export async function playStreamingTTS(options: StreamingTTSOptions): Promise<vo
 
       const now = audioContext.currentTime;
       
-      // КРИТИЧЕСКИ ВАЖНО: Честный стриминг без отсеивания начала
-      // 1. Если это самый первый кусок в жизни этого потока
-      if (isFirstChunk) {
-        // Планируем его на "сейчас" + 100мс буфера
+      // КРИТИЧЕСКИ ВАЖНО: Простая и надежная очередь без лишней логики
+      // 1. Инициализация (самый первый чанк в сессии или очередь пуста/простояла слишком долго)
+      if (nextStartTime === 0 || nextStartTime < now) {
+        // Если очередь пуста или мы "простояли" слишком долго — 
+        // даем небольшой запас (100мс) и стартуем
         nextStartTime = now + 0.1;
-        isFirstChunk = false;
-        console.log('[STREAMING-TTS] 🎵 First chunk - starting playback with 100ms buffer, samples:', float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's');
+        if (chunksReceived === 1) {
+          console.log('[STREAMING-TTS] 🎵 First chunk - starting playback with 100ms buffer, samples:', float32Array.length, 'duration:', audioBuffer.duration.toFixed(3), 's');
+        }
       }
       
-      // 2. Если сетевой лаг оказался больше, чем запас буфера (Джиттер)
-      // МЫ НЕ ДЕЛАЕМ nextStartTime = now, это убивает начало!
-      // Браузеру нужно 20-30 мс, чтобы физически начать играть
-      if (nextStartTime < now) {
-        // Мы просто "догоняем" время, но даем запас, чтобы AudioContext успел подхватить
-        nextStartTime = now + 0.05;
-      }
-      
-      // 3. Если nextStartTime уже в будущем (последующие чанки), используем его как есть
-      // Это обеспечивает плавное воспроизведение без пропусков
-
+      // 2. Просто планируем чанк - используем текущий nextStartTime без изменений
       source.start(nextStartTime);
+      
+      // 3. Сдвигаем время конца очереди строго на длительность этого чанка
       nextStartTime += audioBuffer.duration;
       
       bytesReceived += combined.length;
@@ -310,14 +299,12 @@ class AudioQueue {
   private segments: Map<number, Uint8Array[]> = new Map();
   private isPlaying = false;
   private ctx: AudioContext;
-  private nextStartTime = 0;
+  private nextStartTime = 0; // Инициализируем как 0 - признак пустой очереди
   private currentSegmentIndex = 0;
   private segmentLeftover: Map<number, Uint8Array | null> = new Map();
-  private isFirstChunk = true; // Флаг для первого чанка - нужен запас 100 мс
 
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
-    this.nextStartTime = ctx.currentTime;
   }
 
   push(index: number, chunk: Uint8Array) {
@@ -388,26 +375,18 @@ class AudioQueue {
 
       const now = this.ctx.currentTime;
       
-      // КРИТИЧЕСКИ ВАЖНО: Честный стриминг без отсеивания начала
-      // 1. Если это самый первый кусок в жизни этого потока
-      if (this.isFirstChunk) {
-        // Планируем его на "сейчас" + 100мс буфера
+      // КРИТИЧЕСКИ ВАЖНО: Простая и надежная очередь без лишней логики
+      // 1. Инициализация (самый первый чанк в сессии или очередь пуста/простояла слишком долго)
+      if (this.nextStartTime === 0 || this.nextStartTime < now) {
+        // Если очередь пуста или мы "простояли" слишком долго — 
+        // даем небольшой запас (100мс) и стартуем
         this.nextStartTime = now + 0.1;
-        this.isFirstChunk = false;
-        console.log('[AUDIO-QUEUE] 🎵 First chunk - starting playback with 100ms buffer');
       }
       
-      // 2. Если сетевой лаг оказался больше, чем запас буфера (Джиттер)
-      // МЫ НЕ ДЕЛАЕМ nextStartTime = now, это убивает начало!
-      // Браузеру нужно 20-30 мс, чтобы физически начать играть
-      if (this.nextStartTime < now) {
-        // Мы просто "догоняем" время, но даем запас, чтобы AudioContext успел подхватить
-        this.nextStartTime = now + 0.05;
-      }
-      
-      // 3. Запускаем и двигаем очередь
-
+      // 2. Просто планируем чанк - используем текущий nextStartTime без изменений
       source.start(this.nextStartTime);
+      
+      // 3. Сдвигаем время конца очереди строго на длительность этого чанка
       this.nextStartTime += audioBuffer.duration;
 
       // Если в текущем сегменте больше нет чанков, проверяем следующий сегмент
@@ -435,8 +414,7 @@ class AudioQueue {
     this.currentSegmentIndex = 0;
     this.isPlaying = false;
     this.segmentLeftover.clear();
-    this.nextStartTime = this.ctx.currentTime;
-    this.isFirstChunk = true; // Сбрасываем флаг при остановке
+    this.nextStartTime = 0; // Сбрасываем очередь для новой фразы
   }
 }
 
