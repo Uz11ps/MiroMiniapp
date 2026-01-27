@@ -3955,9 +3955,12 @@ app.post('/api/chat/welcome', async (req, res) => {
             'Обязательно формулируй их коротко и ясно, чтобы игрок понял, что делать дальше. ' +
             'Всегда отвечай короткими абзацами, 3–7 строк. Главная цель — удерживать атмосферу игры и следовать сценарию.';
           const visual = loc?.backgroundUrl ? `Фон (изображение): ${loc.backgroundUrl}` : '';
+          // Используем полные версии правил для ИИ, если они есть, иначе краткие
+          const worldRulesForAI = (game as any)?.worldRulesFull || game?.worldRules || '';
+          const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game?.gameplayRules || '';
           const rules = [
-            game?.worldRules ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}` : '',
-            game?.gameplayRules ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}` : '',
+            worldRulesForAI ? `Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesForAI}` : '',
+            gameplayRulesForAI ? `Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesForAI}` : '',
           ].filter(Boolean).join('\n');
           const npcs = chars && chars.length ? (
             'Персонажи (D&D 5e):\n' + chars.map((c) => {
@@ -4344,8 +4347,11 @@ app.post('/api/chat/reply', async (req, res) => {
     if (game) {
       context.push(`Игра: ${game.title}`);
       if (game.description) context.push(`Описание: ${game.description}`);
-      if (game.worldRules) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${game.worldRules}`);
-      if (game.gameplayRules) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${game.gameplayRules}`);
+      // Используем полные версии правил для ИИ, если они есть, иначе краткие
+      const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
+      const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
+      if (worldRulesForAI) context.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesForAI}`);
+      if (gameplayRulesForAI) context.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesForAI}`);
       if (game.author) context.push(`Автор: ${game.author}`);
       if ((game as any).promoDescription) context.push(`Промо: ${(game as any).promoDescription}`);
       if (game.ageRating) context.push(`Возрастной рейтинг: ${game.ageRating}`);
@@ -9352,12 +9358,14 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     playerCharacterData = { name: params.characterName, id: params.characterId };
   }
   
-  // ОПТИМИЗАЦИЯ: Параллельно получаем location, npcs и игровых персонажей
+  // ОПТИМИЗАЦИЯ: Параллельно получаем game, location, npcs и игровых персонажей
+  let game: any = null;
   let loc: any = null;
   let npcs: any[] = [];
   let playableCharacters: any[] = [];
   
-  const [locationResult, npcsResult, playableResult] = await Promise.all([
+  const [gameResult, locationResult, npcsResult, playableResult] = await Promise.all([
+    prisma.game.findUnique({ where: { id: gameId } }).catch(() => null),
     (async () => {
       try {
         if (sess?.currentLocationId) {
@@ -9373,6 +9381,7 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     prisma.character.findMany({ where: { gameId, isPlayable: true }, take: 20 }).catch(() => [])
   ]);
   
+  game = gameResult;
   loc = locationResult;
   npcs = npcsResult;
   playableCharacters = playableResult;
@@ -9448,11 +9457,23 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     }).join('\n') + '\n\nКРИТИЧЕСКИ ВАЖНО: Используй ЭТИ данные о персонажах из базы данных! НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО имена, классы, расы, характеристики, способности и оружие, которые указаны выше. Если персонаж - маг, используй его магические способности. Если воин - его оружие и боевые навыки. Если персонаж имеет способности в abilities - используй их при описании действий.';
   }
   
+  // Добавляем правила игры (используем полные версии для ИИ, если есть)
+  let gameRulesInfo = '';
+  if (game) {
+    const worldRulesForAI = (game as any)?.worldRulesFull || game.worldRules || '';
+    const gameplayRulesForAI = (game as any)?.gameplayRulesFull || game.gameplayRules || '';
+    const rulesParts: string[] = [];
+    if (worldRulesForAI) rulesParts.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesForAI}`);
+    if (gameplayRulesForAI) rulesParts.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesForAI}`);
+    if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+  }
+  
   const gptContext = [
     `SCENE_JSON:\n${JSON.stringify(sceneJson, null, 2)}`,
     playableCharactersInfo,
     playerCharacterInfo,
     playerCharacterData?.name ? `\nКРИТИЧЕСКИ ВАЖНО: В SCENE_JSON выше указано полное имя персонажа игрока "${playerCharacterData.name}". ВСЕГДА используй это ПОЛНОЕ имя целиком (все слова) из JSON, не сокращай до первого слова!` : '',
+    gameRulesInfo,
     historyLines ? `История:\n${historyLines}` : '',
   ].filter(Boolean).join('\n\n');
   return gptContext;
