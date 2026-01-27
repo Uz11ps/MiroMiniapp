@@ -9690,36 +9690,6 @@ async function findRelevantRuleChunks(
   }
 }
 
-/**
- * Извлекает ключевые слова из текста (локации, персонажи, механики)
- */
-function extractKeywords(text: string): string[] {
-  const keywords: Set<string> = new Set();
-  const lowerText = text.toLowerCase();
-  
-  // Паттерны для извлечения ключевых слов
-  const patterns = [
-    // Локации (после слов "в", "на", "под", "над")
-    /\b(?:в|на|под|над|около|возле|у)\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)*)/g,
-    // Персонажи (после слов "персонаж", "NPC", "враг", "союзник")
-    /\b(?:персонаж|NPC|враг|союзник|маг|воин|жрец|вор|бард|друид|паладин|рейнджер|монах|колдун|волшебник|жрец|варвар|боец|мастер|игрок)\s+([А-ЯЁ][а-яё]+)/g,
-    // Механики (проверки, броски, урон)
-    /\b(?:проверка|бросок|урон|лечение|состояние|эффект|способность|заклинание|оружие|броня|AC|HP|STR|DEX|CON|INT|WIS|CHA|d20|d4|d6|d8|d10|d12|d100)\b/gi,
-  ];
-  
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(lowerText)) !== null) {
-      const keyword = match[1] || match[0];
-      if (keyword && keyword.length > 2 && keyword.length < 50) {
-        keywords.add(keyword.toLowerCase());
-      }
-    }
-  }
-  
-  return Array.from(keywords).slice(0, 20); // Максимум 20 ключевых слов
-}
-
 async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params: {
   gameId: string;
   lobbyId?: string;
