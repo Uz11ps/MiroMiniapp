@@ -5334,18 +5334,47 @@ app.post('/api/chat/reply-stream', async (req, res) => {
   try {
     const prisma = getPrisma();
     
-    // Получаем игру и настраиваем промпты (упрощенная версия из основного endpoint)
+    // Получаем userId для buildGptSceneContext (RAG)
+    let userId: string | null = null;
+    if (!lobbyId && gameId) {
+      userId = await resolveUserIdFromQueryOrBody(req, prisma);
+    }
+    
+    // Получаем игру и настраиваем промпты
     const game = gameId ? await prisma.game.findUnique({ where: { id: gameId } }) : null;
     const sys = game?.systemPrompt || getSysPrompt();
     
+    // КРИТИЧЕСКИ ВАЖНО: Используем buildGptSceneContext для получения контекста с RAG чанками
+    let sceneContext = '';
+    if (gameId) {
+      try {
+        sceneContext = await buildGptSceneContext(prisma, {
+          gameId,
+          lobbyId,
+          userId: userId || undefined,
+          history: history
+        });
+      } catch (e) {
+        console.warn('[REPLY-STREAM] Failed to build scene context:', e);
+      }
+    }
+    
+    // Формируем финальный промпт с контекстом сцены и RAG чанками
+    const finalUserPrompt = sceneContext 
+      ? `${sceneContext}\n\nСообщение игрока: ${userText}`
+      : userText;
+    
     // КРИТИЧЕСКИ ВАЖНО: Логируем, что передаем ТЕКСТ в ИИ (должен быть расшифрован через STT)
     console.log('[REPLY-STREAM] ✅ Sending TEXT to AI (from STT):', typeof userText === 'string' ? `"${userText.slice(0, 100)}${userText.length > 100 ? '...' : ''}"` : `type: ${typeof userText}`);
+    if (sceneContext) {
+      console.log('[REPLY-STREAM] ✅ Using RAG context (length:', sceneContext.length, 'chars)');
+    }
     
     // Генерируем текст через Gemini 2.5 Pro (используем generateChatCompletion, который уже использует gemini-2.5-pro)
     sendSSE('status', { type: 'generating_text' });
     const { text: generatedText } = await generateChatCompletion({
       systemPrompt: sys,
-      userPrompt: userText, // ТОЛЬКО ТЕКСТ, не аудио!
+      userPrompt: finalUserPrompt, // Промпт с контекстом сцены и RAG чанками
       history: history // История тоже должна содержать только текст
     });
     const fullText = generatedText || '';
