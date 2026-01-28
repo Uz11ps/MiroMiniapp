@@ -5601,6 +5601,102 @@ app.post('/api/chat/reply-stream', async (req, res) => {
   try {
     const prisma = getPrisma();
     
+    // КРИТИЧЕСКИ ВАЖНО: Проверяем, выбрал ли игрок реальный выход из локации ПЕРЕД генерацией ответа
+    // Если да - переключаем локацию на targetLocationId выбранного выхода
+    if (gameId && userText) {
+      try {
+        let sess: any = null;
+        if (lobbyId) {
+          sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } });
+        } else {
+          const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+          if (uid) {
+            sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+          }
+        }
+        
+        if (sess?.currentLocationId) {
+          // Получаем последний ответ бота из истории (это ответ с вариантами выбора)
+          let lastBotMessage = '';
+          if (lobbyId) {
+            const chatSess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: 'lobby:' + lobbyId, gameId } } });
+            const h = ((chatSess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+            const lastBot = [...h].reverse().find(m => m.from === 'bot');
+            if (lastBot) lastBotMessage = lastBot.text || '';
+          } else {
+            const uid = await resolveUserIdFromQueryOrBody(req, prisma);
+            if (uid) {
+              const chatSess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
+              const h = ((chatSess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
+              const lastBot = [...h].reverse().find(m => m.from === 'bot');
+              if (lastBot) lastBotMessage = lastBot.text || '';
+            }
+          }
+          
+          // Парсим варианты выбора из последнего ответа бота
+          const choices = parseChoiceOptions(lastBotMessage);
+          
+          if (choices.length > 0) {
+            // Нормализуем текст игрока для сравнения
+            const userTextNormalized = userText.trim().toLowerCase();
+            
+            // Проверяем, соответствует ли выбор игрока одному из вариантов
+            let matchedChoiceIndex = -1;
+            for (let i = 0; i < choices.length; i++) {
+              const choiceNormalized = choices[i].toLowerCase();
+              // Проверяем точное совпадение или включение
+              if (userTextNormalized === choiceNormalized || 
+                  userTextNormalized.includes(choiceNormalized) || 
+                  choiceNormalized.includes(userTextNormalized) ||
+                  // Проверяем номер варианта (если игрок написал "1", "2" и т.д.)
+                  userTextNormalized === String(i + 1) ||
+                  userTextNormalized === `${i + 1}.` ||
+                  userTextNormalized.startsWith(`${i + 1}. `)) {
+                matchedChoiceIndex = i;
+                break;
+              }
+            }
+            
+            // Если нашли совпадение - проверяем, соответствует ли это реальному выходу
+            if (matchedChoiceIndex >= 0) {
+              // Получаем реальные выходы из текущей локации
+              const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+              const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
+              
+              // Проверяем, соответствует ли выбранный вариант реальному выходу
+              // Реальные выходы добавляются первыми в списке вариантов функцией ensureRealExitsInChoices
+              if (matchedChoiceIndex < realExits.length) {
+                const selectedExit = realExits[matchedChoiceIndex];
+                if (selectedExit && selectedExit.targetLocationId) {
+                  const oldLocationId = sess.currentLocationId;
+                  
+                  // Переключаем локацию
+                  await prisma.gameSession.update({
+                    where: { id: sess.id },
+                    data: { currentLocationId: selectedExit.targetLocationId }
+                  });
+                  
+                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов
+                  const state = (sess.state as any) || {};
+                  state.scenesWithoutRealExit = 0;
+                  state.lastAction = userText || '';
+                  state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
+                  await prisma.gameSession.update({
+                    where: { id: sess.id },
+                    data: { state }
+                  });
+                  
+                  console.log(`[REPLY-STREAM] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${choices[matchedChoiceIndex]}"`);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[REPLY-STREAM] Failed to check location switch:', e);
+      }
+    }
+    
     // Получаем userId для buildGptSceneContext (RAG)
     let userId: string | null = null;
     if (!lobbyId && gameId) {
