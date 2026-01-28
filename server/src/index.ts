@@ -8908,7 +8908,7 @@ app.post('/api/tts-stream', async (req, res) => {
           dispatcher,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: text }] }],
+            contents: [{ role: "user", parts: [{ text: text }] }],
             generation_config: {
               response_modalities: ["AUDIO"],
               speech_config: {
@@ -8919,8 +8919,12 @@ app.post('/api/tts-stream', async (req, res) => {
                 }
               }
             }
-          })
+          }),
+          // Добавляем таймаут, чтобы не висеть бесконечно
+          signal: AbortSignal.timeout(30000)
         });
+
+        console.log(`[GEMINI-TTS-LIVE] 📡 Response received, status: ${response.status}`);
 
         if (!response.ok) {
           const errJson = await response.json().catch(() => ({}));
