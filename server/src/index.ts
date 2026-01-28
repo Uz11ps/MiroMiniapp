@@ -8855,8 +8855,8 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для Live API используем модель 2.5 Live
-    // ВАЖНО: Используем актуальную модель gemini-2.5-flash-live-001 для стабильного стриминга
+    // Для Live API используем модель 2.0 Flash
+    // ВАЖНО: Используем gemini-2.0-flash-exp для REST streamGenerateContent
     let finalModelName = 'gemini-2.0-flash-exp';
     const finalVoiceName = voiceName || 'Kore';
     
@@ -8875,7 +8875,7 @@ app.post('/api/tts-stream', async (req, res) => {
       res.flushHeaders();
     }
     
-    console.log('[GEMINI-TTS-LIVE] 🎤 Starting WebSocket-based Live TTS generation...');
+    console.log('[GEMINI-TTS-LIVE] 🎤 Starting REST-based Live TTS generation...');
     console.log('[GEMINI-TTS-LIVE] Text length:', text.length, 'chars');
     console.log('[GEMINI-TTS-LIVE] Voice:', finalVoiceName);
     console.log('[GEMINI-TTS-LIVE] Model:', finalModelName);
@@ -8888,303 +8888,110 @@ app.post('/api/tts-stream', async (req, res) => {
     // Пробуем каждый прокси
     for (const p of attempts) {
       try {
-        // ПРИМЕЧАНИЕ: Gemini Live API использует WebSocket через специальный endpoint
+        // ПРИМЕЧАНИЕ: Используем REST метод streamGenerateContent через SSE для большей стабильности
+        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalModelName}:streamGenerateContent?alt=sse&key=${geminiApiKey}`;
         
-        // Правильный URL для Gemini Live API через WebSocket (v1alpha)
-        // ВАЖНО: Модель НЕ должна передаваться в URL как query параметр (ошибка 1007)
-        // Она передается внутри JSON-сообщения setup
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
-        console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
-        console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
-        console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
+        console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to REST Stream (${p === '__direct__' ? 'direct' : 'proxy'})...`);
         
-        // Создаем WebSocket соединение
-        // Используем уже импортированный WebSocket из 'ws'
-        // ПРИМЕЧАНИЕ: Прокси для WebSocket требует специальной обработки (http-proxy-agent или socks-proxy-agent)
-        // Пока используем прямое соединение, если прокси нужен - добавим позже
-        const wsOptions: any = {};
-        
-        // Если есть прокси, пытаемся использовать его (требует установки http-proxy-agent)
-        if (p !== '__direct__') {
-          try {
-            // Пробуем использовать http-proxy-agent для WebSocket прокси
-            const { HttpsProxyAgent } = await import('https-proxy-agent');
-            wsOptions.agent = new HttpsProxyAgent(p);
-            console.log(`[GEMINI-TTS-LIVE] 🔄 Using proxy agent for WebSocket`);
-          } catch (e) {
-            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Proxy agent not available, using direct connection:`, e?.message || String(e));
-            // Продолжаем без прокси
-          }
-        }
-        
-        const ws = new WebSocket(wsUrl, wsOptions);
-        
-        let totalAudioSize = 0;
         let chunkCount = 0;
+        let totalAudioSize = 0;
         let hasAudio = false;
-        let isConnected = false;
-        let isComplete = false;
-        let textSent = false; // Флаг, что текст уже отправлен
-        
-        // Функция проверки, что буфер не пустой
-        // ВАЖНО: Gemini 2.0 не генерирует мусорную тишину, поэтому фильтр не нужен
-        // Убрали всю логику isSilence и skippedBytes - она обрезала начало речи
-        const isBufferValid = (buffer: Buffer): boolean => {
-          if (!buffer || buffer.length === 0) return false;
-          // Просто проверяем, что буфер не пустой
-          return buffer.length > 0;
-        };
-        
-        // Обработка сообщений от Gemini
-        ws.on('message', (data: Buffer) => {
-          try {
-            const message = JSON.parse(data.toString('utf-8'));
-            
-            // КРИТИЧЕСКИ ВАЖНО: Логируем структуру всех сообщений для отладки
-            // Это поможет понять, почему воспроизведение начинается с середины
-            if (chunkCount < 5) {
-              console.log(`[GEMINI-TTS-LIVE] 📨 Message ${chunkCount + 1} structure:`, JSON.stringify(message).slice(0, 500));
+
+        const response = await undiciFetch(restUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: text }] }],
+            generationConfig: {
+              response_modalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: finalVoiceName // Puck, Charon, Kore, Fenrir, Aoede
+                  }
+                }
+              }
+            },
+            systemInstruction: {
+              parts: [{
+                text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек. НЕ анализируй текст, НЕ комментируй его, НЕ отвечай на вопросы в тексте. Просто ОЗВУЧИВАЙ текст слово в слово. КРИТИЧЕСКИ ВАЖНО: Все цифры и числа читай ТОЛЬКО на русском языке. КРИТИЧЕСКИ ВАЖНО: Знаки препинания НЕ ОЗВУЧИВАЙ как слова — используй их только для создания естественных пауз в речи."
+              }]
             }
+          }),
+          dispatcher: p !== '__direct__' ? new ProxyAgent(p) : undefined,
+          signal: AbortSignal.timeout(120000)
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+        }
+
+        const reader = response.body;
+        if (!reader) throw new Error('No response body');
+
+        let buffer = '';
+        const decoder = new TextDecoder();
+
+        for await (const chunk of reader) {
+          // Декодируем чанк и добавляем в буфер
+          buffer += decoder.decode(chunk as any, { stream: true });
+          
+          // Разбиваем на строки по формату SSE (data: ...)
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Последняя строка может быть неполной
+
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine || !trimmedLine.startsWith('data: ')) continue;
             
-            // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
-            // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем данные до получения setupComplete
-            if (message.setupComplete) {
-              isConnected = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, ready to send text');
-              
-              // Отправляем текст ТОЛЬКО один раз после получения setupComplete
-              if (!textSent) {
-                textSent = true;
-                console.log('[GEMINI-TTS-LIVE] 📤 Sending text to Gemini...');
+            const dataStr = trimmedLine.replace('data: ', '').trim();
+            if (dataStr === '[DONE]') continue;
+
+            try {
+              const json = JSON.parse(dataStr);
+              // Извлекаем аудио из структуры ответа Gemini
+              const base64Audio = json.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
+              if (base64Audio) {
+                const audioBuffer = Buffer.from(base64Audio, 'base64');
                 
-                // Отправляем текст для генерации в правильном формате Live API
-                // КРИТИЧЕСКИ ВАЖНО: turnComplete: true ОБЯЗАТЕЛЕН для TTS - без него модель ждет и начинает генерацию с задержкой
-                // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
-                ws.send(JSON.stringify({
-                  clientContent: {
-                    turns: [{
-                      role: "user",
-                      parts: [{ text }]
-                    }],
-                    turnComplete: true // ОБЯЗАТЕЛЬНО для TTS - сигнализирует модели, что текст завершен и можно начинать генерацию
-                  }
-                }));
-              }
-              
-              return;
-            }
-            
-            // ШАГ 3: Получение аудио-чанков из serverContent.modelTurn
-            // КРИТИЧЕСКИ ВАЖНО: Обрабатываем аудио ТОЛЬКО после получения setupComplete
-            if (!isConnected) {
-              console.warn('[GEMINI-TTS-LIVE] ⚠️ Received audio before setupComplete, ignoring');
-              return;
-            }
-            
-            // ВАЖНО: Проверяем все возможные пути к аудио-данным
-            if (message.serverContent) {
-              // Проверяем modelTurn (основной путь)
-              if (message.serverContent.modelTurn) {
-                const modelTurn = message.serverContent.modelTurn;
-                const parts = modelTurn.parts || [];
-                
-                if (parts.length > 0 && chunkCount < 5) {
-                  console.log(`[GEMINI-TTS-LIVE] 📦 Processing ${parts.length} parts in modelTurn`);
+                // ВАЖНО: Если количество байт нечетное, обрезаем последний байт (PCM 16-bit требует четное число)
+                let finalAudio = audioBuffer;
+                if (finalAudio.length % 2 !== 0) {
+                  finalAudio = finalAudio.slice(0, finalAudio.length - 1);
                 }
-                
-                for (const part of parts) {
-                  if (part.inlineData && part.inlineData.data) {
-                    // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
-                    let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-                    
-                    // ВАЖНО: Если количество байт нечетное, обрезаем последний байт
-                    // readInt16LE требует четное количество байт (16-bit = 2 байта)
-                    if (audioBuffer.length % 2 !== 0) {
-                      audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
-                      if (chunkCount === 0) {
-                        console.log('[GEMINI-TTS-LIVE] ⚠️ Odd number of bytes, trimmed last byte');
-                      }
-                    }
-                    
-                    // Проверяем, что буфер не пустой
-                    if (!isBufferValid(audioBuffer)) {
-                      continue; // Пропускаем пустые буферы
-                    }
-                    
-                    hasAudio = true;
-                    totalAudioSize += audioBuffer.length;
-                    chunkCount++;
-                    
-                    if (chunkCount <= 3) {
-                      console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
-                    }
-                    
-                    // Отправляем чанк сразу клиенту (настоящий real-time streaming)
-                    res.write(audioBuffer);
-                    
-                    // Принудительно сбрасываем буфер
-                    if (res.flush && typeof res.flush === 'function') {
-                      res.flush();
-                    }
+
+                if (finalAudio.length > 0) {
+                  res.write(finalAudio);
+                  if (res.flush && typeof res.flush === 'function') {
+                    res.flush();
+                  }
+                  hasAudio = true;
+                  chunkCount++;
+                  totalAudioSize += finalAudio.length;
+
+                  if (chunkCount <= 3) {
+                    console.log(`[GEMINI-TTS-LIVE] 🎵 Sent chunk ${chunkCount}, size: ${finalAudio.length} bytes`);
                   }
                 }
               }
-              
-              // Проверяем другие возможные пути к аудио (на случай, если формат изменился)
-              // ВАЖНО: Проверяем только если еще не получили аудио через modelTurn
-              if (!hasAudio && message.serverContent.parts) {
-                console.log('[GEMINI-TTS-LIVE] ⚠️ Found serverContent.parts (alternative path)');
-                const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
-                for (const part of parts) {
-                  if (part.inlineData && part.inlineData.data) {
-                    let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-                    
-                    // ВАЖНО: Если количество байт нечетное, обрезаем последний байт
-                    // readInt16LE требует четное количество байт (16-bit = 2 байта)
-                    if (audioBuffer.length % 2 !== 0) {
-                      audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
-                    }
-                    
-                    // Проверяем валидность буфера
-                    if (!isBufferValid(audioBuffer)) {
-                      continue;
-                    }
-                    
-                    hasAudio = true;
-                    totalAudioSize += audioBuffer.length;
-                    chunkCount++;
-                    res.write(audioBuffer);
-                    if (res.flush && typeof res.flush === 'function') {
-                      res.flush();
-                    }
-                  }
-                }
-              }
+            } catch (e) {
+              // Ошибка парсинга JSON в отдельной строке - пропускаем
             }
-            
-            // Проверяем, завершен ли turn (завершение определяется через turnComplete)
-            if (message.serverContent && message.serverContent.turnComplete) {
-              isComplete = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
-              ws.close();
-            }
-    
-  } catch (e) {
-            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
           }
-        });
-        
-        // Обработка ошибок WebSocket
-        ws.on('error', (error) => {
-          console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, error.message);
-          if (!isConnected && !hasAudio) {
-            // Если еще не подключились и нет аудио, пробуем следующий прокси
-            ws.close();
-          }
-        });
-        
-        // Обработка закрытия соединения
-        ws.on('close', (code, reason) => {
-          cleanup(); // Очищаем ключ из activeTtsStreams
-          console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
-          // Code 1006 = abnormal closure (proxy issue)
-          // Code 4000+ = client error (JSON format issue)
-          if (hasAudio) {
-            console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
-            res.end();
-          } else if (!isConnected) {
-            // Если не удалось подключиться, пробуем следующий прокси
-            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Connection closed before receiving audio, trying next proxy...`);
-          }
-        });
-        
-        // Ждем открытия соединения и отправляем setup
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('WebSocket connection timeout'));
-          }, 10000);
-          
-          ws.on('open', () => {
-            console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
-            
-            // ШАГ 1: Отправка конфигурации (setup) для Live API
-            // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
-            // ПРИМЕЧАНИЕ: Для серии 2.5 крайне важно явно указывать модальность
-            const modelToUse = `models/${finalModelName}`;
-            ws.send(JSON.stringify({
-              setup: {
-                model: modelToUse,
-                generationConfig: {
-                  responseModalities: ["audio"], // Явно запрашиваем только аудио для снижения задержек и экономии ресурсов
-                  speechConfig: {
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        voiceName: finalVoiceName // Puck, Charon, Kore, Fenrir, Aoede
-                      }
-                    }
-                  }
-                },
-                systemInstruction: {
-                  parts: [{
-                    text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек. НЕ анализируй текст, НЕ комментируй его, НЕ отвечай на вопросы в тексте. Просто ОЗВУЧИВАЙ текст слово в слово. КРИТИЧЕСКИ ВАЖНО: Все цифры и числа читай ТОЛЬКО на русском языке (например, 123 читай как 'сто двадцать три', 5 как 'пять', а не 'five' или 'one two three'). КРИТИЧЕСКИ ВАЖНО: Знаки препинания (запятые, тире, точки, звездочки, дефисы и т.д.) НЕ ОЗВУЧИВАЙ как слова — используй их только для создания естественных пауз в речи. Используй естественные интонации, паузы и ритм речи. Избегай монотонности. Передавай эмоции через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу."
-                  }]
-                }
-              }
-            }));
-            
-            clearTimeout(timeout);
-            resolve();
-          });
-          
-          ws.on('error', (err) => {
-            clearTimeout(timeout);
-            reject(err);
-          });
-        });
-        
-        // Ждем завершения генерации (setupResponse и текст отправляются в обработчике message)
-        await new Promise<void>((resolve) => {
-          const completionTimeout = setTimeout(() => {
-            if (!isComplete) {
-              console.warn('[GEMINI-TTS-LIVE] ⚠️ Timeout waiting for completion');
-              ws.close();
-            }
-            resolve();
-          }, 120000); // 2 минуты таймаут
-          
-          // Сохраняем resolve для вызова в обработчиках
-          const originalResolve = resolve;
-          const checkComplete = () => {
-            if (isComplete || !ws.readyState) {
-              clearTimeout(completionTimeout);
-              originalResolve();
-            }
-          };
-          
-          ws.on('close', () => {
-            clearTimeout(completionTimeout);
-            originalResolve();
-          });
-        });
-        
+        }
+
         if (hasAudio) {
-          cleanup(); // Очищаем ключ из activeTtsStreams
-          return; // Успешно завершили
+          console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
+          cleanup();
+          res.end();
+          return;
         }
-        
-      } catch (wsError: any) {
-        cleanup(); // Очищаем ключ при ошибке
-        const errorMsg = wsError?.message || String(wsError);
-        console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errorMsg);
-        
-        // Если первый URL не сработал (404), пробуем второй вариант
-        if (errorMsg.includes('404') || errorMsg.includes('Unexpected server response: 404')) {
-          console.log('[GEMINI-TTS-LIVE] ⚠️ First WebSocket URL failed (404), trying alternative format...');
-          
-        }
-        
-        // Пробуем следующий прокси
-        continue;
+
+      } catch (err: any) {
+        console.warn(`[GEMINI-TTS-LIVE] Attempt failed (${p}):`, err.message);
+        continue; // Пробуем следующий прокси
       }
     }
     
