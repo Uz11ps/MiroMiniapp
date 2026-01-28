@@ -1943,16 +1943,16 @@ ${sourceText}`;
           }
           
           // Используем краткие версии для UI (они содержат весь смысл в 500 символах)
-          if (worldRulesShort) {
-            scenario.game.worldRules = worldRulesShort.length > 500 ? worldRulesShort.slice(0, 500) : worldRulesShort;
-            // НЕ сохраняем полные правила в БД - они хранятся в PDF файле
-            scenario.game.worldRulesPdfPath = rulesPdfUrl; // Сохраняем путь к PDF
+          // ОБЪЕДИНЯЕМ правила в одно поле - один файл правил содержит все
+          const combinedRules = [worldRulesShort, gameplayRulesShort].filter(Boolean).join('\n\n').slice(0, 500);
+          if (combinedRules) {
+            scenario.game.worldRules = combinedRules; // Используем worldRules как общее поле для правил
+            scenario.game.gameplayRules = combinedRules; // Дублируем для обратной совместимости
+            // Сохраняем путь к PDF правил - ОДИН ФАЙЛ ПРАВИЛ
+            scenario.game.rulesPdfPath = rulesPdfUrl;
           }
-          if (gameplayRulesShort) {
-            scenario.game.gameplayRules = gameplayRulesShort.length > 500 ? gameplayRulesShort.slice(0, 500) : gameplayRulesShort;
-            scenario.game.gameplayRulesPdfPath = rulesPdfUrl; // Сохраняем путь к PDF (оба типа правил в одном файле)
-          }
-          scenario.game.scenarioPdfPath = scenarioPdfUrl; // Сохраняем путь к PDF сценария
+          // Сохраняем путь к PDF сценария - ВТОРОЙ ФАЙЛ
+          scenario.game.scenarioPdfPath = scenarioPdfUrl;
           console.log(`[INGEST-IMPORT] Stage 2 complete: Rules extracted from ${rulesChunks.length} chunks with scenario context`);
           
           // ЭТАП 3: Анализ сценария игры
@@ -2394,9 +2394,8 @@ ${chunkShape}`;
             rules: g.rules || '',
             worldRules: g.worldRules || null,
             gameplayRules: g.gameplayRules || null,
-            worldRulesPdfPath: g.worldRulesPdfPath || null, // Путь к PDF с правилами мира
-            gameplayRulesPdfPath: g.gameplayRulesPdfPath || null, // Путь к PDF с правилами процесса
-            scenarioPdfPath: g.scenarioPdfPath || null, // Путь к PDF со сценарием
+            rulesPdfPath: g.rulesPdfPath || null, // Путь к PDF с правилами игры (ОДИН ФАЙЛ)
+            scenarioPdfPath: g.scenarioPdfPath || null, // Путь к PDF со сценарием (ВТОРОЙ ФАЙЛ)
             introduction: g.introduction || null,
             backstory: g.backstory || null,
             adventureHooks: g.adventureHooks || null,
@@ -2414,17 +2413,23 @@ ${chunkShape}`;
         });
         
         // АВТОМАТИЧЕСКАЯ индексация правил для RAG в ФОНОВОМ режиме (не блокирует создание локаций)
-        if (g.worldRulesPdfPath || g.gameplayRulesPdfPath) {
+        // ДВА ФАЙЛА: rulesPdfPath (правила игры) и scenarioPdfPath (сценарий)
+        const rulesPdfPath = g.rulesPdfPath;
+        if (rulesPdfPath || g.scenarioPdfPath) {
           set({ progress: 'Запуск индексации RAG в фоне...' });
           console.log(`[INGEST-IMPORT] 🔍 Запуск автоматической индексации RAG для игры ${game.id} в фоновом режиме...`);
+          console.log(`[INGEST-IMPORT] 📄 Файлы: rules=${rulesPdfPath || 'нет'}, scenario=${g.scenarioPdfPath || 'нет'}`);
           
           // Запускаем индексацию в фоне, не ждем её завершения
           setImmediate(async () => {
             try {
               console.log(`[INGEST-IMPORT] 🔍 Начало фоновой индексации RAG для игры ${game.id}...`);
-              await indexRulesForRAG(prisma, game.id, g.worldRulesPdfPath || null, g.gameplayRulesPdfPath || null, g.scenarioPdfPath || null);
+              console.log(`[INGEST-IMPORT] 📄 Передаем в indexRulesForRAG: rulesPdfPath=${rulesPdfPath || 'null'}, scenarioPdfPath=${g.scenarioPdfPath || 'null'}`);
+              // Передаем один файл правил в оба параметра (для обратной совместимости со старой сигнатурой функции)
+              await indexRulesForRAG(prisma, game.id, rulesPdfPath || null, rulesPdfPath || null, g.scenarioPdfPath || null);
               const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
-              console.log(`[INGEST-IMPORT] ✅ RAG индексация завершена для игры ${game.id}: ${chunkCount} чанков проиндексировано`);
+              const scenarioChunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id, chunkType: 'scenario' } });
+              console.log(`[INGEST-IMPORT] ✅ RAG индексация завершена для игры ${game.id}: ${chunkCount} чанков проиндексировано (scenario: ${scenarioChunkCount})`);
               
               // Обновляем прогресс, если job еще активен
               const currentJob = ingestJobs.get(jobId);
@@ -2438,6 +2443,8 @@ ${chunkShape}`;
           });
           
           console.log(`[INGEST-IMPORT] ✅ Индексация RAG запущена в фоне, продолжаем создание локаций...`);
+        } else {
+          console.log(`[INGEST-IMPORT] ⚠️ Индексация RAG не запущена: нет PDF файлов (scenario или rules)`);
         }
         const keyToId = new Map<string, string>();
         // Сначала создаем все основные локации (без parentKey)
@@ -2758,8 +2765,8 @@ app.get('/api/admin/games/:id/rag-status', async (req, res) => {
       select: { 
         id: true, 
         title: true,
-        worldRulesPdfPath: true,
-        gameplayRulesPdfPath: true
+        rulesPdfPath: true,
+        scenarioPdfPath: true
       }
     });
     
@@ -2774,17 +2781,19 @@ app.get('/api/admin/games/:id/rag-status', async (req, res) => {
     
     const worldChunks = chunks.filter(c => c.chunkType === 'worldRules').length;
     const gameplayChunks = chunks.filter(c => c.chunkType === 'gameplayRules').length;
+    const scenarioChunks = chunks.filter(c => c.chunkType === 'scenario').length;
     const totalChunks = chunks.length;
     
     res.json({
       gameId: game.id,
       gameTitle: game.title,
-      hasWorldRulesPdf: !!game.worldRulesPdfPath,
-      hasGameplayRulesPdf: !!game.gameplayRulesPdfPath,
+      hasRulesPdf: !!(game as any).rulesPdfPath,
+      hasScenarioPdf: !!(game as any).scenarioPdfPath,
       indexed: {
         total: totalChunks,
         worldRules: worldChunks,
-        gameplayRules: gameplayChunks
+        gameplayRules: gameplayChunks,
+        scenario: scenarioChunks
       },
       status: totalChunks > 0 ? 'indexed' : 'not_indexed'
     });
@@ -10048,24 +10057,41 @@ async function generateDiceNarrative(prisma: ReturnType<typeof getPrisma>, gameI
  * Читает текст из PDF файла
  */
 async function readPdfText(pdfPath: string | null): Promise<string | null> {
-  if (!pdfPath) return null;
+  if (!pdfPath) {
+    console.log(`[RAG] readPdfText: pdfPath is null`);
+    return null;
+  }
   
   try {
     // Если путь относительный (начинается с /uploads), преобразуем в абсолютный
-    const absolutePath = pdfPath.startsWith('/uploads') 
-      ? path.join(UPLOAD_DIR, pdfPath.replace('/uploads/', ''))
-      : pdfPath;
+    let absolutePath: string;
+    if (pdfPath.startsWith('/uploads/pdfs/')) {
+      // Путь вида /uploads/pdfs/filename.pdf
+      absolutePath = path.join(PDF_DIR, pdfPath.replace('/uploads/pdfs/', ''));
+    } else if (pdfPath.startsWith('/uploads/')) {
+      // Путь вида /uploads/filename.pdf
+      absolutePath = path.join(UPLOAD_DIR, pdfPath.replace('/uploads/', ''));
+    } else {
+      // Абсолютный путь
+      absolutePath = pdfPath;
+    }
+    
+    console.log(`[RAG] readPdfText: исходный путь=${pdfPath}, абсолютный путь=${absolutePath}`);
     
     if (!fs.existsSync(absolutePath)) {
-      console.warn(`[RAG] PDF file not found: ${absolutePath}`);
+      console.warn(`[RAG] PDF file not found: ${absolutePath} (исходный путь: ${pdfPath})`);
       return null;
     }
     
     const buffer = fs.readFileSync(absolutePath);
+    console.log(`[RAG] readPdfText: файл найден, размер=${buffer.length} байт`);
     const parsed = await pdfParse(buffer).catch(() => null);
     if (parsed && parsed.text) {
+      const textLength = (parsed.text || '').replace(/\r/g, '\n').length;
+      console.log(`[RAG] readPdfText: PDF распарсен, текст=${textLength} символов`);
       return (parsed.text || '').replace(/\r/g, '\n');
     }
+    console.warn(`[RAG] readPdfText: PDF распарсен, но текст пустой`);
     return null;
   } catch (e) {
     console.error(`[RAG] Failed to read PDF ${pdfPath}:`, e);
@@ -10076,11 +10102,15 @@ async function readPdfText(pdfPath: string | null): Promise<string | null> {
 /**
  * Разбивает правила на чанки и индексирует их для RAG
  * Теперь читает из PDF файлов, а не из БД
+ * ДВА ФАЙЛА: rulesPdfPath (правила игры) и scenarioPdfPath (сценарий)
  */
 async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesPdfPath: string | null, gameplayRulesPdfPath: string | null, scenarioPdfPath: string | null = null): Promise<void> {
   try {
+    // УПРОЩЕНО: worldRulesPdfPath и gameplayRulesPdfPath - это один файл правил (передается дважды для обратной совместимости)
+    const rulesPdfPath = worldRulesPdfPath || gameplayRulesPdfPath;
+    
     console.log(`[RAG-INDEX] 🚀 Начало индексации RAG для игры ${gameId}`);
-    console.log(`[RAG-INDEX] 📄 PDF файлы: scenario=${scenarioPdfPath ? 'да' : 'нет'}, worldRules=${worldRulesPdfPath ? 'да' : 'нет'}, gameplayRules=${gameplayRulesPdfPath ? 'да' : 'нет'}`);
+    console.log(`[RAG-INDEX] 📄 Файлы: rules=${rulesPdfPath ? 'да' : 'нет'}, scenario=${scenarioPdfPath ? 'да' : 'нет'}`);
     
     // Удаляем старые чанки для этой игры
     const deletedCount = await prisma.ruleChunk.deleteMany({ where: { gameId } });
@@ -10090,8 +10120,11 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
     
     // Читаем текст из PDF файлов (ПРИОРИТЕТ: сначала сценарий!)
     const scenarioFull = await readPdfText(scenarioPdfPath);
-    const worldRulesFull = await readPdfText(worldRulesPdfPath);
-    const gameplayRulesFull = await readPdfText(gameplayRulesPdfPath);
+    
+    // УПРОЩЕНО: Один файл правил читаем один раз и используем для обоих типов чанков (worldRules и gameplayRules)
+    const rulesFull = await readPdfText(rulesPdfPath);
+    const worldRulesFull = rulesFull;
+    const gameplayRulesFull = rulesFull;
     
     if (scenarioFull) {
       console.log(`[RAG-INDEX] 📖 СЦЕНАРИЙ (приоритет): ${scenarioFull.length.toLocaleString()} символов`);
@@ -10404,19 +10437,80 @@ async function analyzeAndPlanGameProgression(
       return;
     }
     
-    // Получаем все чанки сценария из RAG
-    const scenarioChunks = await prisma.ruleChunk.findMany({
+    // КРИТИЧЕСКИ ВАЖНО: Получаем scenarioPdfPath из игры для чтения сценария напрямую
+    const game = await prisma.game.findUnique({
+      where: { id: gameId },
+      select: { scenarioPdfPath: true }
+    });
+    
+    let scenarioText = '';
+    
+    // Сначала пытаемся получить чанки из RAG
+    let scenarioChunks = await prisma.ruleChunk.findMany({
       where: { gameId, chunkType: 'scenario' },
       orderBy: { chunkIndex: 'asc' }
     });
     
-    if (scenarioChunks.length === 0) {
-      console.log(`[GAME-PLAN] ⚠️ Нет чанков сценария для анализа`);
-      return;
+    if (scenarioChunks.length > 0) {
+      // Используем чанки из RAG
+      scenarioText = scenarioChunks.map(c => c.content).join('\n\n');
+      console.log(`[GAME-PLAN] ✅ Используем чанки сценария из RAG: ${scenarioChunks.length} чанков`);
+    } else if (game?.scenarioPdfPath) {
+      // Если чанков нет, но есть scenarioPdfPath - читаем напрямую из PDF
+      console.log(`[GAME-PLAN] ⏳ Чанки сценария еще не готовы, читаем напрямую из PDF: ${game.scenarioPdfPath}`);
+      const pdfText = await readPdfText(game.scenarioPdfPath);
+      if (pdfText) {
+        scenarioText = pdfText;
+        console.log(`[GAME-PLAN] ✅ Сценарий прочитан из PDF: ${scenarioText.length.toLocaleString()} символов`);
+      } else {
+        console.log(`[GAME-PLAN] ⚠️ Не удалось прочитать сценарий из PDF: ${game.scenarioPdfPath}`);
+        // Ждем завершения индексации RAG (если она еще идет)
+        const maxWaitTime = 30000; // 30 секунд
+        const checkInterval = 2000; // 2 секунды
+        const startWait = Date.now();
+        
+        while (scenarioChunks.length === 0 && (Date.now() - startWait) < maxWaitTime) {
+          await new Promise(resolve => setTimeout(resolve, checkInterval));
+          scenarioChunks = await prisma.ruleChunk.findMany({
+            where: { gameId, chunkType: 'scenario' },
+            orderBy: { chunkIndex: 'asc' }
+          });
+          
+          if (scenarioChunks.length > 0) {
+            scenarioText = scenarioChunks.map(c => c.content).join('\n\n');
+            console.log(`[GAME-PLAN] ✅ Чанки сценария готовы: ${scenarioChunks.length} чанков найдено`);
+            break;
+          }
+        }
+      }
+    } else {
+      // Нет ни чанков, ни PDF - ждем индексации
+      console.log(`[GAME-PLAN] ⏳ Чанки сценария еще не готовы, ждем завершения индексации RAG...`);
+      
+      const maxWaitTime = 30000; // 30 секунд
+      const checkInterval = 2000; // 2 секунды
+      const startWait = Date.now();
+      
+      while (scenarioChunks.length === 0 && (Date.now() - startWait) < maxWaitTime) {
+        await new Promise(resolve => setTimeout(resolve, checkInterval));
+        scenarioChunks = await prisma.ruleChunk.findMany({
+          where: { gameId, chunkType: 'scenario' },
+          orderBy: { chunkIndex: 'asc' }
+        });
+        
+        if (scenarioChunks.length > 0) {
+          scenarioText = scenarioChunks.map(c => c.content).join('\n\n');
+          console.log(`[GAME-PLAN] ✅ Чанки сценария готовы: ${scenarioChunks.length} чанков найдено`);
+          break;
+        }
+      }
     }
     
-    // Собираем полный текст сценария
-    const scenarioText = scenarioChunks.map(c => c.content).join('\n\n');
+    if (!scenarioText || scenarioText.length === 0) {
+      console.log(`[GAME-PLAN] ⚠️ Нет чанков сценария для анализа (возможно, индексация еще не завершена или сценарий не был загружен)`);
+      console.log(`[GAME-PLAN] 💡 Планирование будет запущено автоматически после завершения индексации RAG`);
+      return;
+    }
     
     // Формируем структуру локаций для анализа
     const locationsStructure = locations.map(loc => ({
