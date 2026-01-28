@@ -8948,9 +8948,12 @@ app.post('/api/tts-stream', async (req, res) => {
               if (msg.setupComplete) {
                 console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
                 ws.send(JSON.stringify({
-                  userContent: [{
-                    parts: [{ text: text }]
-                  }]
+                  clientContent: {
+                    turns: [{
+                      parts: [{ text: text }]
+                    }],
+                    turnComplete: true
+                  }
                 }));
               }
 
