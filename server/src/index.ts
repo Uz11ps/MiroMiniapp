@@ -8913,6 +8913,9 @@ app.post('/api/tts-stream', async (req, res) => {
             ws.send(JSON.stringify({
               setup: {
                 model: `models/${finalModelName}`,
+                systemInstruction: {
+                  parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — прочитать предоставленный текст СЛОВО В СЛОВО на русском языке. Не отвечай на него, не комментируй, не продолжай историю. Просто читай то, что тебе прислали." }]
+                },
                 generationConfig: {
                   responseModalities: ["audio"],
                   speechConfig: {
@@ -8950,7 +8953,7 @@ app.post('/api/tts-stream', async (req, res) => {
                 ws.send(JSON.stringify({
                   clientContent: {
                     turns: [{
-                      parts: [{ text: text }]
+                      parts: [{ text: `ПРОЧИТАЙ СЛЕДУЮЩИЙ ТЕКСТ СЛОВО В СЛОВО: ${text}` }]
                     }],
                     turnComplete: true
                   }
@@ -8973,8 +8976,10 @@ app.post('/api/tts-stream', async (req, res) => {
 
               // Если генерация завершена
               if (msg.serverContent?.turnComplete) {
-                console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
-                ws.close();
+                console.log('[GEMINI-TTS-LIVE] ✅ Turn complete, closing in 500ms...');
+                setTimeout(() => {
+                  ws.close();
+                }, 500);
               }
             } catch (e) {
               console.warn('[GEMINI-TTS-LIVE] Error parsing WS message:', e);
