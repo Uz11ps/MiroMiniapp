@@ -8858,9 +8858,9 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для WebSocket (Live API) используем 2.0 Flash Exp или Native Audio модель
-    // ВАЖНО: gemini-2.0-flash-exp — стандарт для Live API
-    let finalModelName = 'gemini-2.0-flash-exp';
+    // Используем модель с нативной поддержкой AUDIO из твоего ListModels
+    // ВАЖНО: Только модели с bidiGenerateContent работают через WebSocket
+    let finalModelName = 'gemini-2.5-flash-native-audio-latest';
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio)
