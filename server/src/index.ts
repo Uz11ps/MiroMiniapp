@@ -5904,41 +5904,230 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for RAG-generated text');
     console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
     
-    // КРИТИЧЕСКИ ВАЖНО: Вызываем TTS стриминг напрямую и СТРИМИМ чанки через SSE сразу, БЕЗ накопления
+    // КРИТИЧЕСКИ ВАЖНО: Используем логику TTS стриминга напрямую из endpoint, стримим чанки через SSE сразу
     (async () => {
       try {
+        const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
+        if (!geminiApiKey) {
+          throw new Error('GEMINI_API_KEY not found');
+        }
+        
+        let finalModelName = 'gemini-2.5-flash-preview-tts';
+        finalModelName = finalModelName.replace(/-tts$/, '');
+        if (finalModelName.includes('2.5') || !finalModelName.includes('2.0-flash-exp')) {
+          finalModelName = 'gemini-2.0-flash-exp';
+        }
+        const finalVoiceName = 'Kore';
+        
+        const proxies = parseGeminiProxies();
+        const attempts = proxies.length ? proxies : ['__direct__'];
+        
         let chunkCount = 0;
         let totalSize = 0;
+        let hasAudio = false;
         
-        // Вызываем функцию TTS стриминга напрямую - стримим чанки сразу через SSE
-        await generateTTSStreamDirect({
-          text: fullText,
-          voiceName: 'Kore',
-          modelName: 'gemini-2.5-flash-preview-tts',
-          gameId: gameId,
-          isNarrator: true,
-          onAudioChunk: (chunk: Buffer) => {
-            // СТРИМИМ ЧАНКИ НАПРЯМУЮ ЧЕРЕЗ SSE БЕЗ НАКОПЛЕНИЯ
-            chunkCount++;
-            totalSize += chunk.length;
-            const chunkBase64 = chunk.toString('base64');
-            sendSSE('audio_chunk', { 
-              chunk: chunkBase64,
-              chunkIndex: chunkCount,
-              format: 'pcm',
-              sampleRate: 24000,
-              channels: 1,
-              bitsPerSample: 16
+        for (const p of attempts) {
+          try {
+            const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+            
+            const wsOptions: any = {};
+            if (p !== '__direct__') {
+              try {
+                const { HttpsProxyAgent } = await import('https-proxy-agent');
+                wsOptions.agent = new HttpsProxyAgent(p);
+              } catch (e) {
+                // Продолжаем без прокси
+              }
+            }
+            
+            const ws = new WebSocket(wsUrl, wsOptions);
+            
+            let isConnected = false;
+            let isComplete = false;
+            let textSent = false;
+            
+            const isBufferValid = (buffer: Buffer): boolean => {
+              return buffer && buffer.length > 0;
+            };
+            
+            ws.on('message', (data: Buffer) => {
+              try {
+                const message = JSON.parse(data.toString('utf-8'));
+                
+                if (message.setupComplete) {
+                  isConnected = true;
+                  
+                  if (!textSent) {
+                    textSent = true;
+                    ws.send(JSON.stringify({
+                      clientContent: {
+                        turns: [{
+                          role: "user",
+                          parts: [{ text: fullText }]
+                        }],
+                        turnComplete: true
+                      }
+                    }));
+                  }
+                  return;
+                }
+                
+                if (!isConnected) return;
+                
+                if (message.serverContent) {
+                  if (message.serverContent.modelTurn) {
+                    const modelTurn = message.serverContent.modelTurn;
+                    const parts = modelTurn.parts || [];
+                    
+                    for (const part of parts) {
+                      if (part.inlineData && part.inlineData.data) {
+                        let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                        
+                        if (audioBuffer.length % 2 !== 0) {
+                          audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
+                        }
+                        
+                        if (isBufferValid(audioBuffer)) {
+                          hasAudio = true;
+                          chunkCount++;
+                          totalSize += audioBuffer.length;
+                          
+                          // СТРИМИМ ЧАНКИ НАПРЯМУЮ ЧЕРЕЗ SSE БЕЗ НАКОПЛЕНИЯ
+                          const chunkBase64 = audioBuffer.toString('base64');
+                          sendSSE('audio_chunk', { 
+                            chunk: chunkBase64,
+                            chunkIndex: chunkCount,
+                            format: 'pcm',
+                            sampleRate: 24000,
+                            channels: 1,
+                            bitsPerSample: 16
+                          });
+                        }
+                      }
+                    }
+                  }
+                  
+                  if (!hasAudio && message.serverContent.parts) {
+                    const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
+                    for (const part of parts) {
+                      if (part.inlineData && part.inlineData.data) {
+                        let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                        
+                        if (audioBuffer.length % 2 !== 0) {
+                          audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
+                        }
+                        
+                        if (isBufferValid(audioBuffer)) {
+                          hasAudio = true;
+                          chunkCount++;
+                          totalSize += audioBuffer.length;
+                          
+                          // СТРИМИМ ЧАНКИ НАПРЯМУЮ ЧЕРЕЗ SSE БЕЗ НАКОПЛЕНИЯ
+                          const chunkBase64 = audioBuffer.toString('base64');
+                          sendSSE('audio_chunk', { 
+                            chunk: chunkBase64,
+                            chunkIndex: chunkCount,
+                            format: 'pcm',
+                            sampleRate: 24000,
+                            channels: 1,
+                            bitsPerSample: 16
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+                
+                if (message.serverContent && message.serverContent.turnComplete) {
+                  isComplete = true;
+                  ws.close();
+                }
+              } catch (e) {
+                // Игнорируем ошибки парсинга
+              }
             });
+            
+            ws.on('error', (error) => {
+              if (!isConnected && !hasAudio) {
+                ws.close();
+              }
+            });
+            
+            ws.on('close', () => {
+              // Закрытие обрабатывается в Promise
+            });
+            
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                reject(new Error('WebSocket connection timeout'));
+              }, 10000);
+              
+              ws.on('open', () => {
+                ws.send(JSON.stringify({
+                  setup: {
+                    model: `models/${finalModelName}`,
+                    generationConfig: {
+                      responseModalities: ["AUDIO"],
+                      speechConfig: {
+                        voiceConfig: {
+                          prebuiltVoiceConfig: {
+                            voiceName: finalVoiceName
+                          }
+                        }
+                      }
+                    },
+                    systemInstruction: {
+                      parts: [{
+                        text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек. НЕ анализируй текст, НЕ комментируй его, НЕ отвечай на вопросы в тексте. Просто ОЗВУЧИВАЙ текст слово в слово. КРИТИЧЕСКИ ВАЖНО: Все цифры и числа читай ТОЛЬКО на русском языке (например, 123 читай как 'сто двадцать три', 5 как 'пять', а не 'five' или 'one two three'). КРИТИЧЕСКИ ВАЖНО: Знаки препинания (запятые, тире, точки, звездочки, дефисы и т.д.) НЕ ОЗВУЧИВАЙ как слова — используй их только для создания естественных пауз в речи. Используй естественные интонации, паузы и ритм речи. Избегай монотонности. Передавай эмоции через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу."
+                      }]
+                    }
+                  }
+                }));
+                
+                clearTimeout(timeout);
+                resolve();
+              });
+              
+              ws.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+              });
+            });
+            
+            await new Promise<void>((resolve) => {
+              const completionTimeout = setTimeout(() => {
+                if (!isComplete) {
+                  ws.close();
+                }
+                resolve();
+              }, 120000);
+              
+              ws.on('close', () => {
+                clearTimeout(completionTimeout);
+                resolve();
+              });
+            });
+            
+            if (hasAudio) {
+              // Отправляем финальное событие о завершении стриминга
+              sendSSE('audio_complete', { 
+                totalChunks: chunkCount,
+                totalSize: totalSize
+              });
+              console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
+              return; // Успешно завершили
+            }
+            
+          } catch (wsError: any) {
+            // Пробуем следующий прокси
+            continue;
           }
-        });
+        }
         
-        // Отправляем финальное событие о завершении стриминга
-        sendSSE('audio_complete', { 
-          totalChunks: chunkCount,
-          totalSize: totalSize
-        });
-        console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
+        if (!hasAudio) {
+          throw new Error('Failed to generate TTS stream');
+        }
+        
       } catch (ttsErr: any) {
         console.error('[REPLY-STREAM] ❌ TTS streaming error:', ttsErr?.message || String(ttsErr));
         sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
