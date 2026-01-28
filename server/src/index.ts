@@ -4516,7 +4516,7 @@ app.post('/api/chat/reply', async (req, res) => {
           create: { userId: 'lobby:' + lobbyId, gameId, history: history as any },
         });
         wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
-        return res.json({ message: finalText, fallback: false, gameOver: true });
+        return res.json({ message: finalText, fallback: false, gameOver: true, audioStream: true });
       } else {
         const uid = await getUserId();
         if (uid) {
@@ -4529,7 +4529,7 @@ app.post('/api/chat/reply', async (req, res) => {
             create: { userId: uid, gameId, history: history as any },
           });
         }
-        return res.json({ message: finalText, fallback: false, gameOver: true });
+        return res.json({ message: finalText, fallback: false, gameOver: true, audioStream: true });
       }
     }
     let actingUserId: string | null = null;
@@ -5087,13 +5087,19 @@ app.post('/api/chat/reply', async (req, res) => {
         }
       }
       
+      // КРИТИЧЕСКИ ВАЖНО: Используем RAG через buildGptSceneContext (sc уже содержит RAG чанки)
+      const hasRAGContext = sc && sc.includes('СЦЕНАРИЙ ИГРЫ') || sc?.includes('Правила мира') || sc?.includes('Правила процесса');
+      console.log('[REPLY] 🔍 Generating text with RAG context:', hasRAGContext ? 'YES' : 'NO', 'context length:', sc?.length || 0);
+      
       const { text: generatedText } = await generateChatCompletion({
         systemPrompt: sysWithCharacter,
         userPrompt: enhancedUserPrompt + realExitsInfo,
         history: baseHistory
       });
       text = generatedText;
-      console.log('[REPLY] ⚠️ Generated NEW text (pre-generated not found)');
+    
+      console.log('[REPLY] ✅ Text generated with RAG, length:', text?.length || 0);
+      console.log('[REPLY] 🔊 This text will be sent to TTS streaming via /api/tts-stream endpoint');
     }
     
     // КРИТИЧЕСКИ ВАЖНО: Fallback текст тоже должен пройти через блок TTS
@@ -5101,7 +5107,7 @@ app.post('/api/chat/reply', async (req, res) => {
       text = await fallbackBranch();
     }
     
-    // КРИТИЧЕСКИ ВАЖНО: Если текст все еще пустой после fallback, отправляем ответ без TTS
+    // КРИТИЧЕСКИ ВАЖНО: Если текст все еще пустой после fallback, отправляем fallback ответ без TTS
     if (!text) {
       return res.json({ message: 'Тусклый свет дрожит на стенах. Мир ждёт вашего шага. Осмотритесь или выберите направление.', fallback: true });
     }
@@ -5582,9 +5588,10 @@ app.post('/api/chat/reply', async (req, res) => {
       advanceTurn(lobbyId);
       wsNotifyLobby(lobbyId, { type: 'chat_updated', lobbyId });
       
-      // Отправляем текст сразу, аудио будет стримиться отдельно
+      // КРИТИЧЕСКИ ВАЖНО: Отправляем текст сгенерированный с RAG, клиент запросит TTS стриминг отдельно
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice, audioStream: true };
-      console.log('[REPLY] ✅ Returning text immediately, audio will stream separately');
+      console.log('[REPLY] ✅ Text generated with RAG, sending response with audioStream=true');
+      console.log('[REPLY] 🔊 Client should request /api/tts-stream with this text, length:', text?.length || 0);
       return res.json(response);
           } else {
             const uid = await resolveUserIdFromQueryOrBody(req, prisma);
@@ -5605,9 +5612,10 @@ app.post('/api/chat/reply', async (req, res) => {
         await prisma.chatSession.update({ where: { userId_gameId: { userId: uid, gameId: gameId || 'unknown' } }, data: { history: newHist as any } });
       }
       
-      // Отправляем текст сразу, аудио будет стримиться отдельно
+      // КРИТИЧЕСКИ ВАЖНО: Отправляем текст сгенерированный с RAG, клиент запросит TTS стриминг отдельно
       const response: any = { message: text, fallback: false, requestDice: aiRequestDice, audioStream: true };
-      console.log('[REPLY] ✅ Returning text immediately, audio will stream separately');
+      console.log('[REPLY] ✅ Text generated with RAG, sending response with audioStream=true');
+      console.log('[REPLY] 🔊 Client should request /api/tts-stream with this text, length:', text?.length || 0);
       return res.json(response);
           }
         } catch (e) {
@@ -10104,8 +10112,8 @@ async function readPdfText(pdfPath: string | null): Promise<string | null> {
  * ДВА ФАЙЛА: rulesPdfPath (правила игры) и scenarioPdfPath (сценарий)
  */
 async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, rulesPdfPath: string | null, scenarioPdfPath: string | null = null): Promise<void> {
+  const startTime = Date.now(); // Время начала индексации для подсчета общего времени
   try {
-    
     console.log(`[RAG-INDEX] 🚀 Начало индексации RAG для игры ${gameId}`);
     console.log(`[RAG-INDEX] 📄 Файлы: rules=${rulesPdfPath ? 'да' : 'нет'}, scenario=${scenarioPdfPath ? 'да' : 'нет'}`);
     
@@ -10986,6 +10994,7 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
   if (game) {
     // Проверяем, есть ли индексированные чанки для RAG
     const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } }).catch(() => 0);
+    console.log(`[RAG] 📊 Chunk count for game ${game.id}: ${chunkCount}`);
     
     if (chunkCount > 0) {
       // Используем RAG: ищем релевантные чанки на основе текущей сцены
@@ -10996,6 +11005,7 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
         characterNames: playableCharacters.map(c => c.name)
       };
       
+      console.log(`[RAG] 🔍 Searching relevant chunks for location: ${loc?.title || 'unknown'}`);
       const relevantChunks = await findRelevantRuleChunks(prisma, game.id, sceneContext);
       
       // КРИТИЧЕСКИ ВАЖНО: Сначала добавляем СЦЕНАРИЙ (приоритет!), потом правила как вспомогательный контекст
@@ -11003,18 +11013,24 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
       
       if (relevantChunks.scenario) {
         contextParts.push(`СЦЕНАРИЙ ИГРЫ (ОСНОВНОЙ ИСТОЧНИК - играй строго по сценарию!):\n${relevantChunks.scenario}`);
+        console.log(`[RAG] ✅ Found scenario chunks, length: ${relevantChunks.scenario.length}`);
       }
       
       if (relevantChunks.worldRules) {
         contextParts.push(`Правила мира (вспомогательный контекст для понимания механик):\n${relevantChunks.worldRules}`);
+        console.log(`[RAG] ✅ Found world rules chunks, length: ${relevantChunks.worldRules.length}`);
       }
       
       if (relevantChunks.gameplayRules) {
         contextParts.push(`Правила процесса (вспомогательный контекст для понимания механик):\n${relevantChunks.gameplayRules}`);
+        console.log(`[RAG] ✅ Found gameplay rules chunks, length: ${relevantChunks.gameplayRules.length}`);
       }
       
       if (contextParts.length > 0) {
         gameRulesInfo = '\n\n' + contextParts.join('\n\n');
+        console.log(`[RAG] ✅ RAG context added to prompt, total length: ${gameRulesInfo.length}`);
+      } else {
+        console.log(`[RAG] ⚠️ No relevant chunks found for scene context`);
       }
     } else {
       // Fallback: читаем из PDF файлов (если RAG еще не настроен)
