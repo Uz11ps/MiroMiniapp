@@ -5956,43 +5956,71 @@ app.post('/api/chat/reply-stream', async (req, res) => {
           return;
         }
         
+        console.log('[REPLY-STREAM] 🔊 Starting to read TTS stream, reader type:', typeof reader);
+        console.log('[REPLY-STREAM] 🔊 Response headers:', Object.fromEntries(ttsResponse.headers));
+        
         let chunkCount = 0;
         let totalSize = 0;
+        let iterationCount = 0;
+        let emptyChunks = 0;
         
-        for await (const chunk of reader) {
-          let audioBuffer: Buffer;
-          
-          if (Buffer.isBuffer(chunk)) {
-            audioBuffer = chunk;
-          } else if (chunk instanceof Uint8Array) {
-            audioBuffer = Buffer.from(chunk);
-          } else if (chunk instanceof ArrayBuffer) {
-            audioBuffer = Buffer.from(chunk);
-          } else {
-            continue;
-          }
-          
-          if (audioBuffer.length > 0) {
-            chunkCount++;
-            totalSize += audioBuffer.length;
+        try {
+          for await (const chunk of reader) {
+            iterationCount++;
+            console.log(`[REPLY-STREAM] 🔊 Received chunk #${iterationCount}, type:`, chunk?.constructor?.name || typeof chunk, 'length:', chunk?.length || 'unknown');
             
-            const chunkBase64 = audioBuffer.toString('base64');
-            sendSSE('audio_chunk', { 
-              chunk: chunkBase64,
-              chunkIndex: chunkCount,
-              format: 'pcm',
-              sampleRate: 24000,
-              channels: 1,
-              bitsPerSample: 16
-            });
+            let audioBuffer: Buffer;
+            
+            if (Buffer.isBuffer(chunk)) {
+              audioBuffer = chunk;
+              console.log(`[REPLY-STREAM] 🔊 Chunk #${iterationCount} is Buffer, length:`, audioBuffer.length);
+            } else if (chunk instanceof Uint8Array) {
+              audioBuffer = Buffer.from(chunk);
+              console.log(`[REPLY-STREAM] 🔊 Chunk #${iterationCount} is Uint8Array, converted to Buffer, length:`, audioBuffer.length);
+            } else if (chunk instanceof ArrayBuffer) {
+              audioBuffer = Buffer.from(chunk);
+              console.log(`[REPLY-STREAM] 🔊 Chunk #${iterationCount} is ArrayBuffer, converted to Buffer, length:`, audioBuffer.length);
+            } else {
+              console.warn(`[REPLY-STREAM] ⚠️ Chunk #${iterationCount} unknown type:`, typeof chunk, chunk?.constructor?.name);
+              continue;
+            }
+            
+            if (audioBuffer.length > 0) {
+              chunkCount++;
+              totalSize += audioBuffer.length;
+              
+              console.log(`[REPLY-STREAM] 🔊 Processing audio chunk #${chunkCount}, size:`, audioBuffer.length, 'total size:', totalSize);
+              
+              const chunkBase64 = audioBuffer.toString('base64');
+              sendSSE('audio_chunk', { 
+                chunk: chunkBase64,
+                chunkIndex: chunkCount,
+                format: 'pcm',
+                sampleRate: 24000,
+                channels: 1,
+                bitsPerSample: 16
+              });
+              
+              console.log(`[REPLY-STREAM] 🔊 Sent audio chunk #${chunkCount} via SSE`);
+            } else {
+              emptyChunks++;
+              console.warn(`[REPLY-STREAM] ⚠️ Empty chunk #${iterationCount} skipped`);
+            }
           }
+          
+          console.log('[REPLY-STREAM] 🔊 Stream reading completed, iterations:', iterationCount, 'chunks:', chunkCount, 'empty:', emptyChunks, 'total size:', totalSize);
+        } catch (readError: any) {
+          console.error('[REPLY-STREAM] ❌ Error reading stream:', readError?.message || String(readError));
+          console.error('[REPLY-STREAM] ❌ Error stack:', readError?.stack);
+          sendSSE('audio_error', { error: `Stream read error: ${readError?.message || String(readError)}` });
+          return;
         }
         
         sendSSE('audio_complete', { 
           totalChunks: chunkCount,
           totalSize: totalSize
         });
-        console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks');
+        console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
         
       } catch (ttsErr: any) {
         console.error('[REPLY-STREAM] ❌ TTS streaming error:', ttsErr?.message || String(ttsErr));
