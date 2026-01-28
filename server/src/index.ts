@@ -2425,8 +2425,7 @@ ${chunkShape}`;
             try {
               console.log(`[INGEST-IMPORT] 🔍 Начало фоновой индексации RAG для игры ${game.id}...`);
               console.log(`[INGEST-IMPORT] 📄 Передаем в indexRulesForRAG: rulesPdfPath=${rulesPdfPath || 'null'}, scenarioPdfPath=${g.scenarioPdfPath || 'null'}`);
-              // Передаем один файл правил в оба параметра (для обратной совместимости со старой сигнатурой функции)
-              await indexRulesForRAG(prisma, game.id, rulesPdfPath || null, rulesPdfPath || null, g.scenarioPdfPath || null);
+              await indexRulesForRAG(prisma, game.id, rulesPdfPath || null, g.scenarioPdfPath || null);
               const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
               const scenarioChunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id, chunkType: 'scenario' } });
               console.log(`[INGEST-IMPORT] ✅ RAG индексация завершена для игры ${game.id}: ${chunkCount} чанков проиндексировано (scenario: ${scenarioChunkCount})`);
@@ -10104,10 +10103,8 @@ async function readPdfText(pdfPath: string | null): Promise<string | null> {
  * Теперь читает из PDF файлов, а не из БД
  * ДВА ФАЙЛА: rulesPdfPath (правила игры) и scenarioPdfPath (сценарий)
  */
-async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesPdfPath: string | null, gameplayRulesPdfPath: string | null, scenarioPdfPath: string | null = null): Promise<void> {
+async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, rulesPdfPath: string | null, scenarioPdfPath: string | null = null): Promise<void> {
   try {
-    // УПРОЩЕНО: worldRulesPdfPath и gameplayRulesPdfPath - это один файл правил (передается дважды для обратной совместимости)
-    const rulesPdfPath = worldRulesPdfPath || gameplayRulesPdfPath;
     
     console.log(`[RAG-INDEX] 🚀 Начало индексации RAG для игры ${gameId}`);
     console.log(`[RAG-INDEX] 📄 Файлы: rules=${rulesPdfPath ? 'да' : 'нет'}, scenario=${scenarioPdfPath ? 'да' : 'нет'}`);
@@ -11021,17 +11018,31 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
       }
     } else {
       // Fallback: читаем из PDF файлов (если RAG еще не настроен)
-      const worldRulesText = await readPdfText((game as any)?.worldRulesPdfPath || null);
-      const gameplayRulesText = await readPdfText((game as any)?.gameplayRulesPdfPath || null);
-      const rulesParts: string[] = [];
-      if (worldRulesText) rulesParts.push(`Правила мира (сопоставляй с текущей сценой, не обобщай): ${worldRulesText.slice(0, 50000)}`); // Ограничиваем до 50K символов для безопасности
-      if (gameplayRulesText) rulesParts.push(`Правила процесса (сопоставляй с текущей сценой, не обобщай): ${gameplayRulesText.slice(0, 50000)}`);
-      // Если PDF нет, используем краткие версии из БД
-      if (rulesParts.length === 0) {
-        if (game.worldRules) rulesParts.push(`Правила мира: ${game.worldRules}`);
-        if (game.gameplayRules) rulesParts.push(`Правила процесса: ${game.gameplayRules}`);
+      // КРИТИЧЕСКИ ВАЖНО: Сначала читаем СЦЕНАРИЙ (приоритет!), потом правила как вспомогательную информацию
+      const scenarioPdfPath = (game as any)?.scenarioPdfPath;
+      const rulesPdfPath = (game as any)?.rulesPdfPath;
+      
+      const contextParts: string[] = [];
+      
+      // ПРИОРИТЕТ: Сначала сценарий
+      const scenarioText = await readPdfText(scenarioPdfPath || null);
+      if (scenarioText) {
+        contextParts.push(`СЦЕНАРИЙ ИГРЫ (ОСНОВНОЙ ИСТОЧНИК - играй строго по сценарию!):\n${scenarioText.slice(0, 50000)}`); // Ограничиваем до 50K символов
       }
-      if (rulesParts.length > 0) gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+      
+      // Вспомогательная информация: правила
+      const rulesText = await readPdfText(rulesPdfPath || null);
+      if (rulesText) {
+        contextParts.push(`Правила игры (вспомогательный контекст для понимания механик):\n${rulesText.slice(0, 50000)}`); // Ограничиваем до 50K символов
+      }
+      
+      // Если PDF нет, используем краткие версии из БД
+      if (contextParts.length === 0) {
+        const combinedRules = [game.worldRules, game.gameplayRules].filter(Boolean).join('\n\n');
+        if (combinedRules) contextParts.push(`Правила игры: ${combinedRules}`);
+      }
+      
+      if (contextParts.length > 0) gameRulesInfo = '\n\n' + contextParts.join('\n\n');
     }
   }
   
