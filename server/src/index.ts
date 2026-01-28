@@ -9210,39 +9210,6 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     res.end();
   }
-
-// Тестовый эндпоинт для проверки работоспособности Gemini/Imagen API
-app.get('/api/image/test-gemini', async (req, res) => {
-  try {
-    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
-    if (!geminiKey) {
-      return res.status(400).json({ error: 'GEMINI_API_KEY not found in environment variables' });
-    }
-    
-    const testPrompt = 'A simple test image: a red circle on white background';
-    const testSize = '1024x1024';
-    
-    console.log('[IMG-TEST] Testing Gemini/Imagen API endpoints...');
-    const result = await generateViaGemini(testPrompt, testSize, geminiKey);
-    
-    if (result) {
-      return res.json({ 
-        success: true, 
-        message: 'Gemini/Imagen API работает! Изображение успешно сгенерировано.',
-        imageSize: Math.round(result.length * 0.75),
-        dataUrl: `data:image/png;base64,${result.slice(0, 100)}...` // Показываем только начало для проверки
-      });
-    } else {
-      return res.status(502).json({ 
-        success: false, 
-        error: 'Все эндпоинты Gemini/Imagen вернули ошибку. Проверьте логи сервера для деталей.',
-        hint: 'Убедитесь, что API ключ имеет права на генерацию изображений и что эндпоинты доступны.'
-      });
-    }
-  } catch (e: any) {
-    console.error('[IMG-TEST] Error:', e);
-    return res.status(500).json({ error: 'test_failed', details: e?.message || String(e) });
-  }
 });
 
 // Тестовый эндпоинт для проверки работоспособности Gemini/Imagen API
