@@ -8925,7 +8925,7 @@ app.post('/api/tts-stream', async (req, res) => {
       return res.status(500).json({ error: 'no_api_key' });
     }
     
-    const finalModelName = 'gemini-2.0-flash-exp';
+    const finalModelName = 'gemini-2.0-flash-live-001';
     const finalVoiceName = voiceName || 'Kore';
     
     res.setHeader('Content-Type', 'audio/pcm');
@@ -8942,7 +8942,7 @@ app.post('/api/tts-stream', async (req, res) => {
       if (hasAudio) break;
 
       try {
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
         const wsOptions: any = {};
         
         if (p !== '__direct__') {
