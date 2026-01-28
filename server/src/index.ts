@@ -8927,9 +8927,22 @@ app.post('/api/tts-stream', async (req, res) => {
             }));
           };
 
-          ws.onmessage = (event) => {
+          ws.onmessage = async (event) => {
             try {
-              const msg = JSON.parse(event.data.toString());
+              let dataStr: string;
+              const rawData = event.data;
+              
+              if (typeof rawData === 'string') {
+                dataStr = rawData;
+              } else if (rawData instanceof Blob) {
+                dataStr = await rawData.text();
+              } else if (rawData && typeof (rawData as any).text === 'function') {
+                dataStr = await (rawData as any).text();
+              } else {
+                dataStr = Buffer.from(rawData as any).toString();
+              }
+              
+              const msg = JSON.parse(dataStr);
               
               // Если получили подтверждение настройки, отправляем текст
               if (msg.setupComplete) {
