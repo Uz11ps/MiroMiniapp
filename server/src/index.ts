@@ -223,9 +223,11 @@ const DEFAULT_SYSTEM_PROMPT =
   '1. МИР: Не воспринимай локации как изолированные комнаты. Это части одного большого мира. Переходы между ними должны быть плавными и описываться как движение персонажа. ' +
   '2. ПЕРСОНАЖИ: КРИТИЧЕСКИ ВАЖНО - Используй ТОЛЬКО данные об игровых персонажах из базы данных! В контексте указаны имена, классы, расы, характеристики, способности и оружие персонажей. НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО то, что указано в контексте. КРИТИЧЕСКИ ВАЖНО: Всегда используй ПОЛНОЕ имя персонажа целиком (все слова, не только первое!). Если имя "Сара Конор Младшая" - используй все три слова, а не только "Сара". НИКОГДА не сокращай имена персонажей до первого слова. Подбирай оружие и экипировку согласно классу и расе персонажа из базы данных. Если персонаж - маг, используй его магические способности из abilities. Если воин - его оружие и боевые навыки из abilities. ' +
   '3. ПРАВИЛА: Строго соблюдай правила D&D 5e. Используй характеристики персонажей (STR, DEX, CON, INT, WIS, CHA), классы и навыки. ' +
-  'ВАЖНО: Когда в контексте указаны "Правила мира" или "Правила процесса" - СОПОСТАВЛЯЙ их с текущей сценой и сценарием, а не просто обобщай. ' +
-  'Например, если в правилах написано "Мир D&D основан на ключевых предположениях: боги реальны..." - это обобщение. ' +
-  'Вместо этого используй конкретные детали из текущей сцены: какие боги упомянуты в этой локации, какие фракции действуют здесь, какая атмосфера именно в этой сцене. ' +
+  'КРИТИЧЕСКИ ВАЖНО: ИГРАЙ СТРОГО ПО СЦЕНАРИЮ! ' +
+  'СЦЕНАРИЙ - это ОСНОВНОЙ ИСТОЧНИК информации. Правила мира и правила процесса - это только ВСПОМОГАТЕЛЬНЫЙ контекст для понимания механик. ' +
+  'Если в сценарии указано что-то конкретное - используй ЭТО, а не общие правила D&D. ' +
+  'Например, если в сценарии написано "В этой локации находится алтарь с рунами" - используй ЭТО, а не общее описание алтарей из правил. ' +
+  'Правила нужны только для понимания механик (броски кубиков, характеристики, бой), но сюжет и локации бери ИЗ СЦЕНАРИЯ. ' +
   '3. ПРОВЕРКИ: Для любых действий, исход которых не очевиден, запрашивай проверки характеристик (d20 + модификатор). Модификатор = (характеристика-10)/2. ' +
   '4. СПАСБРОСКИ: При опасностях запрашивай спасброски (STR/DEX/CON/INT/WIS/CHA) и учитывай их результат. ' +
   '5. ПРЕИМУЩЕСТВО/ПОМЕХА: Если условия дают преимущество или помеху, явно указывай это при броске d20. ' +
@@ -2305,7 +2307,7 @@ ${chunkShape}`;
           setImmediate(async () => {
             try {
               console.log(`[INGEST-IMPORT] 🔍 Начало фоновой индексации RAG для игры ${game.id}...`);
-              await indexRulesForRAG(prisma, game.id, g.worldRulesPdfPath || null, g.gameplayRulesPdfPath || null);
+              await indexRulesForRAG(prisma, game.id, g.worldRulesPdfPath || null, g.gameplayRulesPdfPath || null, g.scenarioPdfPath || null);
               const chunkCount = await prisma.ruleChunk.count({ where: { gameId: game.id } });
               console.log(`[INGEST-IMPORT] ✅ RAG индексация завершена для игры ${game.id}: ${chunkCount} чанков проиндексировано`);
               
@@ -9479,10 +9481,10 @@ async function readPdfText(pdfPath: string | null): Promise<string | null> {
  * Разбивает правила на чанки и индексирует их для RAG
  * Теперь читает из PDF файлов, а не из БД
  */
-async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesPdfPath: string | null, gameplayRulesPdfPath: string | null): Promise<void> {
+async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: string, worldRulesPdfPath: string | null, gameplayRulesPdfPath: string | null, scenarioPdfPath: string | null = null): Promise<void> {
   try {
     console.log(`[RAG-INDEX] 🚀 Начало индексации RAG для игры ${gameId}`);
-    console.log(`[RAG-INDEX] 📄 PDF файлы: worldRules=${worldRulesPdfPath ? 'да' : 'нет'}, gameplayRules=${gameplayRulesPdfPath ? 'да' : 'нет'}`);
+    console.log(`[RAG-INDEX] 📄 PDF файлы: scenario=${scenarioPdfPath ? 'да' : 'нет'}, worldRules=${worldRulesPdfPath ? 'да' : 'нет'}, gameplayRules=${gameplayRulesPdfPath ? 'да' : 'нет'}`);
     
     // Удаляем старые чанки для этой игры
     const deletedCount = await prisma.ruleChunk.deleteMany({ where: { gameId } });
@@ -9490,10 +9492,14 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
       console.log(`[RAG-INDEX] 🗑️ Удалено старых чанков: ${deletedCount.count}`);
     }
     
-    // Читаем текст из PDF файлов
+    // Читаем текст из PDF файлов (ПРИОРИТЕТ: сначала сценарий!)
+    const scenarioFull = await readPdfText(scenarioPdfPath);
     const worldRulesFull = await readPdfText(worldRulesPdfPath);
     const gameplayRulesFull = await readPdfText(gameplayRulesPdfPath);
     
+    if (scenarioFull) {
+      console.log(`[RAG-INDEX] 📖 СЦЕНАРИЙ (приоритет): ${scenarioFull.length.toLocaleString()} символов`);
+    }
     if (worldRulesFull) {
       console.log(`[RAG-INDEX] 📖 Правила мира: ${worldRulesFull.length.toLocaleString()} символов`);
     }
@@ -9505,9 +9511,10 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
     
     // ОЦЕНКА ВРЕМЕНИ ИНДЕКСАЦИИ
+    const estimatedScenarioChunks = scenarioFull ? Math.ceil(scenarioFull.length / chunkSize) : 0;
     const estimatedWorldChunks = worldRulesFull ? Math.ceil(worldRulesFull.length / chunkSize) : 0;
     const estimatedGameplayChunks = gameplayRulesFull ? Math.ceil(gameplayRulesFull.length / chunkSize) : 0;
-    const totalEstimatedChunks = estimatedWorldChunks + estimatedGameplayChunks;
+    const totalEstimatedChunks = estimatedScenarioChunks + estimatedWorldChunks + estimatedGameplayChunks;
     
     // Средняя скорость: ~300-500мс на чанк (включая создание резюме через Gemini API)
     const avgTimePerChunk = geminiKey ? 400 : 50; // Если есть Gemini API - медленнее из-за создания резюме
@@ -9517,7 +9524,7 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
     const estimatedTimeSecRemainder = estimatedTimeSec % 60;
     
     console.log(`[RAG-INDEX] ⏱️ ========== ОЦЕНКА ВРЕМЕНИ ==========`);
-    console.log(`[RAG-INDEX] 📊 Ожидаемое количество чанков: ${totalEstimatedChunks} (worldRules: ${estimatedWorldChunks}, gameplayRules: ${estimatedGameplayChunks})`);
+    console.log(`[RAG-INDEX] 📊 Ожидаемое количество чанков: ${totalEstimatedChunks} (scenario: ${estimatedScenarioChunks}, worldRules: ${estimatedWorldChunks}, gameplayRules: ${estimatedGameplayChunks})`);
     if (geminiKey) {
       console.log(`[RAG-INDEX] 🤖 Режим: с Gemini API (создание резюме для каждого чанка)`);
       console.log(`[RAG-INDEX] ⏱️ ОЦЕНОЧНОЕ ВРЕМЯ: ~${estimatedTimeMin > 0 ? `${estimatedTimeMin}мин ${estimatedTimeSecRemainder}сек` : `${estimatedTimeSec}сек`} (${estimatedTimeMs.toLocaleString()}мс)`);
@@ -9530,10 +9537,78 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
     console.log(`[RAG-INDEX] ⏱️ ====================================`);
     
     let totalChunksCreated = 0;
+    let scenarioChunksCount = 0;
     let worldChunksCount = 0;
     let gameplayChunksCount = 0;
     
-    // Обрабатываем правила мира
+    // КРИТИЧЕСКИ ВАЖНО: Сначала индексируем СЦЕНАРИЙ (приоритет!)
+    if (scenarioFull && scenarioFull.length > 0) {
+      const chunks: string[] = [];
+      for (let i = 0; i < scenarioFull.length; i += chunkSize) {
+        chunks.push(scenarioFull.slice(i, i + chunkSize));
+      }
+      
+      console.log(`[RAG-INDEX] 📦 СЦЕНАРИЙ (приоритет): разбито на ${chunks.length} чанков по ~${chunkSize.toLocaleString()} символов`);
+      const scenarioIndexStart = Date.now();
+      
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunkStart = Date.now();
+        const chunk = chunks[idx];
+        const keywords = extractKeywords(chunk);
+        let summary = chunk.slice(0, 500);
+        
+        if (geminiKey && chunk.length > 200) {
+          try {
+            const summaryStart = Date.now();
+            const summaryResult = await generateChatCompletion({
+              systemPrompt: 'Ты помощник, который создает краткие резюме частей сценария игры для семантического поиска.',
+              userPrompt: `Создай краткое резюме (максимум 200 символов) этого фрагмента СЦЕНАРИЯ:\n\n${chunk.slice(0, 5000)}`,
+              history: []
+            });
+            const summaryTime = Date.now() - summaryStart;
+            if (summaryResult?.text) {
+              summary = summaryResult.text.trim().slice(0, 500);
+            }
+            if ((idx + 1) % 5 === 0) {
+              console.log(`[RAG-INDEX] ⏳ СЦЕНАРИЙ: обработано ${idx + 1}/${chunks.length} чанков (резюме: ${summaryTime}мс)`);
+            }
+          } catch (e) {
+            console.warn(`[RAG-INDEX] ⚠️ Ошибка создания резюме для чанка сценария ${idx + 1}:`, e);
+          }
+        }
+        
+        await prisma.ruleChunk.create({
+          data: {
+            gameId,
+            chunkType: 'scenario',
+            chunkIndex: idx,
+            content: chunk,
+            keywords,
+            summary
+          }
+        });
+        totalChunksCreated++;
+        scenarioChunksCount++;
+        const chunkTime = Date.now() - chunkStart;
+        const elapsed = Date.now() - scenarioIndexStart;
+        const avgTime = Math.round(elapsed / (idx + 1));
+        const remaining = Math.max(0, chunks.length - (idx + 1));
+        const estimatedRemaining = Math.round(remaining * avgTime);
+        const progressPercent = Math.round(((idx + 1) / chunks.length) * 100);
+        
+        if ((idx + 1) % 10 === 0 || idx === chunks.length - 1) {
+          const remainingSec = Math.ceil(estimatedRemaining / 1000);
+          const remainingMin = Math.floor(remainingSec / 60);
+          const remainingSecRemainder = remainingSec % 60;
+          const remainingStr = remainingMin > 0 ? `${remainingMin}мин ${remainingSecRemainder}сек` : `${remainingSec}сек`;
+          console.log(`[RAG-INDEX] ✅ СЦЕНАРИЙ: ${idx + 1}/${chunks.length} (${progressPercent}%) | Средняя скорость: ${avgTime}мс/чанк | Осталось: ~${remainingStr}`);
+        }
+      }
+      const scenarioIndexTime = Date.now() - scenarioIndexStart;
+      console.log(`[RAG-INDEX] ✅ СЦЕНАРИЙ: создано ${chunks.length} чанков за ${scenarioIndexTime}мс (${Math.round(scenarioIndexTime / chunks.length)}мс/чанк)`);
+    }
+    
+    // Обрабатываем правила мира (вспомогательный контекст)
     if (worldRulesFull && worldRulesFull.length > 0) {
       const chunks: string[] = [];
       for (let i = 0; i < worldRulesFull.length; i += chunkSize) {
@@ -9672,7 +9747,7 @@ async function indexRulesForRAG(prisma: ReturnType<typeof getPrisma>, gameId: st
     const totalTime = Date.now() - startTime;
     const finalCount = await prisma.ruleChunk.count({ where: { gameId } });
     console.log(`[RAG-INDEX] 🎉 ========== ИНДЕКСАЦИЯ ЗАВЕРШЕНА ==========`);
-    console.log(`[RAG-INDEX] 📊 Итого: ${finalCount} чанков (worldRules: ${worldChunksCount}, gameplayRules: ${gameplayChunksCount})`);
+    console.log(`[RAG-INDEX] 📊 Итого: ${finalCount} чанков (scenario: ${scenarioChunksCount}, worldRules: ${worldChunksCount}, gameplayRules: ${gameplayChunksCount})`);
     console.log(`[RAG-INDEX] ⏱️ Время индексации: ${totalTime}мс (${(totalTime / 1000).toFixed(1)}сек)`);
     console.log(`[RAG-INDEX] 📈 Скорость: ${finalCount > 0 ? Math.round(totalTime / finalCount) : 0}мс/чанк`);
   } catch (e) {
@@ -9717,7 +9792,7 @@ async function findRelevantRuleChunks(
   prisma: ReturnType<typeof getPrisma>,
   gameId: string,
   sceneContext: { locationTitle?: string; locationDescription?: string; npcNames?: string[]; characterNames?: string[] }
-): Promise<{ worldRules: string; gameplayRules: string }> {
+): Promise<{ scenario: string; worldRules: string; gameplayRules: string }> {
   const searchStart = Date.now();
   try {
     const searchTerms: string[] = [];
@@ -9761,9 +9836,10 @@ async function findRelevantRuleChunks(
     const dbTime = Date.now() - dbStart;
     
     if (allChunks.length === 0) {
-      return { worldRules: '', gameplayRules: '' };
+      return { scenario: '', worldRules: '', gameplayRules: '' };
     }
     
+    const scenarioChunks = allChunks.filter(c => c.chunkType === 'scenario');
     const worldChunks = allChunks.filter(c => c.chunkType === 'worldRules');
     const gameplayChunks = allChunks.filter(c => c.chunkType === 'gameplayRules');
     
@@ -9787,11 +9863,22 @@ async function findRelevantRuleChunks(
         }
       }
       
+      // КРИТИЧЕСКИ ВАЖНО: Сценарий имеет ПРИОРИТЕТ - добавляем бонус к очкам
+      if (chunk.chunkType === 'scenario') {
+        score += 50; // Большой бонус для сценария
+      }
+      
       return { chunk, score };
     });
     
-    // Сортируем по релевантности и берем топ-5 чанков каждого типа
+    // Сортируем по релевантности и берем топ-10 чанков сценария (приоритет!), топ-5 правил
     scoredChunks.sort((a, b) => b.score - a.score);
+    
+    // СЦЕНАРИЙ - ПРИОРИТЕТ! Берем больше чанков
+    const topScenarioChunks = scoredChunks
+      .filter(sc => sc.chunk.chunkType === 'scenario')
+      .slice(0, 10) // Больше чанков сценария
+      .map(sc => sc.chunk.content);
     
     const topWorldChunks = scoredChunks
       .filter(sc => sc.chunk.chunkType === 'worldRules')
@@ -9803,7 +9890,16 @@ async function findRelevantRuleChunks(
       .slice(0, 5)
       .map(sc => sc.chunk.content);
     
-    // Если релевантных чанков мало, добавляем первые чанки (общие правила)
+    // Если релевантных чанков сценария мало, добавляем первые чанки
+    if (topScenarioChunks.length < 3) {
+      const firstScenarioChunks = allChunks
+        .filter(c => c.chunkType === 'scenario')
+        .slice(0, 3)
+        .map(c => c.content);
+      topScenarioChunks.push(...firstScenarioChunks);
+    }
+    
+    // Если релевантных чанков правил мало, добавляем первые чанки (общие правила)
     if (topWorldChunks.length < 2) {
       const firstWorldChunks = allChunks
         .filter(c => c.chunkType === 'worldRules')
@@ -9821,13 +9917,14 @@ async function findRelevantRuleChunks(
     }
     
     return {
+      scenario: topScenarioChunks.join('\n\n'),
       worldRules: topWorldChunks.join('\n\n'),
       gameplayRules: topGameplayChunks.join('\n\n')
     };
   } catch (e) {
     console.error('[RAG] Failed to find relevant chunks:', e);
     // Fallback: возвращаем пустые строки, будет использован обычный метод
-    return { worldRules: '', gameplayRules: '' };
+    return { scenario: '', worldRules: '', gameplayRules: '' };
   }
 }
 
@@ -9992,15 +10089,23 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
       
       const relevantChunks = await findRelevantRuleChunks(prisma, game.id, sceneContext);
       
-      const rulesParts: string[] = [];
+      // КРИТИЧЕСКИ ВАЖНО: Сначала добавляем СЦЕНАРИЙ (приоритет!), потом правила как вспомогательный контекст
+      const contextParts: string[] = [];
+      
+      if (relevantChunks.scenario) {
+        contextParts.push(`СЦЕНАРИЙ ИГРЫ (ОСНОВНОЙ ИСТОЧНИК - играй строго по сценарию!):\n${relevantChunks.scenario}`);
+      }
+      
       if (relevantChunks.worldRules) {
-        rulesParts.push(`Правила мира (релевантные для текущей сцены): ${relevantChunks.worldRules}`);
+        contextParts.push(`Правила мира (вспомогательный контекст для понимания механик):\n${relevantChunks.worldRules}`);
       }
+      
       if (relevantChunks.gameplayRules) {
-        rulesParts.push(`Правила процесса (релевантные для текущей сцены): ${relevantChunks.gameplayRules}`);
+        contextParts.push(`Правила процесса (вспомогательный контекст для понимания механик):\n${relevantChunks.gameplayRules}`);
       }
-      if (rulesParts.length > 0) {
-        gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
+      
+      if (contextParts.length > 0) {
+        gameRulesInfo = '\n\n' + contextParts.join('\n\n');
       }
     } else {
       // Fallback: читаем из PDF файлов (если RAG еще не настроен)
