@@ -8855,8 +8855,9 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для Live API используем стабильную модель 2.0 Flash из твоего списка
-    let finalModelName = 'gemini-2.0-flash';
+    // Используем специализированную TTS модель из твоего списка ListModels
+    // Она поддерживает метод generateContent с AUDIO модальностью
+    let finalModelName = 'gemini-2.5-flash-preview-tts';
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
