@@ -8855,11 +8855,9 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для Live API используем модель 2.0 (Live API требует актуальные модели 2.0)
-    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API.
-    // Принудительно используем gemini-2.0-flash (GA версия), так как gemini-2.0-flash-exp 
-    // может выдавать ошибку "not found for API version v1alpha" в некоторых регионах.
-    let finalModelName = 'gemini-2.0-flash';
+    // Для Live API используем модель 2.5 Live
+    // ВАЖНО: Используем актуальную модель gemini-2.5-flash-live-001 для стабильного стриминга
+    let finalModelName = 'gemini-2.5-flash-live-001';
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -9111,13 +9109,13 @@ app.post('/api/tts-stream', async (req, res) => {
             
             // ШАГ 1: Отправка конфигурации (setup) для Live API
             // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
-            // ПРИМЕЧАНИЕ: Если основная модель не найдена, пробуем экспериментальную
+            // ПРИМЕЧАНИЕ: Для серии 2.5 крайне важно явно указывать модальность
             const modelToUse = `models/${finalModelName}`;
             ws.send(JSON.stringify({
               setup: {
                 model: modelToUse,
                 generationConfig: {
-                  responseModalities: ["AUDIO"], // Указываем, что хотим аудио на выходе
+                  responseModalities: ["audio"], // Явно запрашиваем только аудио для снижения задержек и экономии ресурсов
                   speechConfig: {
                     voiceConfig: {
                       prebuiltVoiceConfig: {
