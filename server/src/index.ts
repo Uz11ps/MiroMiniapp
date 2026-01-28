@@ -6,7 +6,7 @@ import cors from 'cors';
 import { games, createGame, updateGame, deleteGame, profile, friends, users, createUser, updateUser, deleteUser, feedbacks, subscriptionPlans, characters, createCharacter, updateCharacter, deleteCharacter } from './db.js';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { fetch as undiciFetch, ProxyAgent, FormData, File } from 'undici';
+import { fetch as undiciFetch, ProxyAgent, FormData, File, WebSocket as UndiciWebSocket } from 'undici';
 import pdfParse from 'pdf-parse';
 import fs from 'fs';
 import path from 'path';
@@ -8893,18 +8893,19 @@ app.post('/api/tts-stream', async (req, res) => {
         
         // URL для Live API (v1beta)
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
-        const agent = new HttpsProxyAgent(p);
+        const dispatcher = new ProxyAgent(p);
         
-        const ws = new WebSocket(wsUrl, { agent });
+        // Используем UndiciWebSocket, так как он нативно поддерживает ProxyAgent через dispatcher
+        const ws = new UndiciWebSocket(wsUrl, { dispatcher });
         let audioReceived = false;
 
         await new Promise((resolve, reject) => {
           const timeout = setTimeout(() => {
-            ws.terminate();
+            ws.close();
             reject(new Error('WebSocket connection timeout'));
           }, 15000);
 
-          ws.on('open', () => {
+          ws.onopen = () => {
             clearTimeout(timeout);
             console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
             
@@ -8924,11 +8925,11 @@ app.post('/api/tts-stream', async (req, res) => {
                 }
               }
             }));
-          });
+          };
 
-          ws.on('message', (data) => {
+          ws.onmessage = (event) => {
             try {
-              const msg = JSON.parse(data.toString());
+              const msg = JSON.parse(event.data.toString());
               
               // Если получили подтверждение настройки, отправляем текст
               if (msg.setupComplete) {
@@ -8962,21 +8963,21 @@ app.post('/api/tts-stream', async (req, res) => {
             } catch (e) {
               console.warn('[GEMINI-TTS-LIVE] Error parsing WS message:', e);
             }
-          });
+          };
 
-          ws.on('close', (code, reason) => {
-            console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code ${code}, Reason: ${reason}`);
+          ws.onclose = (event) => {
+            console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code ${event.code}, Reason: ${event.reason}`);
             if (audioReceived) {
               resolve(true);
             } else {
-              reject(new Error(`WS closed without audio: ${code} ${reason}`));
+              reject(new Error(`WS closed without audio: ${event.code} ${event.reason}`));
             }
-          });
+          };
 
-          ws.on('error', (err) => {
+          ws.onerror = (err) => {
             console.error('[GEMINI-TTS-LIVE] WebSocket error:', err);
             reject(err);
-          });
+          };
         });
 
         // Если дошли сюда и получили аудио — всё ок
