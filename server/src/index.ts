@@ -11191,13 +11191,45 @@ app.post('/api/chat/dice', async (req, res) => {
     const gptContext = await buildGptSceneContext(prisma, { gameId, userId: uid, history });
     const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
     
-    history.push({ from: 'bot', text: narr.text });
+    // КРИТИЧЕСКИ ВАЖНО: Проверяем, есть ли в нарративе варианты выбора, соответствующие реальным выходам
+    // Если игрок потом выберет один из них, локация переключится автоматически
+    // Но здесь мы также можем проверить и переключить, если вариант уже выбран
+    let narrText = narr.text;
+    if (gameId && narrText) {
+      try {
+        const sess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
+        if (sess?.currentLocationId) {
+          // Форматируем варианты выбора и добавляем реальные выходы
+          narrText = formatChoiceOptions(narrText);
+          
+          // Гарантируем наличие реальных выходов в вариантах
+          const exitsResult = await ensureRealExitsInChoices(prisma, narrText, sess.currentLocationId, gameId, sess);
+          narrText = exitsResult.text;
+          
+          // Обновляем состояние сессии с счетчиком сцен без реальных выходов
+          if (exitsResult.shouldUpdateSession && sess) {
+            try {
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { state: exitsResult.sessionState }
+              });
+            } catch (e) {
+              console.warn('[DICE] Failed to update session state:', e);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[DICE] Failed to process location exits:', e);
+      }
+    }
+    
+    history.push({ from: 'bot', text: narrText });
     await prisma.chatSession.upsert({
       where: { userId_gameId: { userId: uid, gameId } },
       update: { history: history as any },
       create: { userId: uid, gameId, history: history as any },
     });
-    const response: any = { ok: true, messages: [fmt, narr.text] };
+    const response: any = { ok: true, messages: [fmt, narrText] };
     return res.json(response);
   } catch {
     return res.status(400).json({ ok: false, error: 'dice_chat_error' });
