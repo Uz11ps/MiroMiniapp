@@ -5904,258 +5904,83 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for RAG-generated text');
     console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
     
-    // КРИТИЧЕСКИ ВАЖНО: Используем логику TTS стриминга напрямую из endpoint, стримим чанки через SSE сразу
+    // КРИТИЧЕСКИ ВАЖНО: Просто обращаемся к /api/tts-stream endpoint и стримим чанки через SSE
     (async () => {
       try {
-        const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_KEY;
-        if (!geminiApiKey) {
-          throw new Error('GEMINI_API_KEY not found');
+        const protocol = req.protocol || (req.secure ? 'https' : 'http') || 'http';
+        const host = req.get('host') || req.headers.host;
+        const apiBase = process.env.API_BASE_URL || (host ? `${protocol}://${host}` : 'http://localhost:4000');
+        const ttsUrl = `${apiBase}/api/tts-stream`;
+        
+        console.log('[REPLY-STREAM] 🔊 Requesting TTS stream from:', ttsUrl);
+        console.log('[REPLY-STREAM] 🔊 Text length:', fullText.length);
+        
+        const ttsResponse = await undiciFetch(ttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: fullText,
+            gameId: gameId,
+            voiceName: 'Kore',
+            modelName: 'gemini-2.5-flash-preview-tts',
+            isNarrator: true
+          }),
+          signal: AbortSignal.timeout(120000)
+        });
+        
+        console.log('[REPLY-STREAM] 🔊 TTS response status:', ttsResponse.status);
+        
+        if (!ttsResponse.ok) {
+          const errorText = await ttsResponse.text().catch(() => 'unknown error');
+          console.error('[REPLY-STREAM] ❌ TTS request failed:', ttsResponse.status, errorText);
+          sendSSE('audio_error', { error: `TTS request failed: ${ttsResponse.status}` });
+          return;
         }
         
-        let finalModelName = 'gemini-2.5-flash-preview-tts';
-        finalModelName = finalModelName.replace(/-tts$/, '');
-        if (finalModelName.includes('2.5') || !finalModelName.includes('2.0-flash-exp')) {
-          finalModelName = 'gemini-2.0-flash-exp';
+        const reader = ttsResponse.body;
+        if (!reader) {
+          console.error('[REPLY-STREAM] ❌ No response body from TTS endpoint');
+          sendSSE('audio_error', { error: 'No response body' });
+          return;
         }
-        const finalVoiceName = 'Kore';
-        
-        const proxies = parseGeminiProxies();
-        const attempts = proxies.length ? proxies : ['__direct__'];
         
         let chunkCount = 0;
         let totalSize = 0;
-        let hasAudio = false;
-        let success = false;
         
-        for (const p of attempts) {
-          try {
-            const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
-            console.log('[REPLY-STREAM] 🔌 Connecting to Gemini WebSocket, proxy:', p === '__direct__' ? 'none' : p);
-            
-            const wsOptions: any = {};
-            if (p !== '__direct__') {
-              try {
-                const { HttpsProxyAgent } = await import('https-proxy-agent');
-                wsOptions.agent = new HttpsProxyAgent(p);
-              } catch (e) {
-                // Продолжаем без прокси
-              }
-            }
-            
-            const ws = new WebSocket(wsUrl, wsOptions);
-            
-            let isConnected = false;
-            let isComplete = false;
-            let textSent = false;
-            let setupReceived = false;
-            
-            const isBufferValid = (buffer: Buffer): boolean => {
-              return buffer && buffer.length > 0;
-            };
-            
-            // Устанавливаем обработчики ДО открытия соединения
-            ws.on('message', (data: Buffer) => {
-              try {
-                const messageStr = data.toString('utf-8');
-                const message = JSON.parse(messageStr);
-                
-                // Логируем ВСЕ сообщения для отладки
-                console.log('[REPLY-STREAM] 📨 Received message:', JSON.stringify(message).slice(0, 200));
-                
-                if (message.setupComplete) {
-                  isConnected = true;
-                  setupReceived = true;
-                  console.log('[REPLY-STREAM] ✅ WebSocket setup complete, sending text...');
-                  
-                  if (!textSent) {
-                    textSent = true;
-                    console.log('[REPLY-STREAM] 📤 Sending text to Gemini, length:', fullText.length);
-                    ws.send(JSON.stringify({
-                      clientContent: {
-                        turns: [{
-                          role: "user",
-                          parts: [{ text: fullText }]
-                        }],
-                        turnComplete: true
-                      }
-                    }));
-                  }
-                  return;
-                }
-                
-                // Проверяем ошибки от Gemini
-                if (message.error) {
-                  console.error('[REPLY-STREAM] ❌ Gemini API error:', message.error);
-                }
-                
-                if (!isConnected) return;
-                
-                if (message.serverContent) {
-                  if (message.serverContent.modelTurn) {
-                    const modelTurn = message.serverContent.modelTurn;
-                    const parts = modelTurn.parts || [];
-                    
-                    for (const part of parts) {
-                      if (part.inlineData && part.inlineData.data) {
-                        let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-                        
-                        if (audioBuffer.length % 2 !== 0) {
-                          audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
-                        }
-                        
-                        if (isBufferValid(audioBuffer)) {
-                          hasAudio = true;
-                          chunkCount++;
-                          totalSize += audioBuffer.length;
-                          
-                          // СТРИМИМ ЧАНКИ НАПРЯМУЮ ЧЕРЕЗ SSE БЕЗ НАКОПЛЕНИЯ
-                          const chunkBase64 = audioBuffer.toString('base64');
-                          sendSSE('audio_chunk', { 
-                            chunk: chunkBase64,
-                            chunkIndex: chunkCount,
-                            format: 'pcm',
-                            sampleRate: 24000,
-                            channels: 1,
-                            bitsPerSample: 16
-                          });
-                        }
-                      }
-                    }
-                  }
-                  
-                  if (!hasAudio && message.serverContent.parts) {
-                    const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
-                    for (const part of parts) {
-                      if (part.inlineData && part.inlineData.data) {
-                        let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-                        
-                        if (audioBuffer.length % 2 !== 0) {
-                          audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
-                        }
-                        
-                        if (isBufferValid(audioBuffer)) {
-                          hasAudio = true;
-                          chunkCount++;
-                          totalSize += audioBuffer.length;
-                          
-                          // СТРИМИМ ЧАНКИ НАПРЯМУЮ ЧЕРЕЗ SSE БЕЗ НАКОПЛЕНИЯ
-                          const chunkBase64 = audioBuffer.toString('base64');
-                          sendSSE('audio_chunk', { 
-                            chunk: chunkBase64,
-                            chunkIndex: chunkCount,
-                            format: 'pcm',
-                            sampleRate: 24000,
-                            channels: 1,
-                            bitsPerSample: 16
-                          });
-                        }
-                      }
-                    }
-                  }
-                }
-                
-                if (message.serverContent && message.serverContent.turnComplete) {
-                  isComplete = true;
-                  ws.close();
-                }
-              } catch (e: any) {
-                console.error('[REPLY-STREAM] ❌ Error parsing WebSocket message:', e?.message || String(e));
-                console.error('[REPLY-STREAM] ❌ Raw message:', data.toString('utf-8').slice(0, 500));
-              }
-            });
-            
-            ws.on('error', (error) => {
-              console.error('[REPLY-STREAM] ❌ WebSocket error:', error?.message || String(error));
-              console.error('[REPLY-STREAM] ❌ WebSocket error details:', error);
-              if (!isConnected && !hasAudio) {
-                ws.close();
-              }
-            });
-            
-            ws.on('close', (code, reason) => {
-              console.log('[REPLY-STREAM] 🔌 WebSocket closed, code:', code, 'reason:', reason?.toString() || 'none');
-              console.log('[REPLY-STREAM] 🔌 State: connected=', isConnected, 'setupReceived=', setupReceived, 'textSent=', textSent, 'hasAudio=', hasAudio);
-            });
-            
-            await new Promise<void>((resolve, reject) => {
-              const timeout = setTimeout(() => {
-                console.error('[REPLY-STREAM] ❌ WebSocket connection timeout after 10s');
-                reject(new Error('WebSocket connection timeout'));
-              }, 10000);
-              
-              ws.on('open', () => {
-                console.log('[REPLY-STREAM] 🔗 WebSocket opened, sending setup...');
-                ws.send(JSON.stringify({
-                  setup: {
-                    model: `models/${finalModelName}`,
-                    generationConfig: {
-                      responseModalities: ["AUDIO"],
-                      speechConfig: {
-                        voiceConfig: {
-                          prebuiltVoiceConfig: {
-                            voiceName: finalVoiceName
-                          }
-                        }
-                      }
-                    },
-                    systemInstruction: {
-                      parts: [{
-                        text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек. НЕ анализируй текст, НЕ комментируй его, НЕ отвечай на вопросы в тексте. Просто ОЗВУЧИВАЙ текст слово в слово. КРИТИЧЕСКИ ВАЖНО: Все цифры и числа читай ТОЛЬКО на русском языке (например, 123 читай как 'сто двадцать три', 5 как 'пять', а не 'five' или 'one two three'). КРИТИЧЕСКИ ВАЖНО: Знаки препинания (запятые, тире, точки, звездочки, дефисы и т.д.) НЕ ОЗВУЧИВАЙ как слова — используй их только для создания естественных пауз в речи. Используй естественные интонации, паузы и ритм речи. Избегай монотонности. Передавай эмоции через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу."
-                      }]
-                    }
-                  }
-                }));
-                
-                clearTimeout(timeout);
-                resolve();
-              });
-              
-              ws.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-              });
-            });
-            
-            await new Promise<void>((resolve) => {
-              const completionTimeout = setTimeout(() => {
-                if (!isComplete) {
-                  console.warn('[REPLY-STREAM] ⚠️ TTS generation timeout after 120s, closing WebSocket');
-                  ws.close();
-                }
-                resolve();
-              }, 120000);
-              
-              ws.on('close', () => {
-                console.log('[REPLY-STREAM] 🔌 WebSocket closed, connected:', isConnected, 'hasAudio:', hasAudio, 'chunks:', chunkCount);
-                clearTimeout(completionTimeout);
-                resolve();
-              });
-            });
-            
-            if (hasAudio) {
-              success = true;
-              // Отправляем финальное событие о завершении стриминга
-              sendSSE('audio_complete', { 
-                totalChunks: chunkCount,
-                totalSize: totalSize
-              });
-              console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
-              break; // Выходим из цикла прокси
-            } else {
-              console.warn('[REPLY-STREAM] ⚠️ No audio received, connected:', isConnected, 'setupReceived:', setupReceived, 'textSent:', textSent);
-            }
-            
-          } catch (wsError: any) {
-            console.error('[REPLY-STREAM] ❌ WebSocket attempt failed:', wsError?.message || String(wsError));
-            // Пробуем следующий прокси
+        for await (const chunk of reader) {
+          let audioBuffer: Buffer;
+          
+          if (Buffer.isBuffer(chunk)) {
+            audioBuffer = chunk;
+          } else if (chunk instanceof Uint8Array) {
+            audioBuffer = Buffer.from(chunk);
+          } else if (chunk instanceof ArrayBuffer) {
+            audioBuffer = Buffer.from(chunk);
+          } else {
             continue;
+          }
+          
+          if (audioBuffer.length > 0) {
+            chunkCount++;
+            totalSize += audioBuffer.length;
+            
+            const chunkBase64 = audioBuffer.toString('base64');
+            sendSSE('audio_chunk', { 
+              chunk: chunkBase64,
+              chunkIndex: chunkCount,
+              format: 'pcm',
+              sampleRate: 24000,
+              channels: 1,
+              bitsPerSample: 16
+            });
           }
         }
         
-        if (!success) {
-          console.error('[REPLY-STREAM] ❌ All WebSocket attempts failed, no audio received');
-          throw new Error('Failed to generate TTS stream - no audio chunks received');
-        }
+        sendSSE('audio_complete', { 
+          totalChunks: chunkCount,
+          totalSize: totalSize
+        });
+        console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks');
         
       } catch (ttsErr: any) {
         console.error('[REPLY-STREAM] ❌ TTS streaming error:', ttsErr?.message || String(ttsErr));
