@@ -342,8 +342,8 @@ async function ensureRealExitsInChoices(
     if (!state.scenesWithoutRealExit) state.scenesWithoutRealExit = 0;
     
     // Рандомизируем порог один раз и сохраняем в state до перехода
-    // Если порога нет или счетчик был сброшен - генерируем новый порог
-    if (!state.realExitThreshold || state.scenesWithoutRealExit === 0) {
+    // Генерируем новый порог только если его еще нет в state
+    if (!state.realExitThreshold) {
       state.realExitThreshold = Math.floor(Math.random() * 6) + 5; // 5-10 сцен
       result.shouldUpdateSession = true;
       result.sessionState = state;
