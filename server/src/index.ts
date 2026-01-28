@@ -8934,7 +8934,7 @@ app.post('/api/tts-stream', async (req, res) => {
 
         let totalAudioSize = 0;
         let chunkCount = 0;
-        hasAudio = false;
+        let hasAudio = false;
 
         // Обрабатываем SSE поток от Google
         for await (const chunk of reader) {
