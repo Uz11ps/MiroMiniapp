@@ -5904,139 +5904,83 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for RAG-generated text');
     console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
     
-    // КРИТИЧЕСКИ ВАЖНО: Просто обращаемся к /api/tts-stream endpoint и стримим чанки через SSE
+    // Параллельно запускаем генерацию TTS
+    sendSSE('status', { type: 'generating_audio' });
+    
     (async () => {
       try {
-        // КРИТИЧЕСКИ ВАЖНО: Для внутренних запросов используем тот же host, но проверяем, что это не внешний домен
-        const protocol = req.protocol || (req.secure ? 'https' : 'http') || 'http';
-        let host = req.get('host') || req.headers.host;
-        
-        // Если host содержит внешний домен через прокси, используем X-Forwarded-Host или определяем локальный адрес
-        if (host && (host.includes('miraplay.ru') || host.includes('api.miraplay.ru'))) {
-          // Для внутренних запросов используем localhost с портом из переменной окружения или 4000
-          const port = process.env.PORT || '4000';
-          host = `localhost:${port}`;
-          console.log('[REPLY-STREAM] ⚠️ External host detected, using localhost for internal request:', host);
-        }
-        
-        if (!host) {
-          throw new Error('Cannot determine host from request');
-        }
-        const ttsUrl = `${protocol}://${host}/api/tts-stream`;
-        
-        console.log('[REPLY-STREAM] 🔊 Requesting TTS stream from:', ttsUrl);
-        console.log('[REPLY-STREAM] 🔊 Text length:', fullText.length);
+        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
+        const ttsUrl = `${apiBase}/api/tts-stream`;
         
         const ttsResponse = await undiciFetch(ttsUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text: fullText,
-            gameId: gameId,
             voiceName: 'Kore',
-            modelName: 'gemini-2.5-flash-preview-tts',
-            isNarrator: true
+            modelName: 'gemini-2.5-flash-preview-tts'
           }),
-          signal: AbortSignal.timeout(120000)
+          signal: AbortSignal.timeout(60000)
         });
         
-        console.log('[REPLY-STREAM] 🔊 TTS response status:', ttsResponse.status);
-        
-        if (!ttsResponse.ok) {
-          const errorText = await ttsResponse.text().catch(() => 'unknown error');
-          console.error('[REPLY-STREAM] ❌ TTS request failed:', ttsResponse.status, errorText);
-          sendSSE('audio_error', { error: `TTS request failed: ${ttsResponse.status}` });
-          return;
-        }
-        
-        const reader = ttsResponse.body;
-        if (!reader) {
-          console.error('[REPLY-STREAM] ❌ No response body from TTS endpoint');
-          sendSSE('audio_error', { error: 'No response body' });
-          return;
-        }
-        
-        console.log('[REPLY-STREAM] 🔊 Starting to read TTS stream, reader type:', typeof reader);
-        console.log('[REPLY-STREAM] 🔊 Reader constructor:', reader?.constructor?.name);
-        console.log('[REPLY-STREAM] 🔊 Reader is async iterable:', reader && typeof reader[Symbol.asyncIterator] === 'function');
-        console.log('[REPLY-STREAM] 🔊 Response headers:', Object.fromEntries(ttsResponse.headers));
-        
-        let chunkCount = 0;
-        let totalSize = 0;
-        let iterationCount = 0;
-        let emptyChunks = 0;
-        
-        try {
-          console.log('[REPLY-STREAM] 🔊 Entering async iteration loop...');
-          
-          // Проверяем, является ли reader async iterable
-          if (!reader || typeof reader[Symbol.asyncIterator] !== 'function') {
-            console.error('[REPLY-STREAM] ❌ Reader is not async iterable!');
-            console.error('[REPLY-STREAM] ❌ Reader type:', typeof reader);
-            console.error('[REPLY-STREAM] ❌ Reader keys:', Object.keys(reader || {}));
-            sendSSE('audio_error', { error: 'Response body is not async iterable' });
-            return;
-          }
-          
-          for await (const chunk of reader) {
-            iterationCount++;
-            console.log(`[REPLY-STREAM] 🔊 Received chunk #${iterationCount}, type:`, chunk?.constructor?.name || typeof chunk, 'length:', chunk?.length || 'unknown');
-            
-            let audioBuffer: Buffer;
-            
-            if (Buffer.isBuffer(chunk)) {
-              audioBuffer = chunk;
-              console.log(`[REPLY-STREAM] 🔊 Chunk #${iterationCount} is Buffer, length:`, audioBuffer.length);
-            } else if (chunk instanceof Uint8Array) {
-              audioBuffer = Buffer.from(chunk);
-              console.log(`[REPLY-STREAM] 🔊 Chunk #${iterationCount} is Uint8Array, converted to Buffer, length:`, audioBuffer.length);
-            } else if (chunk instanceof ArrayBuffer) {
-              audioBuffer = Buffer.from(chunk);
-              console.log(`[REPLY-STREAM] 🔊 Chunk #${iterationCount} is ArrayBuffer, converted to Buffer, length:`, audioBuffer.length);
-            } else {
-              console.warn(`[REPLY-STREAM] ⚠️ Chunk #${iterationCount} unknown type:`, typeof chunk, chunk?.constructor?.name);
-              continue;
+        if (ttsResponse.ok) {
+          // Собираем все PCM чанки из streaming ответа
+          const reader = ttsResponse.body;
+          if (!reader) {
+            sendSSE('audio_error', { error: 'No response body' });
+        } else {
+            const audioChunks: Buffer[] = [];
+            for await (const chunk of reader) {
+              if (Buffer.isBuffer(chunk)) {
+                audioChunks.push(chunk);
+              } else if (chunk instanceof Uint8Array) {
+                audioChunks.push(Buffer.from(chunk));
+              } else if (chunk instanceof ArrayBuffer) {
+                audioChunks.push(Buffer.from(chunk));
+              }
             }
             
-            if (audioBuffer.length > 0) {
-              chunkCount++;
-              totalSize += audioBuffer.length;
+            if (audioChunks.length === 0) {
+              sendSSE('audio_error', { error: 'No audio chunks received' });
+            } else {
+              // Конвертируем PCM в WAV
+              const pcmAudio = Buffer.concat(audioChunks);
+              const sampleRate = 24000;
+              const channels = 1;
+              const bitsPerSample = 16;
+              const byteRate = sampleRate * channels * (bitsPerSample / 8);
+              const blockAlign = channels * (bitsPerSample / 8);
+              const dataSize = pcmAudio.length;
+              const fileSize = 36 + dataSize;
               
-              console.log(`[REPLY-STREAM] 🔊 Processing audio chunk #${chunkCount}, size:`, audioBuffer.length, 'total size:', totalSize);
+              const wavHeader = Buffer.alloc(44);
+              wavHeader.write('RIFF', 0);
+              wavHeader.writeUInt32LE(fileSize, 4);
+              wavHeader.write('WAVE', 8);
+              wavHeader.write('fmt ', 12);
+              wavHeader.writeUInt32LE(16, 16);
+              wavHeader.writeUInt16LE(1, 20);
+              wavHeader.writeUInt16LE(channels, 22);
+              wavHeader.writeUInt32LE(sampleRate, 24);
+              wavHeader.writeUInt32LE(byteRate, 28);
+              wavHeader.writeUInt16LE(blockAlign, 32);
+              wavHeader.writeUInt16LE(bitsPerSample, 34);
+              wavHeader.write('data', 36);
+              wavHeader.writeUInt32LE(dataSize, 40);
               
-              const chunkBase64 = audioBuffer.toString('base64');
-              sendSSE('audio_chunk', { 
-                chunk: chunkBase64,
-                chunkIndex: chunkCount,
-                format: 'pcm',
-                sampleRate: 24000,
-                channels: 1,
-                bitsPerSample: 16
+              const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
+              const audioBase64 = audioBuffer.toString('base64');
+              sendSSE('audio_ready', { 
+                audio: audioBase64,
+                contentType: 'audio/wav',
+          format: 'base64'
               });
-              
-              console.log(`[REPLY-STREAM] 🔊 Sent audio chunk #${chunkCount} via SSE`);
-            } else {
-              emptyChunks++;
-              console.warn(`[REPLY-STREAM] ⚠️ Empty chunk #${iterationCount} skipped`);
             }
           }
-          
-          console.log('[REPLY-STREAM] 🔊 Stream reading completed, iterations:', iterationCount, 'chunks:', chunkCount, 'empty:', emptyChunks, 'total size:', totalSize);
-        } catch (readError: any) {
-          console.error('[REPLY-STREAM] ❌ Error reading stream:', readError?.message || String(readError));
-          console.error('[REPLY-STREAM] ❌ Error stack:', readError?.stack);
-          sendSSE('audio_error', { error: `Stream read error: ${readError?.message || String(readError)}` });
-          return;
+      } else {
+          sendSSE('audio_error', { error: 'TTS generation failed' });
         }
-        
-        sendSSE('audio_complete', { 
-          totalChunks: chunkCount,
-          totalSize: totalSize
-        });
-        console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
-        
-      } catch (ttsErr: any) {
-        console.error('[REPLY-STREAM] ❌ TTS streaming error:', ttsErr?.message || String(ttsErr));
+      } catch (ttsErr) {
         sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
       }
     })();
@@ -8981,6 +8925,8 @@ app.post('/api/tts-stream', async (req, res) => {
       return res.status(400).json({ error: 'audio_received', message: 'Received audio instead of text. TTS requires text input.' });
     }
     
+    console.log('[GEMINI-TTS-LIVE] ✅ Received TEXT (not audio):', `"${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`);
+    
     // Минимальная длина текста
     if (text.length < 5) {
       cleanup();
@@ -9021,9 +8967,15 @@ app.post('/api/tts-stream', async (req, res) => {
       res.flushHeaders();
     }
     
+    console.log('[GEMINI-TTS-LIVE] 🎤 Starting WebSocket-based Live TTS generation...');
+    console.log('[GEMINI-TTS-LIVE] Text length:', text.length, 'chars');
+    console.log('[GEMINI-TTS-LIVE] Voice:', finalVoiceName);
+    console.log('[GEMINI-TTS-LIVE] Model:', finalModelName);
+    
     // Получаем прокси для Gemini
     const proxies = parseGeminiProxies();
     const attempts = proxies.length ? proxies : ['__direct__'];
+    console.log('[GEMINI-TTS-LIVE] 🔄 Proxies available:', attempts.length);
     
     // Пробуем каждый прокси
     for (const p of attempts) {
@@ -9034,6 +8986,9 @@ app.post('/api/tts-stream', async (req, res) => {
         // ВАЖНО: Модель НЕ передается в URL, только в JSON-сообщении setup
         // Используется полное имя сервиса: google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+        console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
+        console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
+        console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
         
         // Создаем WebSocket соединение
         // Используем уже импортированный WebSocket из 'ws'
@@ -9047,7 +9002,9 @@ app.post('/api/tts-stream', async (req, res) => {
             // Пробуем использовать http-proxy-agent для WebSocket прокси
             const { HttpsProxyAgent } = await import('https-proxy-agent');
             wsOptions.agent = new HttpsProxyAgent(p);
+            console.log(`[GEMINI-TTS-LIVE] 🔄 Using proxy agent for WebSocket`);
           } catch (e) {
+            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Proxy agent not available, using direct connection:`, e?.message || String(e));
             // Продолжаем без прокси
           }
         }
@@ -9075,14 +9032,22 @@ app.post('/api/tts-stream', async (req, res) => {
           try {
             const message = JSON.parse(data.toString('utf-8'));
             
+            // КРИТИЧЕСКИ ВАЖНО: Логируем структуру всех сообщений для отладки
+            // Это поможет понять, почему воспроизведение начинается с середины
+            if (chunkCount < 5) {
+              console.log(`[GEMINI-TTS-LIVE] 📨 Message ${chunkCount + 1} structure:`, JSON.stringify(message).slice(0, 500));
+            }
+            
             // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
             // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем данные до получения setupComplete
             if (message.setupComplete) {
               isConnected = true;
+              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, ready to send text');
               
               // Отправляем текст ТОЛЬКО один раз после получения setupComplete
               if (!textSent) {
                 textSent = true;
+                console.log('[GEMINI-TTS-LIVE] 📤 Sending text to Gemini...');
                 
                 // Отправляем текст для генерации в правильном формате Live API
                 // КРИТИЧЕСКИ ВАЖНО: turnComplete: true ОБЯЗАТЕЛЕН для TTS - без него модель ждет и начинает генерацию с задержкой
@@ -9104,6 +9069,7 @@ app.post('/api/tts-stream', async (req, res) => {
             // ШАГ 3: Получение аудио-чанков из serverContent.modelTurn
             // КРИТИЧЕСКИ ВАЖНО: Обрабатываем аудио ТОЛЬКО после получения setupComplete
             if (!isConnected) {
+              console.warn('[GEMINI-TTS-LIVE] ⚠️ Received audio before setupComplete, ignoring');
               return;
             }
             
@@ -9114,6 +9080,10 @@ app.post('/api/tts-stream', async (req, res) => {
                 const modelTurn = message.serverContent.modelTurn;
                 const parts = modelTurn.parts || [];
                 
+                if (parts.length > 0 && chunkCount < 5) {
+                  console.log(`[GEMINI-TTS-LIVE] 📦 Processing ${parts.length} parts in modelTurn`);
+                }
+                
                 for (const part of parts) {
                   if (part.inlineData && part.inlineData.data) {
                     // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
@@ -9123,6 +9093,9 @@ app.post('/api/tts-stream', async (req, res) => {
                     // readInt16LE требует четное количество байт (16-bit = 2 байта)
                     if (audioBuffer.length % 2 !== 0) {
                       audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
+                      if (chunkCount === 0) {
+                        console.log('[GEMINI-TTS-LIVE] ⚠️ Odd number of bytes, trimmed last byte');
+                      }
                     }
                     
                     // Проверяем, что буфер не пустой
@@ -9133,6 +9106,10 @@ app.post('/api/tts-stream', async (req, res) => {
                     hasAudio = true;
                     totalAudioSize += audioBuffer.length;
                     chunkCount++;
+                    
+                    if (chunkCount <= 3) {
+                      console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
+                    }
                     
                     // Отправляем чанк сразу клиенту (настоящий real-time streaming)
                     res.write(audioBuffer);
@@ -9148,6 +9125,7 @@ app.post('/api/tts-stream', async (req, res) => {
               // Проверяем другие возможные пути к аудио (на случай, если формат изменился)
               // ВАЖНО: Проверяем только если еще не получили аудио через modelTurn
               if (!hasAudio && message.serverContent.parts) {
+                console.log('[GEMINI-TTS-LIVE] ⚠️ Found serverContent.parts (alternative path)');
                 const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
                 for (const part of parts) {
                   if (part.inlineData && part.inlineData.data) {
@@ -9179,16 +9157,18 @@ app.post('/api/tts-stream', async (req, res) => {
             // Проверяем, завершен ли turn (завершение определяется через turnComplete)
             if (message.serverContent && message.serverContent.turnComplete) {
               isComplete = true;
+              console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
               ws.close();
             }
     
   } catch (e) {
-            // Игнорируем ошибки парсинга
+            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
           }
         });
         
         // Обработка ошибок WebSocket
         ws.on('error', (error) => {
+          console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, error.message);
           if (!isConnected && !hasAudio) {
             // Если еще не подключились и нет аудио, пробуем следующий прокси
             ws.close();
@@ -9198,104 +9178,89 @@ app.post('/api/tts-stream', async (req, res) => {
         // Обработка закрытия соединения
         ws.on('close', (code, reason) => {
           cleanup(); // Очищаем ключ из activeTtsStreams
+          console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
+          // Code 1006 = abnormal closure (proxy issue)
+          // Code 4000+ = client error (JSON format issue)
           if (hasAudio) {
+            console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
             res.end();
+          } else if (!isConnected) {
+            // Если не удалось подключиться, пробуем следующий прокси
+            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Connection closed before receiving audio, trying next proxy...`);
+            return; // Продолжаем цикл for (const p of attempts)
+          } else {
+            // Если подключились, но не получили аудио - это ошибка
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'no_audio_received', message: 'Не удалось получить аудио от Gemini' });
+            }
           }
         });
         
-        // Ждем открытия соединения и отправляем setup
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('WebSocket connection timeout'));
-          }, 10000);
+        // Устанавливаем таймаут для подключения
+        const connectTimeout = setTimeout(() => {
+          if (!isConnected) {
+            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Connection timeout, closing WebSocket`);
+            ws.close();
+          }
+        }, 10000); // 10 секунд
+        
+        ws.on('open', () => {
+          clearTimeout(connectTimeout);
+          console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket connected`);
           
-          ws.on('open', () => {
-            // ШАГ 1: Отправка конфигурации (setup) для Live API
-            // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
-            ws.send(JSON.stringify({
-              setup: {
-                model: `models/${finalModelName}`,
-                generationConfig: {
-                  responseModalities: ["AUDIO"], // Указываем, что хотим аудио на выходе
-                  speechConfig: {
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        voiceName: finalVoiceName // Puck, Charon, Kore, Fenrir, Aoede
-                      }
+          // Отправляем setup сообщение для настройки модели и голоса
+          ws.send(JSON.stringify({
+            setup: {
+              model: `models/${finalModelName}`,
+              generationConfig: {
+                responseModalities: ['audio'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: {
+                      voiceName: finalVoiceName
                     }
                   }
-                },
-                systemInstruction: {
-                  parts: [{
-                    text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ максимально естественно, как живой человек. НЕ анализируй текст, НЕ комментируй его, НЕ отвечай на вопросы в тексте. Просто ОЗВУЧИВАЙ текст слово в слово. КРИТИЧЕСКИ ВАЖНО: Все цифры и числа читай ТОЛЬКО на русском языке (например, 123 читай как 'сто двадцать три', 5 как 'пять', а не 'five' или 'one two three'). КРИТИЧЕСКИ ВАЖНО: Знаки препинания (запятые, тире, точки, звездочки, дефисы и т.д.) НЕ ОЗВУЧИВАЙ как слова — используй их только для создания естественных пауз в речи. Используй естественные интонации, паузы и ритм речи. Избегай монотонности. Передавай эмоции через голос: таинственность — тише и медленнее, опасность — напряженнее, триумф — громче и увереннее. Читай так, будто рассказываешь историю другу."
-                  }]
                 }
               }
-            }));
-            
-            clearTimeout(timeout);
-            resolve();
-          });
-          
-          ws.on('error', (err) => {
-            clearTimeout(timeout);
-            reject(err);
-          });
+            }
+          }));
         });
         
-        // Ждем завершения генерации (setupResponse и текст отправляются в обработчике message)
-        await new Promise<void>((resolve) => {
-          const completionTimeout = setTimeout(() => {
-            if (!isComplete) {
-              ws.close();
-            }
-            resolve();
-          }, 120000); // 2 минуты таймаут
-          
-          // Сохраняем resolve для вызова в обработчиках
-          const originalResolve = resolve;
-          const checkComplete = () => {
-            if (isComplete || !ws.readyState) {
-              clearTimeout(completionTimeout);
-              originalResolve();
-            }
-          };
-          
-          ws.on('close', () => {
-            clearTimeout(completionTimeout);
-            originalResolve();
-          });
-        });
-        
+        // Если получили аудио, прерываем цикл прокси
         if (hasAudio) {
-          cleanup(); // Очищаем ключ из activeTtsStreams
-          return; // Успешно завершили
+          break;
         }
         
-      } catch (wsError: any) {
-        cleanup(); // Очищаем ключ при ошибке
-        // Пробуем следующий прокси
-        continue;
+        // Ждем завершения соединения перед переходом к следующему прокси
+        await new Promise<void>((resolve) => {
+          ws.once('close', () => resolve());
+        });
+        
+      } catch (proxyError: any) {
+        console.warn(`[GEMINI-TTS-LIVE] ⚠️ Proxy error (${p === '__direct__' ? 'direct' : 'proxy'}):`, proxyError?.message || String(proxyError));
+        // Продолжаем к следующему прокси
       }
     }
     
-    // Если WebSocket не сработал
-    cleanup(); // Очищаем ключ из activeTtsStreams
+    // Если ни один прокси не сработал
+    if (!hasAudio) {
+      cleanup();
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          error: 'tts_failed', 
+          message: 'Не удалось сгенерировать речь через все доступные прокси' 
+        });
+      }
+    }
+  } catch (error: any) {
+    cleanup();
+    console.error('[GEMINI-TTS-LIVE] ❌ Fatal error:', error?.message || String(error));
     if (!res.headersSent) {
-      return res.status(500).json({ 
-        error: 'stream_error', 
-        message: 'Не удалось сгенерировать streaming аудио. Проверьте настройки API ключа.' 
+      res.status(500).json({ 
+        error: 'tts_error', 
+        message: `Ошибка генерации речи: ${error?.message || 'Неизвестная ошибка'}` 
       });
     }
-    res.end();
-    
-  } catch (e) {
-    cleanup(); // Очищаем ключ при ошибке
-    console.error('[TTS-STREAM] TTS streaming endpoint error:', e);
-    if (!res.headersSent) {
-      return res.status(500).json({ error: 'tts_error', details: String(e) });
-    }
-    res.end();
   }
 });
 
