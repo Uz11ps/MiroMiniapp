@@ -5907,10 +5907,13 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     // КРИТИЧЕСКИ ВАЖНО: Просто обращаемся к /api/tts-stream endpoint и стримим чанки через SSE
     (async () => {
       try {
+        // КРИТИЧЕСКИ ВАЖНО: Используем ТОЛЬКО host из запроса, не используем API_BASE_URL и localhost
         const protocol = req.protocol || (req.secure ? 'https' : 'http') || 'http';
         const host = req.get('host') || req.headers.host;
-        const apiBase = process.env.API_BASE_URL || (host ? `${protocol}://${host}` : 'http://localhost:4000');
-        const ttsUrl = `${apiBase}/api/tts-stream`;
+        if (!host) {
+          throw new Error('Cannot determine host from request');
+        }
+        const ttsUrl = `${protocol}://${host}/api/tts-stream`;
         
         console.log('[REPLY-STREAM] 🔊 Requesting TTS stream from:', ttsUrl);
         console.log('[REPLY-STREAM] 🔊 Text length:', fullText.length);
