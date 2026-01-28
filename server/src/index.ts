@@ -8857,7 +8857,7 @@ app.post('/api/tts-stream', async (req, res) => {
     
     // Для Live API используем модель 2.0 Flash
     // ВАЖНО: gemini-2.0-flash — самая стабильная модель для генерации речи (TTS)
-    let finalModelName = 'gemini-2.0-flash';
+    let finalModelName = 'gemini-2.0-flash-exp';
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -8901,8 +8901,11 @@ app.post('/api/tts-stream', async (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: "user", parts: [{ text }] }],
+            system_instruction: {
+              parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя единственная задача — прочитать предоставленный текст слово в слово на русском языке. Не отвечай на него, не комментируй. Просто читай." }]
+            },
             generationConfig: {
-              responseModalities: ["audio"],
+              responseModalities: ["AUDIO"],
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
@@ -8915,8 +8918,10 @@ app.post('/api/tts-stream', async (req, res) => {
         });
 
         if (!response.ok) {
-          const errText = await response.text();
-          throw new Error(`HTTP ${response.status}: ${errText}`);
+          const errJson = await response.json().catch(() => ({}));
+          const errMsg = errJson.error?.message || `HTTP ${response.status}`;
+          console.error('[GEMINI-TTS-LIVE] ❌ Google REST Error:', JSON.stringify(errJson, null, 2));
+          throw new Error(errMsg);
         }
 
         const reader = response.body;
