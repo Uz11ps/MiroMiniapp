@@ -5956,7 +5956,11 @@ app.post('/api/chat/reply-stream', async (req, res) => {
             // Устанавливаем обработчики ДО открытия соединения
             ws.on('message', (data: Buffer) => {
               try {
-                const message = JSON.parse(data.toString('utf-8'));
+                const messageStr = data.toString('utf-8');
+                const message = JSON.parse(messageStr);
+                
+                // Логируем ВСЕ сообщения для отладки
+                console.log('[REPLY-STREAM] 📨 Received message:', JSON.stringify(message).slice(0, 200));
                 
                 if (message.setupComplete) {
                   isConnected = true;
@@ -5977,6 +5981,11 @@ app.post('/api/chat/reply-stream', async (req, res) => {
                     }));
                   }
                   return;
+                }
+                
+                // Проверяем ошибки от Gemini
+                if (message.error) {
+                  console.error('[REPLY-STREAM] ❌ Gemini API error:', message.error);
                 }
                 
                 if (!isConnected) return;
@@ -6049,20 +6058,23 @@ app.post('/api/chat/reply-stream', async (req, res) => {
                   isComplete = true;
                   ws.close();
                 }
-              } catch (e) {
-                // Игнорируем ошибки парсинга
+              } catch (e: any) {
+                console.error('[REPLY-STREAM] ❌ Error parsing WebSocket message:', e?.message || String(e));
+                console.error('[REPLY-STREAM] ❌ Raw message:', data.toString('utf-8').slice(0, 500));
               }
             });
             
             ws.on('error', (error) => {
               console.error('[REPLY-STREAM] ❌ WebSocket error:', error?.message || String(error));
+              console.error('[REPLY-STREAM] ❌ WebSocket error details:', error);
               if (!isConnected && !hasAudio) {
                 ws.close();
               }
             });
             
-            ws.on('close', () => {
-              // Закрытие обрабатывается в Promise
+            ws.on('close', (code, reason) => {
+              console.log('[REPLY-STREAM] 🔌 WebSocket closed, code:', code, 'reason:', reason?.toString() || 'none');
+              console.log('[REPLY-STREAM] 🔌 State: connected=', isConnected, 'setupReceived=', setupReceived, 'textSent=', textSent, 'hasAudio=', hasAudio);
             });
             
             await new Promise<void>((resolve, reject) => {
