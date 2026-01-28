@@ -1476,14 +1476,14 @@ app.post('/api/admin/ingest-import', (req, res, next) => {
         
         // Сохраняем PDF файлы на диск
         set({ progress: 'Сохранение файлов...' });
-        const rulesPdfPath = path.join(PDF_DIR, `rules-${Date.now()}-${Math.round(Math.random() * 1E9)}.pdf`);
-        const scenarioPdfPath = path.join(PDF_DIR, `scenario-${Date.now()}-${Math.round(Math.random() * 1E9)}.pdf`);
+        const rulesPdfFilePath = path.join(PDF_DIR, `rules-${Date.now()}-${Math.round(Math.random() * 1E9)}.pdf`);
+        const scenarioPdfFilePath = path.join(PDF_DIR, `scenario-${Date.now()}-${Math.round(Math.random() * 1E9)}.pdf`);
         
-        fs.writeFileSync(rulesPdfPath, rulesFile.buffer);
-        fs.writeFileSync(scenarioPdfPath, scenarioFile.buffer);
+        fs.writeFileSync(rulesPdfFilePath, rulesFile.buffer);
+        fs.writeFileSync(scenarioPdfFilePath, scenarioFile.buffer);
         
-        const rulesPdfUrl = `/uploads/pdfs/${path.basename(rulesPdfPath)}`;
-        const scenarioPdfUrl = `/uploads/pdfs/${path.basename(scenarioPdfPath)}`;
+        const rulesPdfUrl = `/uploads/pdfs/${path.basename(rulesPdfFilePath)}`;
+        const scenarioPdfUrl = `/uploads/pdfs/${path.basename(scenarioPdfFilePath)}`;
         
         // Функция для чтения файла из буфера или с диска
         const readFile = async (file: Express.Multer.File | string): Promise<string> => {
