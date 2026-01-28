@@ -5895,95 +5895,8 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     
     // НОВАЯ ЛОГИКА: ensureRealExitsInChoices удалена, используем текст как есть
     console.log('[REPLY-STREAM] ✅ Text generated with RAG, length:', fullText?.length || 0);
-    console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for generated text');
     
     sendSSE('text_complete', { text: fullText });
-    
-    // КРИТИЧЕСКИ ВАЖНО: Параллельно запускаем генерацию TTS стриминга для текста сгенерированного с RAG
-    sendSSE('status', { type: 'generating_audio' });
-    console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for RAG-generated text');
-    console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
-    
-    // Параллельно запускаем генерацию TTS
-    sendSSE('status', { type: 'generating_audio' });
-    
-    (async () => {
-      try {
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const ttsUrl = `${apiBase}/api/tts-stream`;
-        
-        const ttsResponse = await undiciFetch(ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: fullText,
-            voiceName: 'Kore',
-            modelName: 'gemini-2.5-flash-preview-tts'
-          }),
-          signal: AbortSignal.timeout(60000)
-        });
-        
-        if (ttsResponse.ok) {
-          // Собираем все PCM чанки из streaming ответа
-          const reader = ttsResponse.body;
-          if (!reader) {
-            sendSSE('audio_error', { error: 'No response body' });
-        } else {
-            const audioChunks: Buffer[] = [];
-            for await (const chunk of reader) {
-              if (Buffer.isBuffer(chunk)) {
-                audioChunks.push(chunk);
-              } else if (chunk instanceof Uint8Array) {
-                audioChunks.push(Buffer.from(chunk));
-              } else if (chunk instanceof ArrayBuffer) {
-                audioChunks.push(Buffer.from(chunk));
-              }
-            }
-            
-            if (audioChunks.length === 0) {
-              sendSSE('audio_error', { error: 'No audio chunks received' });
-            } else {
-              // Конвертируем PCM в WAV
-              const pcmAudio = Buffer.concat(audioChunks);
-              const sampleRate = 24000;
-              const channels = 1;
-              const bitsPerSample = 16;
-              const byteRate = sampleRate * channels * (bitsPerSample / 8);
-              const blockAlign = channels * (bitsPerSample / 8);
-              const dataSize = pcmAudio.length;
-              const fileSize = 36 + dataSize;
-              
-              const wavHeader = Buffer.alloc(44);
-              wavHeader.write('RIFF', 0);
-              wavHeader.writeUInt32LE(fileSize, 4);
-              wavHeader.write('WAVE', 8);
-              wavHeader.write('fmt ', 12);
-              wavHeader.writeUInt32LE(16, 16);
-              wavHeader.writeUInt16LE(1, 20);
-              wavHeader.writeUInt16LE(channels, 22);
-              wavHeader.writeUInt32LE(sampleRate, 24);
-              wavHeader.writeUInt32LE(byteRate, 28);
-              wavHeader.writeUInt16LE(blockAlign, 32);
-              wavHeader.writeUInt16LE(bitsPerSample, 34);
-              wavHeader.write('data', 36);
-              wavHeader.writeUInt32LE(dataSize, 40);
-              
-              const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
-              const audioBase64 = audioBuffer.toString('base64');
-              sendSSE('audio_ready', { 
-                audio: audioBase64,
-                contentType: 'audio/wav',
-          format: 'base64'
-              });
-            }
-          }
-      } else {
-          sendSSE('audio_error', { error: 'TTS generation failed' });
-        }
-      } catch (ttsErr) {
-        sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
-      }
-    })();
     
     // Закрываем соединение после небольшой задержки
     setTimeout(() => {
@@ -8943,12 +8856,11 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     
     // Для Live API используем модель 2.0 (Live API требует актуальные модели 2.0)
-    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API, строго используем gemini-2.0-flash-exp
-    // Модели 1.5 не всегда стабильны в Live-режиме через чистые сокеты
-    let finalModelName = modelName ? modelName.replace(/-tts$/, '') : 'gemini-2.0-flash-exp';
-    // Принудительно заменяем любые модели 2.5 на 2.0, и любые другие на 2.0-flash-exp
-    if (finalModelName.includes('2.5') || !finalModelName.includes('2.0-flash-exp')) {
-      finalModelName = 'gemini-2.0-flash-exp';
+    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API, строго используем gemini-2.0-flash (или gemini-2.0-flash-exp)
+    let finalModelName = modelName ? modelName.replace(/-tts$/, '') : 'gemini-2.0-flash';
+    // Принудительно заменяем любые модели 2.5 на 2.0, и любые другие на 2.0-flash
+    if (finalModelName.includes('2.5') || !finalModelName.includes('2.0')) {
+      finalModelName = 'gemini-2.0-flash';
     }
     const finalVoiceName = voiceName || 'Kore';
     
@@ -9201,9 +9113,11 @@ app.post('/api/tts-stream', async (req, res) => {
             
             // ШАГ 1: Отправка конфигурации (setup) для Live API
             // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
+            // ПРИМЕЧАНИЕ: Если основная модель не найдена, пробуем экспериментальную
+            const modelToUse = `models/${finalModelName}`;
             ws.send(JSON.stringify({
               setup: {
-                model: `models/${finalModelName}`,
+                model: modelToUse,
                 generationConfig: {
                   responseModalities: ["AUDIO"], // Указываем, что хотим аудио на выходе
                   speechConfig: {
