@@ -8889,33 +8889,44 @@ app.post('/api/tts-stream', async (req, res) => {
 
     for (const p of attempts) {
       try {
-        console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket via proxy: ${p}`);
-        
-        // URL для Live API (v1beta)
+        // Правильный URL для Gemini Live API через WebSocket (v1beta)
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
-        const dispatcher = new ProxyAgent(p);
+        console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
+        console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
+        console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
         
-        // Используем UndiciWebSocket, так как он нативно поддерживает ProxyAgent через dispatcher
+        const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
         const ws = new UndiciWebSocket(wsUrl, { dispatcher });
-        let audioReceived = false;
+        
+        let totalAudioSize = 0;
+        let chunkCount = 0;
+        let hasAudio = false;
+        let isConnected = false;
+        let isComplete = false;
+        let textSent = false;
 
-        await new Promise((resolve, reject) => {
+        // Если клиент (браузер) закрыл соединение, немедленно закрываем сокет к Google
+        res.on('close', () => {
+          if (ws.readyState === 1 || ws.readyState === 0) {
+            console.log('[GEMINI-TTS-LIVE] 👤 Client disconnected, closing Google WebSocket...');
+            ws.close();
+          }
+        });
+
+        await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
             ws.close();
             reject(new Error('WebSocket connection timeout'));
-          }, 15000);
+          }, 20000);
 
           ws.onopen = () => {
             clearTimeout(timeout);
             console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
             
-            // Шаг 1: Настройка (setup)
+            // ШАГ 1: Отправка конфигурации (setup)
             ws.send(JSON.stringify({
               setup: {
                 model: `models/${finalModelName}`,
-                systemInstruction: {
-                  parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — прочитать предоставленный текст СЛОВО В СЛОВО на русском языке. Не отвечай на него, не комментируй, не продолжай историю. Просто читай то, что тебе прислали." }]
-                },
                 generationConfig: {
                   responseModalities: ["audio"],
                   speechConfig: {
@@ -8925,6 +8936,11 @@ app.post('/api/tts-stream', async (req, res) => {
                       }
                     }
                   }
+                },
+                systemInstruction: {
+                  parts: [{
+                    text: "Ты — профессиональный актер озвучивания. Твоя ЕДИНСТВЕННАЯ задача — ПРОЧИТАТЬ ВЕСЬ ПРЕДОСТАВЛЕННЫЙ ТЕКСТ СЛОВО В СЛОВО на РУССКОМ ЯЗЫКЕ до самого конца. Не отвечай, не комментируй, не продолжай историю. Просто читай всё, что видишь, включая варианты выбора."
+                  }]
                 }
               }
             }));
@@ -8934,7 +8950,6 @@ app.post('/api/tts-stream', async (req, res) => {
             try {
               let dataStr: string;
               const rawData = event.data;
-              
               if (typeof rawData === 'string') {
                 dataStr = rawData;
               } else if (rawData instanceof Blob) {
@@ -8945,28 +8960,44 @@ app.post('/api/tts-stream', async (req, res) => {
                 dataStr = Buffer.from(rawData as any).toString();
               }
               
-              const msg = JSON.parse(dataStr);
+              const message = JSON.parse(dataStr);
               
-              // Если получили подтверждение настройки, отправляем текст
-              if (msg.setupComplete) {
+              // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
+              if (message.setupComplete) {
+                isConnected = true;
                 console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
-                ws.send(JSON.stringify({
-                  clientContent: {
-                    turns: [{
-                      parts: [{ text: `ПРОЧИТАЙ СЛЕДУЮЩИЙ ТЕКСТ СЛОВО В СЛОВО: ${text}` }]
-                    }],
-                    turnComplete: true
-                  }
-                }));
+                
+                if (!textSent) {
+                  textSent = true;
+                  ws.send(JSON.stringify({
+                    clientContent: {
+                      turns: [{
+                        role: "user",
+                        parts: [{ text: `ПРОЧИТАЙ ВЕСЬ ТЕКСТ СЛОВО В СЛОВО ДО САМОГО КОНЦА: ${text}` }]
+                      }],
+                      turnComplete: true
+                    }
+                  }));
+                }
+                return;
               }
 
-              // Обработка аудио-данных
-              if (msg.serverContent?.modelTurn?.parts) {
-                for (const part of msg.serverContent.modelTurn.parts) {
+              // ШАГ 3: Получение аудио-чанков
+              if (message.serverContent?.modelTurn?.parts) {
+                for (const part of message.serverContent.modelTurn.parts) {
                   if (part.inlineData?.data) {
-                    const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                    let audioBuffer = Buffer.from(part.inlineData.data, 'base64');
+                    if (audioBuffer.length % 2 !== 0) audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
+
                     if (audioBuffer.length > 0) {
-                      audioReceived = true;
+                      hasAudio = true;
+                      totalAudioSize += audioBuffer.length;
+                      chunkCount++;
+                      
+                      if (chunkCount <= 3) {
+                        console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
+                      }
+                      
                       res.write(audioBuffer);
                       if (res.flush && typeof res.flush === 'function') res.flush();
                     }
@@ -8974,24 +9005,29 @@ app.post('/api/tts-stream', async (req, res) => {
                 }
               }
 
-              // Если генерация завершена
-              if (msg.serverContent?.turnComplete) {
-                console.log('[GEMINI-TTS-LIVE] ✅ Turn complete, closing in 500ms...');
+              // Проверяем завершение
+              if (message.serverContent?.turnComplete) {
+                isComplete = true;
+                console.log('[GEMINI-TTS-LIVE] ✅ Turn complete, waiting for final audio packets...');
                 setTimeout(() => {
-                  ws.close();
-                }, 500);
+                  if (ws.readyState === 1 || ws.readyState === 0) ws.close();
+                }, 2000);
               }
             } catch (e) {
-              console.warn('[GEMINI-TTS-LIVE] Error parsing WS message:', e);
+              console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
             }
           };
 
           ws.onclose = (event) => {
-            console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code ${event.code}, Reason: ${event.reason}`);
-            if (audioReceived) {
-              resolve(true);
+            console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code: ${event.code}, Reason: ${event.reason || 'none'}`);
+            if (hasAudio) {
+              console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
+              resolve();
+            } else if (!isConnected) {
+              console.warn(`[GEMINI-TTS-LIVE] ⚠️ Connection closed before setup, trying next proxy...`);
+              reject(new Error('Connection closed before setup'));
             } else {
-              reject(new Error(`WS closed without audio: ${event.code} ${event.reason}`));
+              resolve();
             }
           };
 
@@ -9001,13 +9037,13 @@ app.post('/api/tts-stream', async (req, res) => {
           };
         });
 
-        // Если дошли сюда и получили аудио — всё ок
-        cleanup();
-        res.end();
-        return;
+        if (hasAudio) {
+          res.end();
+          return;
+        }
 
-      } catch (err: any) {
-        console.warn(`[GEMINI-TTS-LIVE] WS attempt failed:`, err.message);
+      } catch (wsError: any) {
+        console.warn(`[GEMINI-TTS-LIVE] Attempt failed:`, wsError?.message || String(wsError));
         continue;
       }
     }
