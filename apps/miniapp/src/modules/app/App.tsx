@@ -1245,6 +1245,7 @@ const GameChat: React.FC = () => {
                   stopAudioQueue();
                   speakingInFlightRef.current = false;
                   activeSpeakSeqRef.current = 0;
+                  lastSpokenRef.current = ''; // Сбрасываем последний озвученный текст, чтобы избежать блокировки проверкой на дубли
                   console.log('[TTS-CLIENT] Stopped all audio streams due to dice roll');
                 } catch (e) {
                   console.warn('[TTS-CLIENT] Error stopping audio:', e);
@@ -1252,6 +1253,10 @@ const GameChat: React.FC = () => {
                 
                 const resp = await rollDiceApi(payload);
                 if (!lobbyId) {
+                  // КРИТИЧЕСКИ ВАЖНО: Задержка x3 после остановки TTS перед вызовом speak() для кубиков
+                  // Это позволяет TTS полностью остановиться перед началом нового воспроизведения
+                  await new Promise(resolve => setTimeout(resolve, 150)); // 50мс * 3 = 150мс
+                  
                   if (resp?.ok && resp.message) {
                     const txt = String(resp.message);
                     setMessages((m) => {
