@@ -93,8 +93,8 @@ export function initAudioContext(): AudioContext {
 if (typeof window !== 'undefined') {
   const unlock = () => {
     unlockAudioContext();
-      window.removeEventListener('click', unlock);
-      window.removeEventListener('touchstart', unlock);
+    window.removeEventListener('click', unlock);
+    window.removeEventListener('touchstart', unlock);
     window.removeEventListener('keydown', unlock);
   };
   window.addEventListener('click', unlock);
@@ -444,7 +444,7 @@ class AudioQueue {
         // даем небольшой запас (100мс) и стартуем
         this.nextStartTime = now + 0.1;
       }
-
+      
       // 2. Просто планируем чанк - используем текущий nextStartTime без изменений
       source.start(this.nextStartTime);
       
@@ -454,7 +454,7 @@ class AudioQueue {
       // Если в текущем сегменте больше нет чанков, проверяем следующий сегмент
       if (segmentChunks.length === 0) {
         // Проверяем следующий сегмент без задержки
-          if (this.segments.has(this.currentSegmentIndex + 1)) {
+        if (this.segments.has(this.currentSegmentIndex + 1)) {
           const nextChunks = this.segments.get(this.currentSegmentIndex + 1);
           if (nextChunks && nextChunks.length > 0) {
             this.currentSegmentIndex++;
