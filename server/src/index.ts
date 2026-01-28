@@ -8855,9 +8855,14 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для Live API используем модель 2.5 Live
-    // ВАЖНО: Используем актуальную модель gemini-2.5-flash-live-001 для стабильного стриминга
-    let finalModelName = 'gemini-2.0-flash-exp';
+    // Для Live API используем модель 2.0 (Live API требует актуальные модели 2.0)
+    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API, строго используем gemini-2.0-flash-exp
+    // Модели 1.5 не всегда стабильны в Live-режиме через чистые сокеты
+    let finalModelName = modelName ? modelName.replace(/-tts$/, '') : 'gemini-2.0-flash-exp';
+    // Принудительно заменяем любые модели 2.5 на 2.0, и любые другие на 2.0-flash-exp
+    if (finalModelName.includes('2.5') || !finalModelName.includes('2.0-flash-exp')) {
+      finalModelName = 'gemini-2.0-flash-exp';
+    }
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -8891,9 +8896,9 @@ app.post('/api/tts-stream', async (req, res) => {
         // ПРИМЕЧАНИЕ: Gemini Live API использует WebSocket через специальный endpoint
         
         // Правильный URL для Gemini Live API через WebSocket (v1alpha)
-        // ВАЖНО: Модель НЕ должна передаваться в URL как query параметр (ошибка 1007)
-        // Она передается внутри JSON-сообщения setup
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+        // ВАЖНО: Модель НЕ передается в URL, только в JSON-сообщении setup
+        // Используется полное имя сервиса: google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
         console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
         console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
         console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
@@ -9109,13 +9114,11 @@ app.post('/api/tts-stream', async (req, res) => {
             
             // ШАГ 1: Отправка конфигурации (setup) для Live API
             // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
-            // ПРИМЕЧАНИЕ: Для серии 2.5 крайне важно явно указывать модальность
-            const modelToUse = `models/${finalModelName}`;
             ws.send(JSON.stringify({
               setup: {
-                model: modelToUse,
+                model: `models/${finalModelName}`,
                 generationConfig: {
-                  responseModalities: ["audio"], // Явно запрашиваем только аудио для снижения задержек и экономии ресурсов
+                  responseModalities: ["AUDIO"], // Указываем, что хотим аудио на выходе
                   speechConfig: {
                     voiceConfig: {
                       prebuiltVoiceConfig: {
@@ -9207,7 +9210,6 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     res.end();
   }
-});
 
 // Тестовый эндпоинт для проверки работоспособности Gemini/Imagen API
 app.get('/api/image/test-gemini', async (req, res) => {
