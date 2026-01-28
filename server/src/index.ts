@@ -5907,9 +5907,18 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     // КРИТИЧЕСКИ ВАЖНО: Просто обращаемся к /api/tts-stream endpoint и стримим чанки через SSE
     (async () => {
       try {
-        // КРИТИЧЕСКИ ВАЖНО: Используем ТОЛЬКО host из запроса, не используем API_BASE_URL и localhost
+        // КРИТИЧЕСКИ ВАЖНО: Для внутренних запросов используем тот же host, но проверяем, что это не внешний домен
         const protocol = req.protocol || (req.secure ? 'https' : 'http') || 'http';
-        const host = req.get('host') || req.headers.host;
+        let host = req.get('host') || req.headers.host;
+        
+        // Если host содержит внешний домен через прокси, используем X-Forwarded-Host или определяем локальный адрес
+        if (host && (host.includes('miraplay.ru') || host.includes('api.miraplay.ru'))) {
+          // Для внутренних запросов используем localhost с портом из переменной окружения или 4000
+          const port = process.env.PORT || '4000';
+          host = `localhost:${port}`;
+          console.log('[REPLY-STREAM] ⚠️ External host detected, using localhost for internal request:', host);
+        }
+        
         if (!host) {
           throw new Error('Cannot determine host from request');
         }
