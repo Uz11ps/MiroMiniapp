@@ -341,10 +341,76 @@ async function ensureRealExitsInChoices(
     let state = session?.state as any || {};
     if (!state.scenesWithoutRealExit) state.scenesWithoutRealExit = 0;
     
-    // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем счетчик, если реальные выходы уже есть в вариантах
-    // Счетчик сбрасывается ТОЛЬКО при реальном переходе игрока (в логике переключения локации)
+    // КРИТИЧЕСКИ ВАЖНО: Если реальные выходы уже есть в вариантах - оставляем ТОЛЬКО ОДИН реальный выход
+    // Остальные варианты могут быть любыми (от ИИ)
     if (hasRealExitInChoices) {
-      // Реальные выходы уже есть - просто возвращаем текст без изменений
+      // Находим первый реальный выход, который есть в вариантах
+      let firstRealExitIndex = -1;
+      for (let i = 0; i < realExits.length; i++) {
+        const exitText = (realExits[i].buttonText || realExits[i].triggerText || '').toLowerCase().trim();
+        const foundIndex = choices.findIndex(choice => {
+          const choiceLower = choice.toLowerCase();
+          return choiceLower.includes(exitText) || exitText.includes(choiceLower) || 
+                 choiceLower === exitText || exitText === choiceLower;
+        });
+        if (foundIndex >= 0) {
+          firstRealExitIndex = foundIndex;
+          break;
+        }
+      }
+      
+      if (firstRealExitIndex >= 0) {
+        // Удаляем все реальные выходы из вариантов, кроме первого найденного
+        const firstRealExit = realExits.find((exit, idx) => {
+          const exitText = (exit.buttonText || exit.triggerText || '').toLowerCase().trim();
+          const choiceText = choices[firstRealExitIndex].toLowerCase();
+          return choiceText.includes(exitText) || exitText.includes(choiceText) || 
+                 choiceText === exitText || exitText === choiceText;
+        });
+        
+        if (firstRealExit) {
+          // Перестраиваем список вариантов: оставляем первый реальный выход, остальные удаляем если они реальные
+          const filteredChoices: string[] = [];
+          const firstRealExitText = firstRealExit.buttonText || firstRealExit.triggerText || '';
+          
+          // Добавляем первый реальный выход
+          filteredChoices.push(firstRealExitText);
+          
+          // Добавляем остальные варианты, которые НЕ являются реальными выходами
+          for (let i = 0; i < choices.length; i++) {
+            if (i === firstRealExitIndex) continue; // Пропускаем первый реальный выход (уже добавлен)
+            
+            const choiceText = choices[i].toLowerCase();
+            const isRealExit = realExitTexts.some(exitText => 
+              choiceText.includes(exitText) || exitText.includes(choiceText) || 
+              choiceText === exitText || exitText === choiceText
+            );
+            
+            if (!isRealExit) {
+              filteredChoices.push(choices[i]);
+            }
+          }
+          
+          // Перестраиваем текст с новыми вариантами
+          const choiceMatch = text.match(/(\n\n\*\*.*[?]\s*\*\*\s*\n\n|\n\n)(\d+\.\s+[^\n]+(?:\n\d+\.\s+[^\n]+)*)/);
+          if (choiceMatch) {
+            const newChoiceLines = filteredChoices.map((choice, idx) => `${idx + 1}. ${choice}`).join('\n');
+            text = text.replace(choiceMatch[2], newChoiceLines);
+          } else {
+            // Если не нашли место с вариантами - добавляем в конец
+            const newChoiceLines = filteredChoices.map((choice, idx) => `${idx + 1}. ${choice}`).join('\n');
+            if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
+              text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
+              text = text + '\n\n**Что вы делаете?**\n\n' + newChoiceLines;
+            } else {
+              text = text + '\n\n**Что вы делаете?**\n\n' + newChoiceLines;
+            }
+          }
+          
+          result.text = text;
+        }
+      }
+      
       // НЕ сбрасываем счетчик - он сбросится только когда игрок реально переключит локацию
       return result;
     }
