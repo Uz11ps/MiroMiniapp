@@ -8922,7 +8922,7 @@ app.post('/api/tts-stream', async (req, res) => {
           ws.onopen = () => {
             clearTimeout(timeout);
             console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
-            
+        
             // ШАГ 1: Отправка конфигурации (setup)
             ws.send(JSON.stringify({
               setup: {
@@ -8961,27 +8961,27 @@ app.post('/api/tts-stream', async (req, res) => {
               }
               
               const message = JSON.parse(dataStr);
-              
-              // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
-              if (message.setupComplete) {
-                isConnected = true;
+            
+            // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
+            if (message.setupComplete) {
+              isConnected = true;
                 console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, sending text...');
-                
-                if (!textSent) {
-                  textSent = true;
-                  ws.send(JSON.stringify({
-                    clientContent: {
-                      turns: [{
-                        role: "user",
+              
+              if (!textSent) {
+                textSent = true;
+                ws.send(JSON.stringify({
+                  clientContent: {
+                    turns: [{
+                      role: "user",
                         parts: [{ text: `ПРОЧИТАЙ ВЕСЬ ТЕКСТ СЛОВО В СЛОВО ДО САМОГО КОНЦА: ${text}` }]
-                      }],
+                    }],
                       turnComplete: true
-                    }
-                  }));
-                }
-                return;
+                  }
+                }));
               }
-
+              return;
+            }
+            
               // ШАГ 3: Получение аудио-чанков
               if (message.serverContent?.modelTurn?.parts) {
                 for (const part of message.serverContent.modelTurn.parts) {
@@ -8990,58 +8990,58 @@ app.post('/api/tts-stream', async (req, res) => {
                     if (audioBuffer.length % 2 !== 0) audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
 
                     if (audioBuffer.length > 0) {
-                      hasAudio = true;
-                      totalAudioSize += audioBuffer.length;
-                      chunkCount++;
-                      
-                      if (chunkCount <= 3) {
-                        console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
-                      }
-                      
-                      res.write(audioBuffer);
+                    hasAudio = true;
+                    totalAudioSize += audioBuffer.length;
+                    chunkCount++;
+                    
+                    if (chunkCount <= 3) {
+                      console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
+                    }
+                    
+                    res.write(audioBuffer);
                       if (res.flush && typeof res.flush === 'function') res.flush();
                     }
                   }
                 }
               }
-
+              
               // Проверяем завершение
               if (message.serverContent?.turnComplete) {
-                isComplete = true;
+              isComplete = true;
                 console.log('[GEMINI-TTS-LIVE] ✅ Turn complete, waiting for final audio packets...');
                 setTimeout(() => {
                   if (ws.readyState === 1 || ws.readyState === 0) ws.close();
                 }, 2000);
               }
-            } catch (e) {
-              console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
-            }
+  } catch (e) {
+            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
+          }
           };
 
           ws.onclose = (event) => {
             console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code: ${event.code}, Reason: ${event.reason || 'none'}`);
-            if (hasAudio) {
-              console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
+          if (hasAudio) {
+            console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
               resolve();
-            } else if (!isConnected) {
+          } else if (!isConnected) {
               console.warn(`[GEMINI-TTS-LIVE] ⚠️ Connection closed before setup, trying next proxy...`);
               reject(new Error('Connection closed before setup'));
             } else {
-              resolve();
+            resolve();
             }
           };
-
+          
           ws.onerror = (err) => {
             console.error('[GEMINI-TTS-LIVE] WebSocket error:', err);
             reject(err);
           };
         });
-
+        
         if (hasAudio) {
           res.end();
           return;
         }
-
+        
       } catch (wsError: any) {
         console.warn(`[GEMINI-TTS-LIVE] Attempt failed:`, wsError?.message || String(wsError));
         continue;

@@ -1258,11 +1258,11 @@ const GameChat: React.FC = () => {
                   await new Promise(resolve => setTimeout(resolve, 150)); // 50мс * 3 = 150мс
                   
                   if (resp?.ok && resp.message) {
+                    // Старый формат ответа - не озвучиваем текст броска кубиков
                     const txt = String(resp.message);
                     setMessages((m) => {
                       const next = [...m, { from: 'me' as const, text: txt }];
-                      // озвучиваем только последний текст
-                      speak(txt);
+                      // Не озвучиваем текст броска кубиков
                       return next;
                     });
                   } else if (resp?.ok && Array.isArray(resp.messages)) {
@@ -1277,20 +1277,30 @@ const GameChat: React.FC = () => {
                           ...(diceMsg ? [{ from: 'me' as const, text: String(diceMsg) }] : []),
                           ...narrativeMsgs.map((t) => ({ from: 'bot' as const, text: String(t) }))
                         ];
-                        // озвучиваем только последнюю фразу-наратив
+                        // Озвучиваем только нарратив (текст броска кубиков не озвучивается)
                         const last = arr[arr.length - 1];
-                        if (last) speak(String(last));
+                        if (last) {
+                          // Небольшая задержка перед озвучкой нарратива, чтобы предыдущая озвучка успела остановиться
+                          setTimeout(() => {
+                            // Сбрасываем lastSpokenRef, чтобы проверка на дубли не блокировала нарратив
+                            lastSpokenRef.current = '';
+                            speakingInFlightRef.current = false;
+                            console.log('[TTS-CLIENT] Voicing narrative after dice roll:', String(last).slice(0, 100));
+                            speak(String(last));
+                          }, 150);
+                        }
                         return next;
                       });
                     }
                   } else if (resp?.results?.[0]) {
+                    // Старый формат ответа с результатами - не озвучиваем текст броска кубиков
                     const r = resp.results[0] as any;
                     const msg = ('picked' in r)
                       ? `🎲 Бросок: ${r.notation} → (${r.rolls[0]}, ${r.rolls[1]}) ⇒ ${r.picked}${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}`
                       : `🎲 Бросок: ${r.notation} → [${r.rolls.join(', ')}]${r.mod ? (r.mod > 0 ? ` +${r.mod}` : ` ${r.mod}`) : ''} = ${r.total}`;
                     setMessages((m) => {
                       const next = [...m, { from: 'me' as const, text: msg }];
-                      speak(msg);
+                      // Не озвучиваем текст броска кубиков
                       return next;
                     });
                   } else {
