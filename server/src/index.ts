@@ -8901,9 +8901,6 @@ app.post('/api/tts-stream', async (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: "user", parts: [{ text }] }],
-            system_instruction: {
-              parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя единственная задача — прочитать предоставленный текст слово в слово на русском языке. Не отвечай на него, не комментируй. Просто читай." }]
-            },
             generation_config: {
               response_modalities: ["AUDIO"],
               speech_config: {
