@@ -312,8 +312,8 @@ async function ensureRealExitsInChoices(
   locationId: string | undefined | null,
   gameId: string | undefined,
   session: any | null = null // Передаем сессию для отслеживания счетчика
-): Promise<{ text: string; shouldUpdateSession: boolean; sessionState: any }> {
-  const result = { text, shouldUpdateSession: false, sessionState: null as any };
+): Promise<{ text: string; shouldUpdateSession: boolean; sessionState: any; scenesWithoutRealExit?: number; realExitThreshold?: number; shouldSuggestRealExits?: boolean }> {
+  const result = { text, shouldUpdateSession: false, sessionState: null as any, scenesWithoutRealExit: undefined as number | undefined, realExitThreshold: undefined as number | undefined, shouldSuggestRealExits: false as boolean };
   
   if (!locationId || !gameId) return result;
   
@@ -351,80 +351,6 @@ async function ensureRealExitsInChoices(
     }
     const threshold = state.realExitThreshold;
     
-    // КРИТИЧЕСКИ ВАЖНО: Если реальные выходы уже есть в вариантах - оставляем ТОЛЬКО ОДИН реальный выход
-    // Остальные варианты могут быть любыми (от ИИ)
-    if (hasRealExitInChoices) {
-      // Находим первый реальный выход, который есть в вариантах
-      let firstRealExitIndex = -1;
-      for (let i = 0; i < realExits.length; i++) {
-        const exitText = (realExits[i].buttonText || realExits[i].triggerText || '').toLowerCase().trim();
-        const foundIndex = choices.findIndex(choice => {
-          const choiceLower = choice.toLowerCase();
-          return choiceLower.includes(exitText) || exitText.includes(choiceLower) || 
-                 choiceLower === exitText || exitText === choiceLower;
-        });
-        if (foundIndex >= 0) {
-          firstRealExitIndex = foundIndex;
-          break;
-        }
-      }
-      
-      if (firstRealExitIndex >= 0) {
-        // Удаляем все реальные выходы из вариантов, кроме первого найденного
-        const firstRealExit = realExits.find((exit, idx) => {
-          const exitText = (exit.buttonText || exit.triggerText || '').toLowerCase().trim();
-          const choiceText = choices[firstRealExitIndex].toLowerCase();
-          return choiceText.includes(exitText) || exitText.includes(choiceText) || 
-                 choiceText === exitText || exitText === choiceText;
-        });
-        
-        if (firstRealExit) {
-          // Перестраиваем список вариантов: оставляем первый реальный выход, остальные удаляем если они реальные
-          const filteredChoices: string[] = [];
-          const firstRealExitText = firstRealExit.buttonText || firstRealExit.triggerText || '';
-          
-          // Добавляем первый реальный выход
-          filteredChoices.push(firstRealExitText);
-          
-          // Добавляем остальные варианты, которые НЕ являются реальными выходами
-          for (let i = 0; i < choices.length; i++) {
-            if (i === firstRealExitIndex) continue; // Пропускаем первый реальный выход (уже добавлен)
-            
-            const choiceText = choices[i].toLowerCase();
-            const isRealExit = realExitTexts.some(exitText => 
-              choiceText.includes(exitText) || exitText.includes(choiceText) || 
-              choiceText === exitText || exitText === choiceText
-            );
-            
-            if (!isRealExit) {
-              filteredChoices.push(choices[i]);
-            }
-          }
-          
-          // Перестраиваем текст с новыми вариантами
-          const choiceMatch = text.match(/(\n\n\*\*.*[?]\s*\*\*\s*\n\n|\n\n)(\d+\.\s+[^\n]+(?:\n\d+\.\s+[^\n]+)*)/);
-          if (choiceMatch) {
-            const newChoiceLines = filteredChoices.map((choice, idx) => `${idx + 1}. ${choice}`).join('\n');
-            text = text.replace(choiceMatch[2], newChoiceLines);
-          } else {
-            // Если не нашли место с вариантами - добавляем в конец
-            const newChoiceLines = filteredChoices.map((choice, idx) => `${idx + 1}. ${choice}`).join('\n');
-            if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
-              text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
-              text = text + '\n\n**Что вы делаете?**\n\n' + newChoiceLines;
-            } else {
-              text = text + '\n\n**Что вы делаете?**\n\n' + newChoiceLines;
-            }
-          }
-          
-          result.text = text;
-        }
-      }
-      
-      // НЕ сбрасываем счетчик - он сбросится только когда игрок реально переключит локацию
-      return result;
-    }
-    
     // Увеличиваем счетчик сцен без реальных выходов
     state.scenesWithoutRealExit = (state.scenesWithoutRealExit || 0) + 1;
     result.shouldUpdateSession = true;
@@ -433,61 +359,56 @@ async function ensureRealExitsInChoices(
     // Используем сохраненный порог из state
     const shouldAddRealExits = state.scenesWithoutRealExit >= threshold;
     
-    if (shouldAddRealExits) {
-      // Принудительно добавляем реальные выходы
-      const realChoiceLines = realExits
-        .map((exit, idx) => {
-          const choiceText = exit.buttonText || exit.triggerText || `Перейти в локацию`;
-          return `${idx + 1}. ${choiceText}`;
-        })
-        .join('\n');
+    // КРИТИЧЕСКИ ВАЖНО: Если реальные выходы уже есть в вариантах И мы НЕ достигли порога - удаляем их все
+    // Оставляем только диалоговые/ситуативные варианты от ИИ
+    // Реальные выходы добавляем принудительно только когда достигнут порог
+    if (hasRealExitInChoices && !shouldAddRealExits) {
+      // Удаляем все реальные выходы из вариантов, оставляем только диалоговые
+      const filteredChoices = choices.filter(choice => {
+        const choiceLower = choice.toLowerCase();
+        const isRealExit = realExitTexts.some(exitText => 
+          choiceLower.includes(exitText) || exitText.includes(choiceLower) || 
+          choiceLower === exitText || exitText === choiceLower
+        );
+        return !isRealExit; // Оставляем только НЕ реальные выходы
+      });
       
-      if (choices.length === 0) {
-        // Вариантов нет - добавляем реальные выходы
-        if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
-          text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
-          text = text + '\n\n**Что вы делаете?**\n\n' + realChoiceLines;
-        } else {
-          text = text + '\n\n**Что вы делаете?**\n\n' + realChoiceLines;
-        }
-      } else {
-        // Есть варианты от ИИ - добавляем реальные выходы ПЕРВЫМИ
+      if (filteredChoices.length > 0) {
+        // Перестраиваем текст с новыми вариантами (без реальных выходов)
         const choiceMatch = text.match(/(\n\n\*\*.*[?]\s*\*\*\s*\n\n|\n\n)(\d+\.\s+[^\n]+(?:\n\d+\.\s+[^\n]+)*)/);
         if (choiceMatch) {
-          const existingChoices = choiceMatch[2];
-          const realChoicesCount = realExits.length;
-          const renumberedExistingChoices = existingChoices.split('\n')
-            .map((line: string) => {
-              const numMatch = line.match(/^(\d+)\.\s+(.+)$/);
-              if (numMatch) {
-                const newNum = parseInt(numMatch[1], 10) + realChoicesCount;
-                return `${newNum}. ${numMatch[2]}`;
-              }
-              return line;
-            })
-            .join('\n');
-          text = text.replace(choiceMatch[2], realChoiceLines + '\n' + renumberedExistingChoices);
+          const newChoiceLines = filteredChoices.map((choice, idx) => `${idx + 1}. ${choice}`).join('\n');
+          text = text.replace(choiceMatch[2], newChoiceLines);
         } else {
-          // Не нашли место с вариантами - добавляем в конец
+          // Если не нашли место с вариантами - добавляем в конец
+          const newChoiceLines = filteredChoices.map((choice, idx) => `${idx + 1}. ${choice}`).join('\n');
           if (text.match(/\*\*.*[?]\s*\*\*/i) || text.match(/Что вы делаете/i) || text.match(/Что делать/i)) {
             text = text.replace(/\*\*.*[?]\s*\*\*/gi, '').trim();
-            text = text + '\n\n**Что вы делаете?**\n\n' + realChoiceLines;
+            text = text + '\n\n**Что вы делаете?**\n\n' + newChoiceLines;
           } else {
-            text = text + '\n\n**Что вы делаете?**\n\n' + realChoiceLines;
+            text = text + '\n\n**Что вы делаете?**\n\n' + newChoiceLines;
           }
         }
+        
+        result.text = text;
       }
       
-      // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем счетчик после добавления реальных выходов!
-      // Счетчик сбросится только когда игрок реально переключит локацию
-      const scenesCount = state.scenesWithoutRealExit; // Сохраняем значение для лога
-      result.sessionState = state; // Сохраняем состояние БЕЗ сброса счетчика
-      result.text = text;
-      console.log(`[ensureRealExitsInChoices] ✅ Added ${realExits.length} real exits after ${scenesCount} scenes without real exits (counter will reset only when player actually switches location)`);
-    } else {
-      console.log(`[ensureRealExitsInChoices] ⏳ Scenes without real exits: ${state.scenesWithoutRealExit}/${threshold} (will add real exits soon)`);
-      result.text = text;
+      console.log(`[ensureRealExitsInChoices] ⏳ Scenes without real exits: ${state.scenesWithoutRealExit}/${threshold} (removed real exits from choices, will add when threshold reached)`);
+      return result;
     }
+    
+    // Сохраняем информацию о счетчике и пороге для передачи в промпт ИИ
+    result.scenesWithoutRealExit = state.scenesWithoutRealExit;
+    result.realExitThreshold = threshold;
+    result.shouldSuggestRealExits = shouldAddRealExits; // Флаг для промпта
+    
+    if (shouldAddRealExits) {
+      console.log(`[ensureRealExitsInChoices] ⚠️ Threshold reached: ${state.scenesWithoutRealExit}/${threshold} scenes - AI should suggest real exits more often`);
+    } else {
+      console.log(`[ensureRealExitsInChoices] ⏳ Scenes without real exits: ${state.scenesWithoutRealExit}/${threshold} (AI will suggest real exits more often when threshold reached)`);
+    }
+    
+    result.text = text;
   } catch (e) {
     console.warn('[ensureRealExitsInChoices] Failed to add real exits:', e);
   }
@@ -5099,8 +5020,35 @@ app.post('/api/chat/reply', async (req, res) => {
                   const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
                   return `${idx + 1}. ${choiceText}`;
                 }).join('\n');
-                realExitsInfo = `\n\nДОСТУПНЫЕ РЕАЛЬНЫЕ ВЫХОДЫ ИЗ ЛОКАЦИИ:\n${exitsList}\n\nПРАВИЛА ФОРМИРОВАНИЯ ВАРИАНТОВ:\n1. НЕ обязательно включать реальные выходы в КАЖДЫЙ ответ - можешь предлагать диалоговые/ситуативные варианты (например, "Спросить о чем-то", "Осмотреть детальнее", "Попробовать что-то сделать")\n2. НО важно, чтобы ветка диалога периодически (раз в 5-10 сцен) вела к реальному выходу из локации - включай реальные выходы естественным образом, когда это логично по сюжету\n3. НЕ предлагай варианты действий, которые выглядят как переходы в другие локации, но которых нет в списке реальных выходов выше\n4. Если включаешь реальные выходы - они должны быть в начале списка вариантов выбора`;
-                console.log(`[REPLY] 📋 Added real exits context to AI prompt: ${realBtns.length} real exits`);
+                
+                // Получаем информацию о счетчике сцен без реальных выходов
+                let scenesCount = 0;
+                let threshold = 0;
+                let shouldSuggestMore = false;
+                try {
+                  const sess = await getGameSession();
+                  if (sess?.state) {
+                    const state = sess.state as any;
+                    scenesCount = state.scenesWithoutRealExit || 0;
+                    threshold = state.realExitThreshold || 0;
+                    shouldSuggestMore = scenesCount >= threshold && threshold > 0;
+                  }
+                } catch (e) {
+                  console.warn('[REPLY] Failed to get scene counter:', e);
+                }
+                
+                let rulesText = `\n\nПРАВИЛА ФОРМИРОВАНИЯ ВАРИАНТОВ:\n1. НЕ обязательно включать реальные выходы в КАЖДЫЙ ответ - можешь предлагать диалоговые/ситуативные варианты (например, "Спросить о чем-то", "Осмотреть детальнее", "Попробовать что-то сделать")\n2. НО важно, чтобы ветка диалога периодически (раз в 5-10 сцен) вела к реальному выходу из локации - включай реальные выходы естественным образом, когда это логично по сюжету\n3. НЕ предлагай варианты действий, которые выглядят как переходы в другие локации, но которых нет в списке реальных выходов выше`;
+                
+                if (shouldSuggestMore) {
+                  rulesText += `\n\n⚠️ ВАЖНО: Прошло уже ${scenesCount} сцен без реальных выходов (порог: ${threshold}). СЕЙЧАС НУЖНО ЧАЩЕ предлагать реальные выходы из списка выше! Включай их в варианты выбора естественным образом, но чаще чем обычно. Реальные выходы могут быть в любом месте списка вариантов, не обязательно первыми.`;
+                } else if (threshold > 0) {
+                  rulesText += `\n\n📊 Прогресс: ${scenesCount}/${threshold} сцен без реальных выходов. Когда достигнешь порога - начни чаще предлагать реальные выходы.`;
+                }
+                
+                rulesText += `\n4. Если включаешь реальные выходы - они могут быть в любом месте списка вариантов, не обязательно первыми`;
+                
+                realExitsInfo = `\n\nДОСТУПНЫЕ РЕАЛЬНЫЕ ВЫХОДЫ ИЗ ЛОКАЦИИ:\n${exitsList}${rulesText}`;
+                console.log(`[REPLY] 📋 Added real exits context to AI prompt: ${realBtns.length} real exits${shouldSuggestMore ? ` (should suggest more often!)` : ''}`);
               }
             }
           }
@@ -5813,7 +5761,38 @@ app.post('/api/chat/reply-stream', async (req, res) => {
               const choiceText = exit.buttonText || exit.triggerText || `Вариант ${idx + 1}`;
               return `${idx + 1}. ${choiceText}`;
             }).join('\n');
-            realExitsInfo = `\n\nДОСТУПНЫЕ РЕАЛЬНЫЕ ВЫХОДЫ ИЗ ЛОКАЦИИ:\n${exitsList}\n\nПРАВИЛА ФОРМИРОВАНИЯ ВАРИАНТОВ:\n1. НЕ обязательно включать реальные выходы в КАЖДЫЙ ответ - можешь предлагать диалоговые/ситуативные варианты (например, "Спросить о чем-то", "Осмотреть детальнее", "Попробовать что-то сделать")\n2. НО важно, чтобы ветка диалога периодически (раз в 5-10 сцен) вела к реальному выходу из локации - включай реальные выходы естественным образом, когда это логично по сюжету\n3. НЕ предлагай варианты действий, которые выглядят как переходы в другие локации, но которых нет в списке реальных выходов выше\n4. Если включаешь реальные выходы - они должны быть в начале списка вариантов выбора`;
+            
+            // Получаем информацию о счетчике сцен без реальных выходов
+            let scenesCount = 0;
+            let threshold = 0;
+            let shouldSuggestMore = false;
+            try {
+              const sess = lobbyId 
+                ? await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, lobbyId } })
+                : userId 
+                  ? await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId } })
+                  : null;
+              if (sess?.state) {
+                const state = sess.state as any;
+                scenesCount = state.scenesWithoutRealExit || 0;
+                threshold = state.realExitThreshold || 0;
+                shouldSuggestMore = scenesCount >= threshold && threshold > 0;
+              }
+            } catch (e) {
+              console.warn('[REPLY-STREAM] Failed to get scene counter:', e);
+            }
+            
+            let rulesText = `\n\nПРАВИЛА ФОРМИРОВАНИЯ ВАРИАНТОВ:\n1. НЕ обязательно включать реальные выходы в КАЖДЫЙ ответ - можешь предлагать диалоговые/ситуативные варианты (например, "Спросить о чем-то", "Осмотреть детальнее", "Попробовать что-то сделать")\n2. НО важно, чтобы ветка диалога периодически (раз в 5-10 сцен) вела к реальному выходу из локации - включай реальные выходы естественным образом, когда это логично по сюжету\n3. НЕ предлагай варианты действий, которые выглядят как переходы в другие локации, но которых нет в списке реальных выходов выше`;
+            
+            if (shouldSuggestMore) {
+              rulesText += `\n\n⚠️ ВАЖНО: Прошло уже ${scenesCount} сцен без реальных выходов (порог: ${threshold}). СЕЙЧАС НУЖНО ЧАЩЕ предлагать реальные выходы из списка выше! Включай их в варианты выбора естественным образом, но чаще чем обычно. Реальные выходы могут быть в любом месте списка вариантов, не обязательно первыми.`;
+            } else if (threshold > 0) {
+              rulesText += `\n\n📊 Прогресс: ${scenesCount}/${threshold} сцен без реальных выходов. Когда достигнешь порога - начни чаще предлагать реальные выходы.`;
+            }
+            
+            rulesText += `\n4. Если включаешь реальные выходы - они могут быть в любом месте списка вариантов, не обязательно первыми`;
+            
+            realExitsInfo = `\n\nДОСТУПНЫЕ РЕАЛЬНЫЕ ВЫХОДЫ ИЗ ЛОКАЦИИ:\n${exitsList}${rulesText}`;
           }
         }
       } catch (e) {
