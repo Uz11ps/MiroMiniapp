@@ -8855,9 +8855,8 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для Live API используем модель 2.0 Flash Exp
-    // ВАЖНО: Используем gemini-2.0-flash-exp для REST стриминга, так как она поддерживает AUDIO модальность
-    let finalModelName = 'gemini-2.0-flash-exp';
+    // Для Live API используем стабильную модель 2.0 Flash из твоего списка
+    let finalModelName = 'gemini-2.0-flash';
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -8882,16 +8881,24 @@ app.post('/api/tts-stream', async (req, res) => {
     
     // Получаем прокси для Gemini
     const proxies = parseGeminiProxies();
-    const attempts = proxies.length ? proxies : ['__direct__'];
+    // Исключаем __direct__, так как мы знаем, что локальный IP сервера в бане
+    const attempts = proxies.length ? proxies : [];
+    
+    if (attempts.length === 0) {
+      console.error('[GEMINI-TTS-LIVE] ❌ No proxies configured, and direct IP is blocked.');
+      cleanup();
+      return res.status(500).json({ error: 'proxy_error', message: 'No working proxies for Gemini API' });
+    }
+    
     console.log('[GEMINI-TTS-LIVE] 🔄 Proxies available:', attempts.length);
     
     // Пробуем каждый прокси
     for (const p of attempts) {
       try {
-        console.log(`[GEMINI-TTS-LIVE] 🔌 Using REST streaming via fetch (${p === '__direct__' ? 'direct' : 'proxy'})...`);
-        
-        // Используем streamGenerateContent через REST API как более стабильную альтернативу WebSockets
+        // Используем v1beta для максимальной совместимости с AUDIO модальностью в REST
         const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${finalModelName}:streamGenerateContent?alt=sse&key=${geminiApiKey}`;
+        console.log(`[GEMINI-TTS-LIVE] 🔗 URL: ${restUrl.replace(geminiApiKey, '***')}`);
+        console.log(`[GEMINI-TTS-LIVE] 🔌 Using REST streaming (${p === '__direct__' ? 'direct' : 'proxy'})...`);
         
         const dispatcher = p !== '__direct__' ? new ProxyAgent(p) : undefined;
         
@@ -8900,7 +8907,7 @@ app.post('/api/tts-stream', async (req, res) => {
           dispatcher,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text }] }],
+            contents: [{ parts: [{ text: text }] }],
             generation_config: {
               response_modalities: ["AUDIO"],
               speech_config: {
