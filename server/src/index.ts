@@ -4276,7 +4276,7 @@ app.post('/api/chat/welcome', async (req, res) => {
             text = formatChoiceOptions(text);
             
             // КРИТИЧЕСКИ ВАЖНО: Гарантируем наличие минимум одного реального выхода в вариантах
-            const exitsResult = await ensureRealExitsInChoices(prisma, text, first?.id, id, null);
+            const exitsResult = await ensureRealExitsInChoices(prisma, text, first?.id, gameId, null);
             text = exitsResult.text;
           }
         } catch {
@@ -4385,7 +4385,7 @@ app.post('/api/chat/welcome', async (req, res) => {
               text = formatChoiceOptions(text);
               
               // КРИТИЧЕСКИ ВАЖНО: Гарантируем наличие минимум одного реального выхода в вариантах
-              const exitsResult = await ensureRealExitsInChoices(prisma, text, first?.id, id, null);
+              const exitsResult = await ensureRealExitsInChoices(prisma, text, first?.id, gameId, null);
             text = exitsResult.text;
             }
             text = (text || '').trim();
