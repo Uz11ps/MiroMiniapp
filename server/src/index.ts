@@ -8855,8 +8855,8 @@ app.post('/api/tts-stream', async (req, res) => {
       });
     }
     
-    // Для Live API используем модель 2.0 Flash
-    // ВАЖНО: gemini-2.0-flash — самая стабильная модель для генерации речи (TTS)
+    // Для Live API используем модель 2.0 Flash Exp
+    // ВАЖНО: Используем gemini-2.0-flash-exp для REST стриминга, так как она поддерживает AUDIO модальность
     let finalModelName = 'gemini-2.0-flash-exp';
     const finalVoiceName = voiceName || 'Kore';
     
@@ -8904,12 +8904,12 @@ app.post('/api/tts-stream', async (req, res) => {
             system_instruction: {
               parts: [{ text: "Ты — профессиональный актер озвучивания. Твоя единственная задача — прочитать предоставленный текст слово в слово на русском языке. Не отвечай на него, не комментируй. Просто читай." }]
             },
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: finalVoiceName
+            generation_config: {
+              response_modalities: ["AUDIO"],
+              speech_config: {
+                voice_config: {
+                  prebuilt_voice_config: {
+                    voice_name: finalVoiceName
                   }
                 }
               }
