@@ -5925,10 +5925,12 @@ app.post('/api/chat/reply-stream', async (req, res) => {
         let chunkCount = 0;
         let totalSize = 0;
         let hasAudio = false;
+        let success = false;
         
         for (const p of attempts) {
           try {
             const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+            console.log('[REPLY-STREAM] 🔌 Connecting to Gemini WebSocket, proxy:', p === '__direct__' ? 'none' : p);
             
             const wsOptions: any = {};
             if (p !== '__direct__') {
@@ -5945,20 +5947,25 @@ app.post('/api/chat/reply-stream', async (req, res) => {
             let isConnected = false;
             let isComplete = false;
             let textSent = false;
+            let setupReceived = false;
             
             const isBufferValid = (buffer: Buffer): boolean => {
               return buffer && buffer.length > 0;
             };
             
+            // Устанавливаем обработчики ДО открытия соединения
             ws.on('message', (data: Buffer) => {
               try {
                 const message = JSON.parse(data.toString('utf-8'));
                 
                 if (message.setupComplete) {
                   isConnected = true;
+                  setupReceived = true;
+                  console.log('[REPLY-STREAM] ✅ WebSocket setup complete, sending text...');
                   
                   if (!textSent) {
                     textSent = true;
+                    console.log('[REPLY-STREAM] 📤 Sending text to Gemini, length:', fullText.length);
                     ws.send(JSON.stringify({
                       clientContent: {
                         turns: [{
@@ -6048,6 +6055,7 @@ app.post('/api/chat/reply-stream', async (req, res) => {
             });
             
             ws.on('error', (error) => {
+              console.error('[REPLY-STREAM] ❌ WebSocket error:', error?.message || String(error));
               if (!isConnected && !hasAudio) {
                 ws.close();
               }
@@ -6059,10 +6067,12 @@ app.post('/api/chat/reply-stream', async (req, res) => {
             
             await new Promise<void>((resolve, reject) => {
               const timeout = setTimeout(() => {
+                console.error('[REPLY-STREAM] ❌ WebSocket connection timeout after 10s');
                 reject(new Error('WebSocket connection timeout'));
               }, 10000);
               
               ws.on('open', () => {
+                console.log('[REPLY-STREAM] 🔗 WebSocket opened, sending setup...');
                 ws.send(JSON.stringify({
                   setup: {
                     model: `models/${finalModelName}`,
@@ -6097,35 +6107,42 @@ app.post('/api/chat/reply-stream', async (req, res) => {
             await new Promise<void>((resolve) => {
               const completionTimeout = setTimeout(() => {
                 if (!isComplete) {
+                  console.warn('[REPLY-STREAM] ⚠️ TTS generation timeout after 120s, closing WebSocket');
                   ws.close();
                 }
                 resolve();
               }, 120000);
               
               ws.on('close', () => {
+                console.log('[REPLY-STREAM] 🔌 WebSocket closed, connected:', isConnected, 'hasAudio:', hasAudio, 'chunks:', chunkCount);
                 clearTimeout(completionTimeout);
                 resolve();
               });
             });
             
             if (hasAudio) {
+              success = true;
               // Отправляем финальное событие о завершении стриминга
               sendSSE('audio_complete', { 
                 totalChunks: chunkCount,
                 totalSize: totalSize
               });
               console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
-              return; // Успешно завершили
+              break; // Выходим из цикла прокси
+            } else {
+              console.warn('[REPLY-STREAM] ⚠️ No audio received, connected:', isConnected, 'setupReceived:', setupReceived, 'textSent:', textSent);
             }
             
           } catch (wsError: any) {
+            console.error('[REPLY-STREAM] ❌ WebSocket attempt failed:', wsError?.message || String(wsError));
             // Пробуем следующий прокси
             continue;
           }
         }
         
-        if (!hasAudio) {
-          throw new Error('Failed to generate TTS stream');
+        if (!success) {
+          console.error('[REPLY-STREAM] ❌ All WebSocket attempts failed, no audio received');
+          throw new Error('Failed to generate TTS stream - no audio chunks received');
         }
         
       } catch (ttsErr: any) {
