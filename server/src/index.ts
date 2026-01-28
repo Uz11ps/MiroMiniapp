@@ -8893,7 +8893,7 @@ app.post('/api/tts-stream', async (req, res) => {
         // Правильный URL для Gemini Live API через WebSocket (v1alpha)
         // ВАЖНО: Модель НЕ должна передаваться в URL как query параметр (ошибка 1007)
         // Она передается внутри JSON-сообщения setup
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
         console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
         console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
         console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
