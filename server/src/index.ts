@@ -341,6 +341,16 @@ async function ensureRealExitsInChoices(
     let state = session?.state as any || {};
     if (!state.scenesWithoutRealExit) state.scenesWithoutRealExit = 0;
     
+    // Рандомизируем порог один раз и сохраняем в state до перехода
+    // Если порога нет или счетчик был сброшен - генерируем новый порог
+    if (!state.realExitThreshold || state.scenesWithoutRealExit === 0) {
+      state.realExitThreshold = Math.floor(Math.random() * 6) + 5; // 5-10 сцен
+      result.shouldUpdateSession = true;
+      result.sessionState = state;
+      console.log(`[ensureRealExitsInChoices] 🎲 Generated new threshold: ${state.realExitThreshold} scenes`);
+    }
+    const threshold = state.realExitThreshold;
+    
     // КРИТИЧЕСКИ ВАЖНО: Если реальные выходы уже есть в вариантах - оставляем ТОЛЬКО ОДИН реальный выход
     // Остальные варианты могут быть любыми (от ИИ)
     if (hasRealExitInChoices) {
@@ -420,8 +430,7 @@ async function ensureRealExitsInChoices(
     result.shouldUpdateSession = true;
     result.sessionState = state;
     
-    // Порог: добавляем реальные выходы после 5-10 сцен (случайное значение для разнообразия)
-    const threshold = Math.floor(Math.random() * 6) + 5; // 5-10 сцен
+    // Используем сохраненный порог из state
     const shouldAddRealExits = state.scenesWithoutRealExit >= threshold;
     
     if (shouldAddRealExits) {
@@ -5739,9 +5748,10 @@ app.post('/api/chat/reply-stream', async (req, res) => {
                     data: { currentLocationId: selectedExit.targetLocationId }
                   });
                   
-                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов
+                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
                   const state = (sess.state as any) || {};
                   state.scenesWithoutRealExit = 0;
+                  state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
                   state.lastAction = userText || '';
                   state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
                   await prisma.gameSession.update({
@@ -6339,8 +6349,9 @@ app.post('/api/engine/session/:id/act', async (req, res) => {
       const state = (await prisma.gameSession.findUnique({ where: { id: sess.id }, select: { state: true } }))?.state as any || {};
       state.lastAction = userText || '';
       state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([locId, nextId]))) : [locId, nextId];
-      // КРИТИЧЕСКИ ВАЖНО: Сбрасываем счетчик сцен без реальных выходов при переходе в другую локацию
+      // КРИТИЧЕСКИ ВАЖНО: Сбрасываем счетчик сцен без реальных выходов и порог при переходе в другую локацию
       state.scenesWithoutRealExit = 0;
+      state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
       await prisma.gameSession.update({ where: { id: sess.id }, data: { state } });
     } catch {}
     return res.json({ ok: true, location: nextLoc, exits: nextExits });
