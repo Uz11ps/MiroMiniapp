@@ -5901,87 +5901,46 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     
     // КРИТИЧЕСКИ ВАЖНО: Параллельно запускаем генерацию TTS стриминга для текста сгенерированного с RAG
     sendSSE('status', { type: 'generating_audio' });
-    console.log('[REPLY-STREAM] 🔊 Starting TTS streaming request for RAG-generated text');
+    console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for RAG-generated text');
+    console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
     
+    // КРИТИЧЕСКИ ВАЖНО: Вызываем TTS стриминг напрямую и СТРИМИМ чанки через SSE сразу, БЕЗ накопления
     (async () => {
       try {
-        const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-        const ttsUrl = `${apiBase}/api/tts-stream`;
+        let chunkCount = 0;
+        let totalSize = 0;
         
-        console.log('[REPLY-STREAM] 🔊 Requesting TTS stream from:', ttsUrl);
-        console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
-        
-        const ttsResponse = await undiciFetch(ttsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: fullText,
-            voiceName: 'Kore',
-            modelName: 'gemini-2.5-flash-preview-tts'
-          }),
-          signal: AbortSignal.timeout(60000)
+        // Вызываем функцию TTS стриминга напрямую - стримим чанки сразу через SSE
+        await generateTTSStreamDirect({
+          text: fullText,
+          voiceName: 'Kore',
+          modelName: 'gemini-2.5-flash-preview-tts',
+          gameId: gameId,
+          isNarrator: true,
+          onAudioChunk: (chunk: Buffer) => {
+            // СТРИМИМ ЧАНКИ НАПРЯМУЮ ЧЕРЕЗ SSE БЕЗ НАКОПЛЕНИЯ
+            chunkCount++;
+            totalSize += chunk.length;
+            const chunkBase64 = chunk.toString('base64');
+            sendSSE('audio_chunk', { 
+              chunk: chunkBase64,
+              chunkIndex: chunkCount,
+              format: 'pcm',
+              sampleRate: 24000,
+              channels: 1,
+              bitsPerSample: 16
+            });
+          }
         });
         
-        console.log('[REPLY-STREAM] 🔊 TTS response status:', ttsResponse.status, ttsResponse.ok ? 'OK' : 'FAILED');
-        
-        if (ttsResponse.ok) {
-          // Собираем все PCM чанки из streaming ответа
-          const reader = ttsResponse.body;
-          if (!reader) {
-            sendSSE('audio_error', { error: 'No response body' });
-        } else {
-            const audioChunks: Buffer[] = [];
-            for await (const chunk of reader) {
-              if (Buffer.isBuffer(chunk)) {
-                audioChunks.push(chunk);
-              } else if (chunk instanceof Uint8Array) {
-                audioChunks.push(Buffer.from(chunk));
-              } else if (chunk instanceof ArrayBuffer) {
-                audioChunks.push(Buffer.from(chunk));
-              }
-            }
-            
-            if (audioChunks.length === 0) {
-              sendSSE('audio_error', { error: 'No audio chunks received' });
-            } else {
-              // Конвертируем PCM в WAV
-              const pcmAudio = Buffer.concat(audioChunks);
-              const sampleRate = 24000;
-              const channels = 1;
-              const bitsPerSample = 16;
-              const byteRate = sampleRate * channels * (bitsPerSample / 8);
-              const blockAlign = channels * (bitsPerSample / 8);
-              const dataSize = pcmAudio.length;
-              const fileSize = 36 + dataSize;
-              
-              const wavHeader = Buffer.alloc(44);
-              wavHeader.write('RIFF', 0);
-              wavHeader.writeUInt32LE(fileSize, 4);
-              wavHeader.write('WAVE', 8);
-              wavHeader.write('fmt ', 12);
-              wavHeader.writeUInt32LE(16, 16);
-              wavHeader.writeUInt16LE(1, 20);
-              wavHeader.writeUInt16LE(channels, 22);
-              wavHeader.writeUInt32LE(sampleRate, 24);
-              wavHeader.writeUInt32LE(byteRate, 28);
-              wavHeader.writeUInt16LE(blockAlign, 32);
-              wavHeader.writeUInt16LE(bitsPerSample, 34);
-              wavHeader.write('data', 36);
-              wavHeader.writeUInt32LE(dataSize, 40);
-              
-              const audioBuffer = Buffer.concat([wavHeader, pcmAudio]);
-              const audioBase64 = audioBuffer.toString('base64');
-              sendSSE('audio_ready', { 
-                audio: audioBase64,
-                contentType: 'audio/wav',
-          format: 'base64'
-              });
-            }
-          }
-      } else {
-          sendSSE('audio_error', { error: 'TTS generation failed' });
-        }
-      } catch (ttsErr) {
+        // Отправляем финальное событие о завершении стриминга
+        sendSSE('audio_complete', { 
+          totalChunks: chunkCount,
+          totalSize: totalSize
+        });
+        console.log('[REPLY-STREAM] ✅ TTS streaming completed, streamed', chunkCount, 'chunks, total size:', totalSize);
+      } catch (ttsErr: any) {
+        console.error('[REPLY-STREAM] ❌ TTS streaming error:', ttsErr?.message || String(ttsErr));
         sendSSE('audio_error', { error: ttsErr?.message || String(ttsErr) });
       }
     })();
