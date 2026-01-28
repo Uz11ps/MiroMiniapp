@@ -4937,9 +4937,10 @@ app.post('/api/chat/reply', async (req, res) => {
                     data: { currentLocationId: selectedExit.targetLocationId }
                   });
                   
-                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов
+                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
                   const state = (sess.state as any) || {};
                   state.scenesWithoutRealExit = 0;
+                  state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
                   state.lastAction = userText || '';
                   state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
                   await prisma.gameSession.update({
@@ -5518,9 +5519,10 @@ app.post('/api/chat/reply', async (req, res) => {
                     data: { currentLocationId: selectedExit.targetLocationId }
                   });
                   
-                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов
+                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
                   const state = (sess.state as any) || {};
                   state.scenesWithoutRealExit = 0;
+                  state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
                   state.lastAction = userText || '';
                   state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
                   await prisma.gameSession.update({
