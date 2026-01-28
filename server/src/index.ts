@@ -49,10 +49,13 @@ function parseProxyList(listEnvRaw: string, singleRaw: string): string[] {
   const listEnv = strip(listEnvRaw);
   const single = strip(singleRaw);
   const parts = [listEnv, single].filter(Boolean).join(',');
-  return parts
+  const allProxies = parts
     .split(',')
     .map((s) => normalizeProxyUrl(strip(s)))
     .filter(Boolean);
+  
+  // Убираем дубликаты
+  return [...new Set(allProxies)];
 }
 
 function parseProxies(): string[] {
@@ -8920,11 +8923,11 @@ app.post('/api/tts-stream', async (req, res) => {
               }
             }
           }),
-          // Добавляем таймаут, чтобы не висеть бесконечно
-          signal: AbortSignal.timeout(30000)
+          // 10 секунд достаточно для коннекта, если прокси живой
+          signal: AbortSignal.timeout(15000)
         });
 
-        console.log(`[GEMINI-TTS-LIVE] 📡 Response received, status: ${response.status}`);
+        console.log(`[GEMINI-TTS-LIVE] 📡 Response received from ${p === '__direct__' ? 'direct' : 'proxy'}, status: ${response.status}`);
 
         if (!response.ok) {
           const errJson = await response.json().catch(() => ({}));
@@ -9363,14 +9366,24 @@ async function generateViaGeminiText(params: {
         if (text) return text;
         lastErr = 'empty_text';
         break; // Успешно получили ответ, но он пустой - не retry
-      } catch (e) {
+      } catch (e: any) {
         lastErr = e;
-        console.error('[GEMINI-TEXT] Error:', e);
-        // Если это не последняя попытка и ошибка может быть временной - retry
-        if (retry < maxRetries - 1 && (e instanceof Error && (e.message.includes('aborted') || e.message.includes('timeout')))) {
+        const errMsg = e?.message || String(e);
+        const errCode = e?.code || (e?.cause as any)?.code;
+        
+        console.error(`[GEMINI-TEXT] Error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errMsg, errCode ? `[${errCode}]` : '');
+        
+        // Если это таймаут или ошибка подключения — пробуем retry на этом же прокси, 
+        // но если не помогло — break выкинет нас на следующий прокси
+        const isTimeout = errMsg.toLowerCase().includes('timeout') || 
+                          errMsg.toLowerCase().includes('aborted') || 
+                          errCode === 'UND_ERR_CONNECT_TIMEOUT' ||
+                          errCode === 'UND_ERR_HEADERS_TIMEOUT';
+
+        if (retry < maxRetries - 1 && isTimeout) {
           continue; // Retry для таймаутов
         }
-        break; // Выходим из retry цикла
+        break; // Выходим из retry цикла для этого прокси
       }
     }
   }
