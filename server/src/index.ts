@@ -4815,66 +4815,88 @@ app.post('/api/chat/reply', async (req, res) => {
             }
           }
           
-          // Парсим варианты выбора из последнего ответа бота
-          const choices = parseChoiceOptions(lastBotMessage);
+          // КРИТИЧЕСКИ ВАЖНО: Сначала получаем реальные выходы из БД
+          // Затем проверяем, соответствует ли текст игрока ТОЧНО одному из реальных выходов
+          const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+          const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
           
-          if (choices.length > 0) {
+          if (realExits.length > 0) {
             // Нормализуем текст игрока для сравнения
             const userTextNormalized = userText.trim().toLowerCase();
             
-            // Проверяем, соответствует ли выбор игрока одному из вариантов
-            let matchedChoiceIndex = -1;
-            for (let i = 0; i < choices.length; i++) {
-              const choiceNormalized = choices[i].toLowerCase();
-              // Проверяем точное совпадение или включение
-              if (userTextNormalized === choiceNormalized || 
-                  userTextNormalized.includes(choiceNormalized) || 
-                  choiceNormalized.includes(userTextNormalized) ||
-                  // Проверяем номер варианта (если игрок написал "1", "2" и т.д.)
-                  userTextNormalized === String(i + 1) ||
-                  userTextNormalized === `${i + 1}.` ||
-                  userTextNormalized.startsWith(`${i + 1}. `)) {
-                matchedChoiceIndex = i;
-                break;
+            // Парсим варианты выбора из последнего ответа бота
+            const choices = parseChoiceOptions(lastBotMessage);
+            
+            // Проверяем, соответствует ли текст игрока реальному выходу из БД
+            // НЕ используем includes - это слишком широко, проверяем только точное совпадение
+            let selectedExit: any = null;
+            for (const exit of realExits) {
+              const exitText = (exit.buttonText || exit.triggerText || '').toLowerCase().trim();
+              if (!exitText) continue;
+              
+              // Проверяем точное совпадение текста игрока с текстом реального выхода
+              if (userTextNormalized === exitText || exitText === userTextNormalized) {
+                // Дополнительная проверка: этот выход должен быть в вариантах выбора из последнего ответа бота
+                if (choices.length > 0) {
+                  const choiceIndex = choices.findIndex(choice => {
+                    const choiceLower = choice.toLowerCase().trim();
+                    return choiceLower === exitText || exitText === choiceLower;
+                  });
+                  
+                  if (choiceIndex >= 0) {
+                    selectedExit = exit;
+                    break;
+                  }
+                } else {
+                  // Если вариантов нет, но текст точно совпадает - это реальный выход
+                  selectedExit = exit;
+                  break;
+                }
+              }
+              
+              // Также проверяем номер варианта (если игрок написал "1", "2" и т.д.)
+              if (choices.length > 0) {
+                const exitIndex = realExits.indexOf(exit);
+                if (userTextNormalized === String(exitIndex + 1) || 
+                    userTextNormalized === `${exitIndex + 1}.` ||
+                    userTextNormalized.startsWith(`${exitIndex + 1}. `)) {
+                  // Проверяем, что этот вариант есть в списке вариантов и соответствует реальному выходу
+                  if (exitIndex < choices.length) {
+                    const choiceText = choices[exitIndex].toLowerCase().trim();
+                    if (choiceText === exitText || exitText === choiceText) {
+                      selectedExit = exit;
+                      break;
+                    }
+                  }
+                }
               }
             }
             
-            // Если нашли совпадение - проверяем, соответствует ли это реальному выходу
-            if (matchedChoiceIndex >= 0) {
-              // Получаем реальные выходы из текущей локации
-              const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
-              const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
+            if (selectedExit && selectedExit.targetLocationId) {
+              const oldLocationId = sess.currentLocationId;
               
-              // Проверяем, соответствует ли выбранный вариант реальному выходу
-              // Реальные выходы добавляются первыми в списке вариантов функцией ensureRealExitsInChoices
-              if (matchedChoiceIndex < realExits.length) {
-                const selectedExit = realExits[matchedChoiceIndex];
-                if (selectedExit && selectedExit.targetLocationId) {
-                  const oldLocationId = sess.currentLocationId;
-                  
-                  // Переключаем локацию
-                  await prisma.gameSession.update({
-                    where: { id: sess.id },
-                    data: { currentLocationId: selectedExit.targetLocationId }
-                  });
-                  
-                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
-                  const state = (sess.state as any) || {};
-                  state.scenesWithoutRealExit = 0;
-                  state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
-                  state.lastAction = userText || '';
-                  state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
-                  await prisma.gameSession.update({
-                    where: { id: sess.id },
-                    data: { state }
-                  });
-                  
-                  console.log(`[REPLY] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${choices[matchedChoiceIndex]}"`);
-                  
-                  // Обновляем кэш сессии для последующего использования
-                  cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
-                }
-              }
+              // Переключаем локацию
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { currentLocationId: selectedExit.targetLocationId }
+              });
+              
+              // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
+              const state = (sess.state as any) || {};
+              state.scenesWithoutRealExit = 0;
+              state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
+              state.scenesInCurrentLocation = 0; // Сбрасываем счетчик сцен в новой локации
+              state.lastAction = userText || '';
+              state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { state }
+              });
+              
+              console.log(`[REPLY] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${exit.buttonText || exit.triggerText}"`);
+              
+              // Обновляем кэш сессии для последующего использования
+              cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
             }
           }
         }
@@ -5106,14 +5128,30 @@ app.post('/api/chat/reply', async (req, res) => {
     text = exitsResult.text;
     
     // Обновляем состояние сессии с счетчиком сцен без реальных выходов
+    // Обновляем состояние сессии с счетчиком сцен без реальных выходов и счетчиком сцен в текущей локации
     if (exitsResult.shouldUpdateSession && session && gameId) {
       try {
+        const state = exitsResult.sessionState || {};
+        // Увеличиваем счетчик сцен в текущей локации
+        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
         await prisma.gameSession.update({
           where: { id: session.id },
-          data: { state: exitsResult.sessionState }
+          data: { state }
         });
       } catch (e) {
         console.warn('[REPLY] Failed to update session state:', e);
+      }
+    } else if (session && gameId) {
+      // Даже если не обновляем счетчик реальных выходов, увеличиваем счетчик сцен в локации
+      try {
+        const state = (session.state as any) || {};
+        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
+        await prisma.gameSession.update({
+          where: { id: session.id },
+          data: { state }
+        });
+      } catch (e) {
+        console.warn('[REPLY] Failed to update scene counter:', e);
       }
     }
 
@@ -5424,66 +5462,88 @@ app.post('/api/chat/reply', async (req, res) => {
             }
           }
           
-          // Парсим варианты выбора из последнего ответа бота
-          const choices = parseChoiceOptions(lastBotMessage);
+          // КРИТИЧЕСКИ ВАЖНО: Сначала получаем реальные выходы из БД
+          // Затем проверяем, соответствует ли текст игрока ТОЧНО одному из реальных выходов
+          const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+          const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
           
-          if (choices.length > 0) {
+          if (realExits.length > 0) {
             // Нормализуем текст игрока для сравнения
             const userTextNormalized = userText.trim().toLowerCase();
             
-            // Проверяем, соответствует ли выбор игрока одному из вариантов
-            let matchedChoiceIndex = -1;
-            for (let i = 0; i < choices.length; i++) {
-              const choiceNormalized = choices[i].toLowerCase();
-              // Проверяем точное совпадение или включение
-              if (userTextNormalized === choiceNormalized || 
-                  userTextNormalized.includes(choiceNormalized) || 
-                  choiceNormalized.includes(userTextNormalized) ||
-                  // Проверяем номер варианта (если игрок написал "1", "2" и т.д.)
-                  userTextNormalized === String(i + 1) ||
-                  userTextNormalized === `${i + 1}.` ||
-                  userTextNormalized.startsWith(`${i + 1}. `)) {
-                matchedChoiceIndex = i;
-                break;
+            // Парсим варианты выбора из последнего ответа бота
+            const choices = parseChoiceOptions(lastBotMessage);
+            
+            // Проверяем, соответствует ли текст игрока реальному выходу из БД
+            // НЕ используем includes - это слишком широко, проверяем только точное совпадение
+            let selectedExit: any = null;
+            for (const exit of realExits) {
+              const exitText = (exit.buttonText || exit.triggerText || '').toLowerCase().trim();
+              if (!exitText) continue;
+              
+              // Проверяем точное совпадение текста игрока с текстом реального выхода
+              if (userTextNormalized === exitText || exitText === userTextNormalized) {
+                // Дополнительная проверка: этот выход должен быть в вариантах выбора из последнего ответа бота
+                if (choices.length > 0) {
+                  const choiceIndex = choices.findIndex(choice => {
+                    const choiceLower = choice.toLowerCase().trim();
+                    return choiceLower === exitText || exitText === choiceLower;
+                  });
+                  
+                  if (choiceIndex >= 0) {
+                    selectedExit = exit;
+                    break;
+                  }
+                } else {
+                  // Если вариантов нет, но текст точно совпадает - это реальный выход
+                  selectedExit = exit;
+                  break;
+                }
+              }
+              
+              // Также проверяем номер варианта (если игрок написал "1", "2" и т.д.)
+              if (choices.length > 0) {
+                const exitIndex = realExits.indexOf(exit);
+                if (userTextNormalized === String(exitIndex + 1) || 
+                    userTextNormalized === `${exitIndex + 1}.` ||
+                    userTextNormalized.startsWith(`${exitIndex + 1}. `)) {
+                  // Проверяем, что этот вариант есть в списке вариантов и соответствует реальному выходу
+                  if (exitIndex < choices.length) {
+                    const choiceText = choices[exitIndex].toLowerCase().trim();
+                    if (choiceText === exitText || exitText === choiceText) {
+                      selectedExit = exit;
+                      break;
+                    }
+                  }
+                }
               }
             }
             
-            // Если нашли совпадение - проверяем, соответствует ли это реальному выходу
-            if (matchedChoiceIndex >= 0) {
-              // Получаем реальные выходы из текущей локации
-              const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
-              const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
+            if (selectedExit && selectedExit.targetLocationId) {
+              const oldLocationId = sess.currentLocationId;
               
-              // Проверяем, соответствует ли выбранный вариант реальному выходу
-              // Реальные выходы добавляются первыми в списке вариантов функцией ensureRealExitsInChoices
-              if (matchedChoiceIndex < realExits.length) {
-                const selectedExit = realExits[matchedChoiceIndex];
-                if (selectedExit && selectedExit.targetLocationId) {
-                  const oldLocationId = sess.currentLocationId;
-                  
-                  // Переключаем локацию
-                  await prisma.gameSession.update({
-                    where: { id: sess.id },
-                    data: { currentLocationId: selectedExit.targetLocationId }
-                  });
-                  
-                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
-                  const state = (sess.state as any) || {};
-                  state.scenesWithoutRealExit = 0;
-                  state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
-                  state.lastAction = userText || '';
-                  state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
-                  await prisma.gameSession.update({
-                    where: { id: sess.id },
-                    data: { state }
-                  });
-                  
-                  console.log(`[REPLY] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${choices[matchedChoiceIndex]}"`);
-                  
-                  // Обновляем кэш сессии для последующего использования
-                  cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
-                }
-              }
+              // Переключаем локацию
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { currentLocationId: selectedExit.targetLocationId }
+              });
+              
+              // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
+              const state = (sess.state as any) || {};
+              state.scenesWithoutRealExit = 0;
+              state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
+              state.scenesInCurrentLocation = 0; // Сбрасываем счетчик сцен в новой локации
+              state.lastAction = userText || '';
+              state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { state }
+              });
+              
+              console.log(`[REPLY] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${exit.buttonText || exit.triggerText}"`);
+              
+              // Обновляем кэш сессии для последующего использования
+              cachedGameSession = await prisma.gameSession.findUnique({ where: { id: sess.id } });
             }
           }
         }
@@ -5655,63 +5715,85 @@ app.post('/api/chat/reply-stream', async (req, res) => {
             }
           }
           
-          // Парсим варианты выбора из последнего ответа бота
-          const choices = parseChoiceOptions(lastBotMessage);
+          // КРИТИЧЕСКИ ВАЖНО: Сначала получаем реальные выходы из БД
+          // Затем проверяем, соответствует ли текст игрока ТОЧНО одному из реальных выходов
+          const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
+          const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
           
-          if (choices.length > 0) {
+          if (realExits.length > 0) {
             // Нормализуем текст игрока для сравнения
             const userTextNormalized = userText.trim().toLowerCase();
             
-            // Проверяем, соответствует ли выбор игрока одному из вариантов
-            let matchedChoiceIndex = -1;
-            for (let i = 0; i < choices.length; i++) {
-              const choiceNormalized = choices[i].toLowerCase();
-              // Проверяем точное совпадение или включение
-              if (userTextNormalized === choiceNormalized || 
-                  userTextNormalized.includes(choiceNormalized) || 
-                  choiceNormalized.includes(userTextNormalized) ||
-                  // Проверяем номер варианта (если игрок написал "1", "2" и т.д.)
-                  userTextNormalized === String(i + 1) ||
-                  userTextNormalized === `${i + 1}.` ||
-                  userTextNormalized.startsWith(`${i + 1}. `)) {
-                matchedChoiceIndex = i;
-                break;
+            // Парсим варианты выбора из последнего ответа бота
+            const choices = parseChoiceOptions(lastBotMessage);
+            
+            // Проверяем, соответствует ли текст игрока реальному выходу из БД
+            // НЕ используем includes - это слишком широко, проверяем только точное совпадение
+            let selectedExit: any = null;
+            for (const exit of realExits) {
+              const exitText = (exit.buttonText || exit.triggerText || '').toLowerCase().trim();
+              if (!exitText) continue;
+              
+              // Проверяем точное совпадение текста игрока с текстом реального выхода
+              if (userTextNormalized === exitText || exitText === userTextNormalized) {
+                // Дополнительная проверка: этот выход должен быть в вариантах выбора из последнего ответа бота
+                if (choices.length > 0) {
+                  const choiceIndex = choices.findIndex(choice => {
+                    const choiceLower = choice.toLowerCase().trim();
+                    return choiceLower === exitText || exitText === choiceLower;
+                  });
+                  
+                  if (choiceIndex >= 0) {
+                    selectedExit = exit;
+                    break;
+                  }
+                } else {
+                  // Если вариантов нет, но текст точно совпадает - это реальный выход
+                  selectedExit = exit;
+                  break;
+                }
+              }
+              
+              // Также проверяем номер варианта (если игрок написал "1", "2" и т.д.)
+              if (choices.length > 0) {
+                const exitIndex = realExits.indexOf(exit);
+                if (userTextNormalized === String(exitIndex + 1) || 
+                    userTextNormalized === `${exitIndex + 1}.` ||
+                    userTextNormalized.startsWith(`${exitIndex + 1}. `)) {
+                  // Проверяем, что этот вариант есть в списке вариантов и соответствует реальному выходу
+                  if (exitIndex < choices.length) {
+                    const choiceText = choices[exitIndex].toLowerCase().trim();
+                    if (choiceText === exitText || exitText === choiceText) {
+                      selectedExit = exit;
+                      break;
+                    }
+                  }
+                }
               }
             }
             
-            // Если нашли совпадение - проверяем, соответствует ли это реальному выходу
-            if (matchedChoiceIndex >= 0) {
-              // Получаем реальные выходы из текущей локации
-              const allExits = await prisma.locationExit.findMany({ where: { locationId: sess.currentLocationId } });
-              const realExits = allExits.filter((e: any) => e.type === 'BUTTON' && e.targetLocationId && !e.isGameOver);
+            if (selectedExit && selectedExit.targetLocationId) {
+              const oldLocationId = sess.currentLocationId;
               
-              // Проверяем, соответствует ли выбранный вариант реальному выходу
-              // Реальные выходы добавляются первыми в списке вариантов функцией ensureRealExitsInChoices
-              if (matchedChoiceIndex < realExits.length) {
-                const selectedExit = realExits[matchedChoiceIndex];
-                if (selectedExit && selectedExit.targetLocationId) {
-                  const oldLocationId = sess.currentLocationId;
-                  
-                  // Переключаем локацию
-                  await prisma.gameSession.update({
-                    where: { id: sess.id },
-                    data: { currentLocationId: selectedExit.targetLocationId }
-                  });
-                  
-                  // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
-                  const state = (sess.state as any) || {};
-                  state.scenesWithoutRealExit = 0;
-                  state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
-                  state.lastAction = userText || '';
-                  state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
-                  await prisma.gameSession.update({
-                    where: { id: sess.id },
-                    data: { state }
-                  });
-                  
-                  console.log(`[REPLY-STREAM] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${choices[matchedChoiceIndex]}"`);
-                }
-              }
+              // Переключаем локацию
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { currentLocationId: selectedExit.targetLocationId }
+              });
+              
+              // Обновляем состояние: сбрасываем счетчик сцен без реальных выходов и порог
+              const state = (sess.state as any) || {};
+              state.scenesWithoutRealExit = 0;
+              state.realExitThreshold = undefined; // Сбрасываем порог для нового цикла
+              state.scenesInCurrentLocation = 0; // Сбрасываем счетчик сцен в новой локации
+              state.lastAction = userText || '';
+              state.visited = Array.isArray(state.visited) ? Array.from(new Set(state.visited.concat([oldLocationId, selectedExit.targetLocationId]))) : [oldLocationId, selectedExit.targetLocationId];
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { state }
+              });
+              
+              console.log(`[REPLY-STREAM] ✅ Location switched from ${oldLocationId} to ${selectedExit.targetLocationId} via real exit: "${exit.buttonText || exit.triggerText}"`);
             }
           }
         }
@@ -5843,15 +5925,30 @@ app.post('/api/chat/reply-stream', async (req, res) => {
     const exitsResult = await ensureRealExitsInChoices(prisma, fullText, locationId, gameId, session);
     fullText = exitsResult.text;
     
-    // Обновляем состояние сессии с счетчиком сцен без реальных выходов
+    // Обновляем состояние сессии с счетчиком сцен без реальных выходов и счетчиком сцен в текущей локации
     if (exitsResult.shouldUpdateSession && session && gameId) {
       try {
+        const state = exitsResult.sessionState || {};
+        // Увеличиваем счетчик сцен в текущей локации
+        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
         await prisma.gameSession.update({
           where: { id: session.id },
-          data: { state: exitsResult.sessionState }
+          data: { state }
         });
       } catch (e) {
         console.warn('[REPLY-STREAM] Failed to update session state:', e);
+      }
+    } else if (session && gameId) {
+      // Даже если не обновляем счетчик реальных выходов, увеличиваем счетчик сцен в локации
+      try {
+        const state = (session.state as any) || {};
+        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
+        await prisma.gameSession.update({
+          where: { id: session.id },
+          data: { state }
+        });
+      } catch (e) {
+        console.warn('[REPLY-STREAM] Failed to update scene counter:', e);
       }
     }
     
@@ -6095,10 +6192,31 @@ app.post('/api/engine/session/start', async (req, res) => {
       sess = await prisma.gameSession.create({
         data: { scenarioGameId: gameId, lobbyId: lobbyId || null, userId: uid || null, currentLocationId: first.id, state: {} as any },
       });
+      
+      // Запускаем планирование прогрессии в фоне (не блокируем старт сессии)
+      setImmediate(async () => {
+        try {
+          await analyzeAndPlanGameProgression(prisma, gameId, sess.id);
+        } catch (e) {
+          console.error('[SESSION-START] Ошибка планирования прогрессии:', e);
+        }
+      });
     } else {
       // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем currentLocationId - он должен сохраняться между запросами
       // currentLocationId меняется только при реальном переходе через locationExit (в /api/chat/reply)
       // УБРАНО: Сброс currentLocationId на first.id - это ломало сохранение прогресса игрока
+      
+      // Проверяем, есть ли уже план прогрессии, если нет - создаем
+      const state = (sess.state as any) || {};
+      if (!state.gameProgressionPlan) {
+        setImmediate(async () => {
+          try {
+            await analyzeAndPlanGameProgression(prisma, gameId, sess.id);
+          } catch (e) {
+            console.error('[SESSION-START] Ошибка планирования прогрессии:', e);
+          }
+        });
+      }
     }
     return res.json({ id: sess.id, currentLocationId: sess.currentLocationId });
   } catch (e) {
@@ -10264,6 +10382,178 @@ function extractKeywords(text: string): string[] {
 }
 
 /**
+ * Анализирует структуру игры и планирует прогрессию через локации на основе сценария
+ */
+async function analyzeAndPlanGameProgression(
+  prisma: ReturnType<typeof getPrisma>,
+  gameId: string,
+  sessionId: string
+): Promise<void> {
+  try {
+    console.log(`[GAME-PLAN] 🎯 Начало анализа и планирования прогрессии для игры ${gameId}`);
+    
+    // Получаем все локации игры с их выходами
+    const locations = await prisma.location.findMany({
+      where: { gameId },
+      orderBy: { order: 'asc' },
+      include: { exits: true }
+    });
+    
+    if (locations.length === 0) {
+      console.log(`[GAME-PLAN] ⚠️ Нет локаций для планирования`);
+      return;
+    }
+    
+    // Получаем все чанки сценария из RAG
+    const scenarioChunks = await prisma.ruleChunk.findMany({
+      where: { gameId, chunkType: 'scenario' },
+      orderBy: { chunkIndex: 'asc' }
+    });
+    
+    if (scenarioChunks.length === 0) {
+      console.log(`[GAME-PLAN] ⚠️ Нет чанков сценария для анализа`);
+      return;
+    }
+    
+    // Собираем полный текст сценария
+    const scenarioText = scenarioChunks.map(c => c.content).join('\n\n');
+    
+    // Формируем структуру локаций для анализа
+    const locationsStructure = locations.map(loc => ({
+      id: loc.id,
+      order: loc.order,
+      title: loc.title,
+      description: loc.description || '',
+      rulesPrompt: loc.rulesPrompt || '',
+      exits: loc.exits.map(exit => ({
+        id: exit.id,
+        type: exit.type,
+        buttonText: exit.buttonText || '',
+        triggerText: exit.triggerText || '',
+        targetLocationId: exit.targetLocationId || null,
+        isGameOver: exit.isGameOver
+      }))
+    }));
+    
+    // Создаем карту переходов между локациями
+    const locationMap = new Map<string, typeof locationsStructure[0]>();
+    locationsStructure.forEach(loc => locationMap.set(loc.id, loc));
+    
+    // Формируем промпт для анализа и планирования
+    const analysisPrompt = `Проанализируй структуру игры и создай план прогрессии через локации на основе сценария.
+
+СТРУКТУРА ЛОКАЦИЙ:
+${locationsStructure.map((loc, idx) => {
+  const targetLocations = loc.exits
+    .filter(e => e.targetLocationId && !e.isGameOver)
+    .map(e => {
+      const target = locationMap.get(e.targetLocationId!);
+      return target ? `→ "${target.title}" (ID: ${e.targetLocationId})` : null;
+    })
+    .filter(Boolean)
+    .join(', ');
+  
+  return `${idx + 1}. "${loc.title}" (ID: ${loc.id}, порядок: ${loc.order})
+   Описание: ${loc.description || loc.rulesPrompt || 'Нет описания'}
+   Выходы: ${targetLocations || 'Нет выходов'}
+   Типы выходов: ${loc.exits.map(e => `${e.type}${e.buttonText ? ` ("${e.buttonText}")` : ''}${e.triggerText ? ` ("${e.triggerText}")` : ''}`).join(', ') || 'Нет'}`;
+}).join('\n\n')}
+
+СЦЕНАРИЙ ИГРЫ:
+${scenarioText.slice(0, 50000)}${scenarioText.length > 50000 ? '\n\n[... остальной текст сценария ...]' : ''}
+
+ЗАДАЧА:
+Проанализируй сценарий и создай детальный план прогрессии для каждой локации. Для каждой локации определи:
+1. Количество сцен, которые должны произойти в этой локации (на основе сценария)
+2. Цели и задачи, которые должны быть выполнены в этой локации
+3. Варианты выбора и их влияние на прогрессию
+4. Последовательность переходов между локациями
+5. Ключевые события и моменты, которые должны произойти
+
+Верни результат в формате JSON:
+{
+  "locations": [
+    {
+      "locationId": "ID локации",
+      "locationTitle": "Название локации",
+      "estimatedScenes": число, // примерное количество сцен в локации
+      "goals": ["цель 1", "цель 2"], // цели и задачи локации
+      "keyEvents": ["событие 1", "событие 2"], // ключевые события
+      "sceneProgression": [
+        {
+          "sceneNumber": 1,
+          "description": "описание сцены",
+          "expectedChoices": ["вариант 1", "вариант 2"], // ожидаемые варианты выбора
+          "leadsToLocationId": "ID следующей локации или null"
+        }
+      ],
+      "transitions": [
+        {
+          "fromExitId": "ID выхода",
+          "toLocationId": "ID целевой локации",
+          "toLocationTitle": "Название целевой локации",
+          "requiredProgress": "описание прогресса для перехода"
+        }
+      ]
+    }
+  ],
+  "overallProgression": {
+    "startLocationId": "ID стартовой локации",
+    "endLocationIds": ["ID финальных локаций"],
+    "criticalPath": ["ID локации 1", "ID локации 2"], // критический путь прохождения
+    "optionalLocations": ["ID опциональных локаций"] // опциональные локации
+  }
+}`;
+
+    // Вызываем Gemini для анализа и планирования
+    const planResult = await generateChatCompletion({
+      systemPrompt: 'Ты опытный мастер D&D, который анализирует структуру игры и планирует прогрессию через локации на основе сценария. Твоя задача - создать детальный план прогрессии, который поможет ИИ вести игру точно по сценарию.',
+      userPrompt: analysisPrompt,
+      history: []
+    });
+    
+    // Парсим результат
+    let plan: any = null;
+    try {
+      // Извлекаем JSON из ответа
+      const jsonMatch = planResult.text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        plan = JSON.parse(jsonMatch[0]);
+      } else {
+        console.error('[GAME-PLAN] ❌ Не удалось найти JSON в ответе Gemini');
+        return;
+      }
+    } catch (e) {
+      console.error('[GAME-PLAN] ❌ Ошибка парсинга плана:', e);
+      console.error('[GAME-PLAN] Ответ Gemini:', planResult.text.slice(0, 500));
+      return;
+    }
+    
+    // Сохраняем план в состояние сессии
+    const session = await prisma.gameSession.findUnique({ where: { id: sessionId } });
+    if (!session) {
+      console.error(`[GAME-PLAN] ❌ Сессия ${sessionId} не найдена`);
+      return;
+    }
+    
+    const state = (session.state as any) || {};
+    state.gameProgressionPlan = plan;
+    state.gameProgressionPlanGeneratedAt = new Date().toISOString();
+    
+    await prisma.gameSession.update({
+      where: { id: sessionId },
+      data: { state }
+    });
+    
+    console.log(`[GAME-PLAN] ✅ План прогрессии создан и сохранен для сессии ${sessionId}`);
+    console.log(`[GAME-PLAN] 📊 Локаций в плане: ${plan?.locations?.length || 0}`);
+    
+  } catch (e) {
+    console.error('[GAME-PLAN] ❌ Ошибка анализа и планирования прогрессии:', e);
+  }
+}
+
+/**
  * Находит релевантные чанки правил на основе текущей сцены (RAG)
  */
 async function findRelevantRuleChunks(
@@ -10550,6 +10840,56 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     }).join('\n') + '\n\nКРИТИЧЕСКИ ВАЖНО: Используй ЭТИ данные о персонажах из базы данных! НЕ придумывай новых персонажей, оружие, классы или расы. Используй ТОЛЬКО имена, классы, расы, характеристики, способности и оружие, которые указаны выше. Если персонаж - маг, используй его магические способности. Если воин - его оружие и боевые навыки. Если персонаж имеет способности в abilities - используй их при описании действий.';
   }
   
+  // Добавляем план прогрессии игры (если есть)
+  let progressionPlanInfo = '';
+  if (sess?.state) {
+    const state = sess.state as any;
+    const plan = state.gameProgressionPlan;
+    if (plan && loc?.id) {
+      // Находим план для текущей локации
+      const locationPlan = plan.locations?.find((lp: any) => lp.locationId === loc.id);
+      if (locationPlan) {
+        const currentSceneNumber = (state.scenesInCurrentLocation || 0) + 1;
+        const scenePlan = locationPlan.sceneProgression?.find((sp: any) => sp.sceneNumber === currentSceneNumber);
+        
+        progressionPlanInfo = `\n\nПЛАН ПРОГРЕССИИ ДЛЯ ЛОКАЦИИ "${locationPlan.locationTitle}":\n`;
+        progressionPlanInfo += `- Оценка сцен: ${locationPlan.estimatedScenes || 'не указано'}\n`;
+        progressionPlanInfo += `- Текущая сцена: ${currentSceneNumber}\n`;
+        
+        if (locationPlan.goals && locationPlan.goals.length > 0) {
+          progressionPlanInfo += `- Цели локации: ${locationPlan.goals.join(', ')}\n`;
+        }
+        
+        if (locationPlan.keyEvents && locationPlan.keyEvents.length > 0) {
+          progressionPlanInfo += `- Ключевые события: ${locationPlan.keyEvents.join(', ')}\n`;
+        }
+        
+        if (scenePlan) {
+          progressionPlanInfo += `\nПЛАН ТЕКУЩЕЙ СЦЕНЫ (${scenePlan.sceneNumber}):\n`;
+          progressionPlanInfo += `- Описание: ${scenePlan.description || 'не указано'}\n`;
+          if (scenePlan.expectedChoices && scenePlan.expectedChoices.length > 0) {
+            progressionPlanInfo += `- Ожидаемые варианты выбора: ${scenePlan.expectedChoices.join(', ')}\n`;
+          }
+          if (scenePlan.leadsToLocationId) {
+            const targetLoc = await prisma.location.findUnique({ where: { id: scenePlan.leadsToLocationId } }).catch(() => null);
+            if (targetLoc) {
+              progressionPlanInfo += `- Ведет к локации: "${targetLoc.title}"\n`;
+            }
+          }
+        }
+        
+        if (locationPlan.transitions && locationPlan.transitions.length > 0) {
+          progressionPlanInfo += `\nПЕРЕХОДЫ ИЗ ЛОКАЦИИ:\n`;
+          for (const trans of locationPlan.transitions) {
+            progressionPlanInfo += `- ${trans.toLocationTitle || trans.toLocationId}: ${trans.requiredProgress || 'без условий'}\n`;
+          }
+        }
+        
+        progressionPlanInfo += `\nКРИТИЧЕСКИ ВАЖНО: Следуй плану прогрессии! Игра должна развиваться согласно сценарию с точными целями, событиями и переходами между локациями.`;
+      }
+    }
+  }
+  
   // Добавляем правила игры через RAG (Retrieval Augmented Generation)
   let gameRulesInfo = '';
   if (game) {
@@ -10606,6 +10946,7 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
     playableCharactersInfo,
     playerCharacterInfo,
     playerCharacterData?.name ? `\nКРИТИЧЕСКИ ВАЖНО: В SCENE_JSON выше указано полное имя персонажа игрока "${playerCharacterData.name}". ВСЕГДА используй это ПОЛНОЕ имя целиком (все слова) из JSON, не сокращай до первого слова!` : '',
+    progressionPlanInfo, // План прогрессии добавляется ПЕРЕД правилами для приоритета
     gameRulesInfo,
     historyLines ? `История:\n${historyLines}` : '',
   ].filter(Boolean).join('\n\n');
@@ -11261,15 +11602,30 @@ app.post('/api/chat/dice', async (req, res) => {
           const exitsResult = await ensureRealExitsInChoices(prisma, narrText, sess.currentLocationId, gameId, sess);
           narrText = exitsResult.text;
           
-          // Обновляем состояние сессии с счетчиком сцен без реальных выходов
+          // Обновляем состояние сессии с счетчиком сцен без реальных выходов и счетчиком сцен в текущей локации
           if (exitsResult.shouldUpdateSession && sess) {
             try {
+              const state = exitsResult.sessionState || {};
+              // Увеличиваем счетчик сцен в текущей локации
+              state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
               await prisma.gameSession.update({
                 where: { id: sess.id },
-                data: { state: exitsResult.sessionState }
+                data: { state }
               });
             } catch (e) {
               console.warn('[DICE] Failed to update session state:', e);
+            }
+          } else if (sess) {
+            // Даже если не обновляем счетчик реальных выходов, увеличиваем счетчик сцен в локации
+            try {
+              const state = (sess.state as any) || {};
+              state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
+              await prisma.gameSession.update({
+                where: { id: sess.id },
+                data: { state }
+              });
+            } catch (e) {
+              console.warn('[DICE] Failed to update scene counter:', e);
             }
           }
         }
