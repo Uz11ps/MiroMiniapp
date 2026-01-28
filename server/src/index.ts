@@ -341,14 +341,11 @@ async function ensureRealExitsInChoices(
     let state = session?.state as any || {};
     if (!state.scenesWithoutRealExit) state.scenesWithoutRealExit = 0;
     
-    // Если реальные выходы есть в вариантах - сбрасываем счетчик
+    // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем счетчик, если реальные выходы уже есть в вариантах
+    // Счетчик сбрасывается ТОЛЬКО при реальном переходе игрока (в логике переключения локации)
     if (hasRealExitInChoices) {
-      if (state.scenesWithoutRealExit > 0) {
-        state.scenesWithoutRealExit = 0;
-        result.shouldUpdateSession = true;
-        result.sessionState = state;
-        console.log(`[ensureRealExitsInChoices] ✅ Real exits found in choices, reset counter to 0`);
-      }
+      // Реальные выходы уже есть - просто возвращаем текст без изменений
+      // НЕ сбрасываем счетчик - он сбросится только когда игрок реально переключит локацию
       return result;
     }
     
@@ -406,12 +403,12 @@ async function ensureRealExitsInChoices(
         }
       }
       
-      // Сбрасываем счетчик после добавления реальных выходов
-      const scenesCount = state.scenesWithoutRealExit; // Сохраняем значение до сброса
-      state.scenesWithoutRealExit = 0;
-      result.sessionState = state;
+      // КРИТИЧЕСКИ ВАЖНО: НЕ сбрасываем счетчик после добавления реальных выходов!
+      // Счетчик сбросится только когда игрок реально переключит локацию
+      const scenesCount = state.scenesWithoutRealExit; // Сохраняем значение для лога
+      result.sessionState = state; // Сохраняем состояние БЕЗ сброса счетчика
       result.text = text;
-      console.log(`[ensureRealExitsInChoices] ✅ Added ${realExits.length} real exits after ${scenesCount} scenes without real exits`);
+      console.log(`[ensureRealExitsInChoices] ✅ Added ${realExits.length} real exits after ${scenesCount} scenes without real exits (counter will reset only when player actually switches location)`);
     } else {
       console.log(`[ensureRealExitsInChoices] ⏳ Scenes without real exits: ${state.scenesWithoutRealExit}/${threshold} (will add real exits soon)`);
       result.text = text;
