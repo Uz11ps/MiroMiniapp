@@ -5957,6 +5957,8 @@ app.post('/api/chat/reply-stream', async (req, res) => {
         }
         
         console.log('[REPLY-STREAM] 🔊 Starting to read TTS stream, reader type:', typeof reader);
+        console.log('[REPLY-STREAM] 🔊 Reader constructor:', reader?.constructor?.name);
+        console.log('[REPLY-STREAM] 🔊 Reader is async iterable:', reader && typeof reader[Symbol.asyncIterator] === 'function');
         console.log('[REPLY-STREAM] 🔊 Response headers:', Object.fromEntries(ttsResponse.headers));
         
         let chunkCount = 0;
@@ -5965,6 +5967,17 @@ app.post('/api/chat/reply-stream', async (req, res) => {
         let emptyChunks = 0;
         
         try {
+          console.log('[REPLY-STREAM] 🔊 Entering async iteration loop...');
+          
+          // Проверяем, является ли reader async iterable
+          if (!reader || typeof reader[Symbol.asyncIterator] !== 'function') {
+            console.error('[REPLY-STREAM] ❌ Reader is not async iterable!');
+            console.error('[REPLY-STREAM] ❌ Reader type:', typeof reader);
+            console.error('[REPLY-STREAM] ❌ Reader keys:', Object.keys(reader || {}));
+            sendSSE('audio_error', { error: 'Response body is not async iterable' });
+            return;
+          }
+          
           for await (const chunk of reader) {
             iterationCount++;
             console.log(`[REPLY-STREAM] 🔊 Received chunk #${iterationCount}, type:`, chunk?.constructor?.name || typeof chunk, 'length:', chunk?.length || 'unknown');
