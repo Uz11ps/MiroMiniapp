@@ -8856,12 +8856,10 @@ app.post('/api/tts-stream', async (req, res) => {
     }
     
     // Для Live API используем модель 2.0 (Live API требует актуальные модели 2.0)
-    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API, строго используем gemini-2.0-flash (или gemini-2.0-flash-exp)
-    let finalModelName = modelName ? modelName.replace(/-tts$/, '') : 'gemini-2.0-flash';
-    // Принудительно заменяем любые модели 2.5 на 2.0, и любые другие на 2.0-flash
-    if (finalModelName.includes('2.5') || !finalModelName.includes('2.0')) {
-      finalModelName = 'gemini-2.0-flash';
-    }
+    // ВАЖНО: gemini-2.5-flash-preview не существует для Live API.
+    // Принудительно используем gemini-2.0-flash (GA версия), так как gemini-2.0-flash-exp 
+    // может выдавать ошибку "not found for API version v1alpha" в некоторых регионах.
+    let finalModelName = 'gemini-2.0-flash';
     const finalVoiceName = voiceName || 'Kore';
     
     // Устанавливаем заголовки для streaming (PCM audio) ДО начала чтения потока
@@ -8895,8 +8893,9 @@ app.post('/api/tts-stream', async (req, res) => {
         // ПРИМЕЧАНИЕ: Gemini Live API использует WebSocket через специальный endpoint
         
         // Правильный URL для Gemini Live API через WebSocket (v1alpha)
-        // ВАЖНО: Модель МОЖЕТ передаваться в URL для некоторых регионов
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?model=models/${finalModelName}&key=${geminiApiKey}`;
+        // ВАЖНО: Модель НЕ должна передаваться в URL как query параметр (ошибка 1007)
+        // Она передается внутри JSON-сообщения setup
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
         console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
         console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
         console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
