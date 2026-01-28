@@ -4276,9 +4276,7 @@ app.post('/api/chat/welcome', async (req, res) => {
             // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
             text = formatChoiceOptions(text);
             
-            // КРИТИЧЕСКИ ВАЖНО: Гарантируем наличие минимум одного реального выхода в вариантах
-            const exitsResult = await ensureRealExitsInChoices(prisma, text, first?.id, gameId, null);
-            text = exitsResult.text;
+            // НОВАЯ ЛОГИКА: ensureRealExitsInChoices удалена, используем текст как есть
           }
         } catch {
           text = offlineText;
@@ -4385,9 +4383,7 @@ app.post('/api/chat/welcome', async (req, res) => {
               // Постобработка: преобразуем варианты выбора со звездочками в нумерованный список
               text = formatChoiceOptions(text);
               
-              // КРИТИЧЕСКИ ВАЖНО: Гарантируем наличие минимум одного реального выхода в вариантах
-              const exitsResult = await ensureRealExitsInChoices(prisma, text, first?.id, gameId, null);
-            text = exitsResult.text;
+              // НОВАЯ ЛОГИКА: ensureRealExitsInChoices удалена, используем текст как есть
             }
             text = (text || '').trim();
           }
@@ -5126,48 +5122,7 @@ app.post('/api/chat/reply', async (req, res) => {
       }
     }
     
-    // КРИТИЧЕСКИ ВАЖНО: Гарантируем наличие минимум одного реального выхода в вариантах
-    let locationId: string | undefined = undefined;
-    if (gameId) {
-      try {
-        const sess = await getGameSession();
-        if (sess) {
-          locationId = sess.currentLocationId || undefined;
-        }
-      } catch (e) {
-        console.warn('[REPLY] Failed to get location for adding choices:', e);
-      }
-    }
-    const exitsResult = await ensureRealExitsInChoices(prisma, text, locationId, gameId, session);
-    text = exitsResult.text;
-    
-    // Обновляем состояние сессии с счетчиком сцен без реальных выходов
-    // Обновляем состояние сессии с счетчиком сцен без реальных выходов и счетчиком сцен в текущей локации
-    if (exitsResult.shouldUpdateSession && session && gameId) {
-      try {
-        const state = exitsResult.sessionState || {};
-        // Увеличиваем счетчик сцен в текущей локации
-        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
-        await prisma.gameSession.update({
-          where: { id: session.id },
-          data: { state }
-        });
-      } catch (e) {
-        console.warn('[REPLY] Failed to update session state:', e);
-      }
-    } else if (session && gameId) {
-      // Даже если не обновляем счетчик реальных выходов, увеличиваем счетчик сцен в локации
-      try {
-        const state = (session.state as any) || {};
-        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
-        await prisma.gameSession.update({
-          where: { id: session.id },
-          data: { state }
-        });
-      } catch (e) {
-        console.warn('[REPLY] Failed to update scene counter:', e);
-      }
-    }
+    // НОВАЯ ЛОГИКА: ensureRealExitsInChoices удалена, используем текст как есть
 
     // Парсинг тега броска от ИИ
     let aiRequestDice: any = null;
@@ -5938,45 +5893,23 @@ app.post('/api/chat/reply-stream', async (req, res) => {
       }
     }
     
-    const exitsResult = await ensureRealExitsInChoices(prisma, fullText, locationId, gameId, session);
-    fullText = exitsResult.text;
-    
-    // Обновляем состояние сессии с счетчиком сцен без реальных выходов и счетчиком сцен в текущей локации
-    if (exitsResult.shouldUpdateSession && session && gameId) {
-      try {
-        const state = exitsResult.sessionState || {};
-        // Увеличиваем счетчик сцен в текущей локации
-        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
-        await prisma.gameSession.update({
-          where: { id: session.id },
-          data: { state }
-        });
-      } catch (e) {
-        console.warn('[REPLY-STREAM] Failed to update session state:', e);
-      }
-    } else if (session && gameId) {
-      // Даже если не обновляем счетчик реальных выходов, увеличиваем счетчик сцен в локации
-      try {
-        const state = (session.state as any) || {};
-        state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
-        await prisma.gameSession.update({
-          where: { id: session.id },
-          data: { state }
-        });
-      } catch (e) {
-        console.warn('[REPLY-STREAM] Failed to update scene counter:', e);
-      }
-    }
+    // НОВАЯ ЛОГИКА: ensureRealExitsInChoices удалена, используем текст как есть
+    console.log('[REPLY-STREAM] ✅ Text generated with RAG, length:', fullText?.length || 0);
+    console.log('[REPLY-STREAM] 🔊 Starting TTS streaming for generated text');
     
     sendSSE('text_complete', { text: fullText });
     
-    // Параллельно запускаем генерацию TTS
+    // КРИТИЧЕСКИ ВАЖНО: Параллельно запускаем генерацию TTS стриминга для текста сгенерированного с RAG
     sendSSE('status', { type: 'generating_audio' });
+    console.log('[REPLY-STREAM] 🔊 Starting TTS streaming request for RAG-generated text');
     
     (async () => {
       try {
         const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
         const ttsUrl = `${apiBase}/api/tts-stream`;
+        
+        console.log('[REPLY-STREAM] 🔊 Requesting TTS stream from:', ttsUrl);
+        console.log('[REPLY-STREAM] 🔊 Text for TTS (first 200 chars):', fullText?.slice(0, 200) || 'empty');
         
         const ttsResponse = await undiciFetch(ttsUrl, {
           method: 'POST',
@@ -5988,6 +5921,8 @@ app.post('/api/chat/reply-stream', async (req, res) => {
           }),
           signal: AbortSignal.timeout(60000)
         });
+        
+        console.log('[REPLY-STREAM] 🔊 TTS response status:', ttsResponse.status, ttsResponse.ok ? 'OK' : 'FAILED');
         
         if (ttsResponse.ok) {
           // Собираем все PCM чанки из streaming ответа
@@ -11719,14 +11654,12 @@ app.post('/api/chat/dice', async (req, res) => {
           // Форматируем варианты выбора и добавляем реальные выходы
           narrText = formatChoiceOptions(narrText);
           
-          // Гарантируем наличие реальных выходов в вариантах
-          const exitsResult = await ensureRealExitsInChoices(prisma, narrText, sess.currentLocationId, gameId, sess);
-          narrText = exitsResult.text;
+          // НОВАЯ ЛОГИКА: ensureRealExitsInChoices удалена, используем текст как есть
           
-          // Обновляем состояние сессии с счетчиком сцен без реальных выходов и счетчиком сцен в текущей локации
-          if (exitsResult.shouldUpdateSession && sess) {
+          // Обновляем состояние сессии (если нужно)
+          if (sess) {
             try {
-              const state = exitsResult.sessionState || {};
+              const state = (sess.state as any) || {};
               // Увеличиваем счетчик сцен в текущей локации
               state.scenesInCurrentLocation = (state.scenesInCurrentLocation || 0) + 1;
               await prisma.gameSession.update({
