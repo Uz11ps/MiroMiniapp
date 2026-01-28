@@ -8377,8 +8377,6 @@ app.post('/api/tts-stream', async (req, res) => {
       return res.status(400).json({ error: 'audio_received', message: 'Received audio instead of text. TTS requires text input.' });
     }
     
-    console.log('[GEMINI-TTS-LIVE] ✅ Received TEXT (not audio):', `"${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`);
-    
     // Минимальная длина текста
     if (text.length < 5) {
       cleanup();
@@ -8419,15 +8417,9 @@ app.post('/api/tts-stream', async (req, res) => {
       res.flushHeaders();
     }
     
-    console.log('[GEMINI-TTS-LIVE] 🎤 Starting WebSocket-based Live TTS generation...');
-    console.log('[GEMINI-TTS-LIVE] Text length:', text.length, 'chars');
-    console.log('[GEMINI-TTS-LIVE] Voice:', finalVoiceName);
-    console.log('[GEMINI-TTS-LIVE] Model:', finalModelName);
-    
     // Получаем прокси для Gemini
     const proxies = parseGeminiProxies();
     const attempts = proxies.length ? proxies : ['__direct__'];
-    console.log('[GEMINI-TTS-LIVE] 🔄 Proxies available:', attempts.length);
     
     // Пробуем каждый прокси
     for (const p of attempts) {
@@ -8438,9 +8430,6 @@ app.post('/api/tts-stream', async (req, res) => {
         // ВАЖНО: Модель НЕ передается в URL, только в JSON-сообщении setup
         // Используется полное имя сервиса: google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${geminiApiKey}`;
-        console.log(`[GEMINI-TTS-LIVE] 🔌 Connecting to WebSocket (${p === '__direct__' ? 'direct' : 'proxy'})...`);
-        console.log(`[GEMINI-TTS-LIVE] 🔗 WebSocket URL: ${wsUrl.replace(geminiApiKey, '***')}`);
-        console.log(`[GEMINI-TTS-LIVE] 📦 Model: ${finalModelName}`);
         
         // Создаем WebSocket соединение
         // Используем уже импортированный WebSocket из 'ws'
@@ -8454,9 +8443,7 @@ app.post('/api/tts-stream', async (req, res) => {
             // Пробуем использовать http-proxy-agent для WebSocket прокси
             const { HttpsProxyAgent } = await import('https-proxy-agent');
             wsOptions.agent = new HttpsProxyAgent(p);
-            console.log(`[GEMINI-TTS-LIVE] 🔄 Using proxy agent for WebSocket`);
           } catch (e) {
-            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Proxy agent not available, using direct connection:`, e?.message || String(e));
             // Продолжаем без прокси
           }
         }
@@ -8484,22 +8471,14 @@ app.post('/api/tts-stream', async (req, res) => {
           try {
             const message = JSON.parse(data.toString('utf-8'));
             
-            // КРИТИЧЕСКИ ВАЖНО: Логируем структуру всех сообщений для отладки
-            // Это поможет понять, почему воспроизведение начинается с середины
-            if (chunkCount < 5) {
-              console.log(`[GEMINI-TTS-LIVE] 📨 Message ${chunkCount + 1} structure:`, JSON.stringify(message).slice(0, 500));
-            }
-            
             // ШАГ 2: Ожидание подтверждения настройки (setupComplete)
             // КРИТИЧЕСКИ ВАЖНО: НЕ отправляем данные до получения setupComplete
             if (message.setupComplete) {
               isConnected = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Setup complete, ready to send text');
               
               // Отправляем текст ТОЛЬКО один раз после получения setupComplete
               if (!textSent) {
                 textSent = true;
-                console.log('[GEMINI-TTS-LIVE] 📤 Sending text to Gemini...');
                 
                 // Отправляем текст для генерации в правильном формате Live API
                 // КРИТИЧЕСКИ ВАЖНО: turnComplete: true ОБЯЗАТЕЛЕН для TTS - без него модель ждет и начинает генерацию с задержкой
@@ -8521,7 +8500,6 @@ app.post('/api/tts-stream', async (req, res) => {
             // ШАГ 3: Получение аудио-чанков из serverContent.modelTurn
             // КРИТИЧЕСКИ ВАЖНО: Обрабатываем аудио ТОЛЬКО после получения setupComplete
             if (!isConnected) {
-              console.warn('[GEMINI-TTS-LIVE] ⚠️ Received audio before setupComplete, ignoring');
               return;
             }
             
@@ -8532,10 +8510,6 @@ app.post('/api/tts-stream', async (req, res) => {
                 const modelTurn = message.serverContent.modelTurn;
                 const parts = modelTurn.parts || [];
                 
-                if (parts.length > 0 && chunkCount < 5) {
-                  console.log(`[GEMINI-TTS-LIVE] 📦 Processing ${parts.length} parts in modelTurn`);
-                }
-                
                 for (const part of parts) {
                   if (part.inlineData && part.inlineData.data) {
                     // Это сырой Base64 аудио (обычно PCM 16кГц или 24кГц)
@@ -8545,9 +8519,6 @@ app.post('/api/tts-stream', async (req, res) => {
                     // readInt16LE требует четное количество байт (16-bit = 2 байта)
                     if (audioBuffer.length % 2 !== 0) {
                       audioBuffer = audioBuffer.slice(0, audioBuffer.length - 1);
-                      if (chunkCount === 0) {
-                        console.log('[GEMINI-TTS-LIVE] ⚠️ Odd number of bytes, trimmed last byte');
-                      }
                     }
                     
                     // Проверяем, что буфер не пустой
@@ -8558,10 +8529,6 @@ app.post('/api/tts-stream', async (req, res) => {
                     hasAudio = true;
                     totalAudioSize += audioBuffer.length;
                     chunkCount++;
-                    
-                    if (chunkCount <= 3) {
-                      console.log(`[GEMINI-TTS-LIVE] 🎵 Sending chunk ${chunkCount}, size: ${audioBuffer.length} bytes`);
-                    }
                     
                     // Отправляем чанк сразу клиенту (настоящий real-time streaming)
                     res.write(audioBuffer);
@@ -8577,7 +8544,6 @@ app.post('/api/tts-stream', async (req, res) => {
               // Проверяем другие возможные пути к аудио (на случай, если формат изменился)
               // ВАЖНО: Проверяем только если еще не получили аудио через modelTurn
               if (!hasAudio && message.serverContent.parts) {
-                console.log('[GEMINI-TTS-LIVE] ⚠️ Found serverContent.parts (alternative path)');
                 const parts = Array.isArray(message.serverContent.parts) ? message.serverContent.parts : [];
                 for (const part of parts) {
                   if (part.inlineData && part.inlineData.data) {
@@ -8609,18 +8575,16 @@ app.post('/api/tts-stream', async (req, res) => {
             // Проверяем, завершен ли turn (завершение определяется через turnComplete)
             if (message.serverContent && message.serverContent.turnComplete) {
               isComplete = true;
-              console.log('[GEMINI-TTS-LIVE] ✅ Turn complete');
               ws.close();
             }
     
   } catch (e) {
-            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Error parsing message:`, e?.message || String(e));
+            // Игнорируем ошибки парсинга
           }
         });
         
         // Обработка ошибок WebSocket
         ws.on('error', (error) => {
-          console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, error.message);
           if (!isConnected && !hasAudio) {
             // Если еще не подключились и нет аудио, пробуем следующий прокси
             ws.close();
@@ -8630,15 +8594,8 @@ app.post('/api/tts-stream', async (req, res) => {
         // Обработка закрытия соединения
         ws.on('close', (code, reason) => {
           cleanup(); // Очищаем ключ из activeTtsStreams
-          console.log(`[GEMINI-TTS-LIVE] 🔌 WebSocket closed: Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
-          // Code 1006 = abnormal closure (proxy issue)
-          // Code 4000+ = client error (JSON format issue)
           if (hasAudio) {
-            console.log(`[GEMINI-TTS-LIVE] ✅ Streaming complete: ${chunkCount} chunks, ${totalAudioSize} bytes total`);
             res.end();
-          } else if (!isConnected) {
-            // Если не удалось подключиться, пробуем следующий прокси
-            console.warn(`[GEMINI-TTS-LIVE] ⚠️ Connection closed before receiving audio, trying next proxy...`);
           }
         });
         
@@ -8649,8 +8606,6 @@ app.post('/api/tts-stream', async (req, res) => {
           }, 10000);
           
           ws.on('open', () => {
-            console.log('[GEMINI-TTS-LIVE] 🔌 WebSocket opened, sending setup...');
-            
             // ШАГ 1: Отправка конфигурации (setup) для Live API
             // КРИТИЧЕСКИ ВАЖНО: Google Gemini Realtime API требует camelCase, не snake_case!
             ws.send(JSON.stringify({
@@ -8688,7 +8643,6 @@ app.post('/api/tts-stream', async (req, res) => {
         await new Promise<void>((resolve) => {
           const completionTimeout = setTimeout(() => {
             if (!isComplete) {
-              console.warn('[GEMINI-TTS-LIVE] ⚠️ Timeout waiting for completion');
               ws.close();
             }
             resolve();
@@ -8716,15 +8670,6 @@ app.post('/api/tts-stream', async (req, res) => {
         
       } catch (wsError: any) {
         cleanup(); // Очищаем ключ при ошибке
-        const errorMsg = wsError?.message || String(wsError);
-        console.warn(`[GEMINI-TTS-LIVE] WebSocket error (${p === '__direct__' ? 'direct' : 'proxy'}):`, errorMsg);
-        
-        // Если первый URL не сработал (404), пробуем второй вариант
-        if (errorMsg.includes('404') || errorMsg.includes('Unexpected server response: 404')) {
-          console.log('[GEMINI-TTS-LIVE] ⚠️ First WebSocket URL failed (404), trying alternative format...');
-          
-        }
-        
         // Пробуем следующий прокси
         continue;
       }
@@ -8732,7 +8677,6 @@ app.post('/api/tts-stream', async (req, res) => {
     
     // Если WebSocket не сработал
     cleanup(); // Очищаем ключ из activeTtsStreams
-    console.error('[GEMINI-TTS-LIVE] ❌ All methods failed');
     if (!res.headersSent) {
       return res.status(500).json({ 
         error: 'stream_error', 
@@ -9776,12 +9720,6 @@ async function findRelevantRuleChunks(
 ): Promise<{ worldRules: string; gameplayRules: string }> {
   const searchStart = Date.now();
   try {
-    console.log(`[RAG-SEARCH] 🔍 ========== ПОИСК РЕЛЕВАНТНЫХ ПРАВИЛ ==========`);
-    console.log(`[RAG-SEARCH] 🎮 Игра: ${gameId}`);
-    console.log(`[RAG-SEARCH] 📍 Локация: ${sceneContext.locationTitle || 'не указана'}`);
-    console.log(`[RAG-SEARCH] 👥 NPC: ${sceneContext.npcNames?.length || 0} (${sceneContext.npcNames?.join(', ') || 'нет'})`);
-    console.log(`[RAG-SEARCH] 🎭 Персонажи: ${sceneContext.characterNames?.length || 0} (${sceneContext.characterNames?.join(', ') || 'нет'})`);
-    
     const searchTerms: string[] = [];
     
     // Добавляем ключевые слова из контекста сцены
@@ -9823,14 +9761,11 @@ async function findRelevantRuleChunks(
     const dbTime = Date.now() - dbStart;
     
     if (allChunks.length === 0) {
-      console.log(`[RAG-SEARCH] ⚠️ Чанки не найдены! Возможно, индексация еще не завершена.`);
       return { worldRules: '', gameplayRules: '' };
     }
     
-    console.log(`[RAG-SEARCH] 📚 Найдено чанков в БД: ${allChunks.length} (запрос: ${dbTime}мс)`);
     const worldChunks = allChunks.filter(c => c.chunkType === 'worldRules');
     const gameplayChunks = allChunks.filter(c => c.chunkType === 'gameplayRules');
-    console.log(`[RAG-SEARCH] 📊 Распределение: worldRules=${worldChunks.length}, gameplayRules=${gameplayChunks.length}`);
     
     // Оцениваем релевантность каждого чанка
     const scoreStart = Date.now();
@@ -9857,8 +9792,6 @@ async function findRelevantRuleChunks(
     
     // Сортируем по релевантности и берем топ-5 чанков каждого типа
     scoredChunks.sort((a, b) => b.score - a.score);
-    const scoreTime = Date.now() - scoreStart;
-    console.log(`[RAG-SEARCH] 🎯 Оценка релевантности завершена (${scoreTime}мс)`);
     
     const topWorldChunks = scoredChunks
       .filter(sc => sc.chunk.chunkType === 'worldRules')
@@ -9877,7 +9810,6 @@ async function findRelevantRuleChunks(
         .slice(0, 2)
         .map(c => c.content);
       topWorldChunks.push(...firstWorldChunks);
-      console.log(`[RAG-SEARCH] ⚠️ Мало релевантных чанков правил мира, добавлены первые 2`);
     }
     
     if (topGameplayChunks.length < 2) {
@@ -9886,16 +9818,7 @@ async function findRelevantRuleChunks(
         .slice(0, 2)
         .map(c => c.content);
       topGameplayChunks.push(...firstGameplayChunks);
-      console.log(`[RAG-SEARCH] ⚠️ Мало релевантных чанков правил процесса, добавлены первые 2`);
     }
-    
-    const totalSearchTime = Date.now() - searchStart;
-    const worldRulesLength = topWorldChunks.join('\n\n').length;
-    const gameplayRulesLength = topGameplayChunks.join('\n\n').length;
-    
-    console.log(`[RAG-SEARCH] ✅ ========== ПОИСК ЗАВЕРШЕН ==========`);
-    console.log(`[RAG-SEARCH] 📊 Выбрано чанков: worldRules=${topWorldChunks.length} (${worldRulesLength.toLocaleString()} символов), gameplayRules=${topGameplayChunks.length} (${gameplayRulesLength.toLocaleString()} символов)`);
-    console.log(`[RAG-SEARCH] ⏱️ Время поиска: ${totalSearchTime}мс`);
     
     return {
       worldRules: topWorldChunks.join('\n\n'),
@@ -10067,25 +9990,17 @@ async function buildGptSceneContext(prisma: ReturnType<typeof getPrisma>, params
         characterNames: playableCharacters.map(c => c.name)
       };
       
-      console.log(`[buildGptSceneContext] 🔍 Используем RAG для игры ${game.id} (найдено ${chunkCount} чанков в БД)`);
       const relevantChunks = await findRelevantRuleChunks(prisma, game.id, sceneContext);
       
       const rulesParts: string[] = [];
       if (relevantChunks.worldRules) {
-        const worldRulesLength = relevantChunks.worldRules.length;
         rulesParts.push(`Правила мира (релевантные для текущей сцены): ${relevantChunks.worldRules}`);
-        console.log(`[buildGptSceneContext] ✅ Добавлены правила мира из RAG (${worldRulesLength.toLocaleString()} символов)`);
       }
       if (relevantChunks.gameplayRules) {
-        const gameplayRulesLength = relevantChunks.gameplayRules.length;
         rulesParts.push(`Правила процесса (релевантные для текущей сцены): ${relevantChunks.gameplayRules}`);
-        console.log(`[buildGptSceneContext] ✅ Добавлены правила процесса из RAG (${gameplayRulesLength.toLocaleString()} символов)`);
       }
       if (rulesParts.length > 0) {
         gameRulesInfo = '\n\n' + rulesParts.join('\n\n');
-        console.log(`[buildGptSceneContext] ✅ RAG контекст добавлен в промпт (общая длина правил: ${gameRulesInfo.length.toLocaleString()} символов)`);
-      } else {
-        console.log(`[buildGptSceneContext] ⚠️ RAG не вернул релевантных чанков`);
       }
     } else {
       // Fallback: читаем из PDF файлов (если RAG еще не настроен)
@@ -10744,58 +10659,9 @@ app.post('/api/chat/dice', async (req, res) => {
     const sess = await prisma.chatSession.findUnique({ where: { userId_gameId: { userId: uid, gameId } } });
     const history = ((sess?.history as any) || []) as Array<{ from: 'bot' | 'me'; text: string }>;
     
-    // КРИТИЧЕСКИ ВАЖНО: Определяем depth и parentHash для прегенерации
-    // Исключаем сообщения об ошибке из подсчета depth
-    const botMessages = history.filter(m => {
-      if (m.from !== 'bot') return false;
-      const text = m.text || '';
-      if (text.trim() === 'Не распознали ваш ответ, выберите вариант корректно!') return false;
-      if (text.trim().startsWith('Техническая ошибка')) return false;
-      return true;
-    });
-    const depthForPregen = botMessages.length;
-    let parentHashForPregen: string | undefined = undefined;
-    if (botMessages.length > 0) {
-      const lastBotMessage = botMessages[botMessages.length - 1];
-      if (lastBotMessage && lastBotMessage.text) {
-        parentHashForPregen = createAudioHash(lastBotMessage.text, undefined, undefined, 'narrator', depthForPregen - 1);
-        console.log('[DICE] ✅ Created parentHash from last bot message (game context), depth:', depthForPregen - 1, 'hash:', parentHashForPregen?.slice(0, 8), 'message preview:', lastBotMessage.text.slice(0, 100));
-      }
-    }
-    
-    // КРИТИЧЕСКИ ВАЖНО: Используем outcomeCode + контекст броска как ключ для прегенерации
-    // outcomeCode может быть: 'crit_success', 'crit_fail', 'success', 'partial', 'fail' или ''
-    // Включаем контекст броска (context, kind, stat, dc) в ключ, чтобы разные броски с одинаковым outcome имели разные ответы
-    const contextParts: string[] = [];
-    if (context) contextParts.push(`ctx_${context.slice(0, 50).replace(/\s+/g, '_')}`);
-    if (kind) contextParts.push(`kind_${kind}`);
-    if (stat) contextParts.push(`stat_${stat}`);
-    if (dc !== undefined) contextParts.push(`dc_${dc}`);
-    const contextKey = contextParts.length > 0 ? `_${contextParts.join('_')}` : '';
-    const diceKey = outcomeCode ? `dice_${outcomeCode}${contextKey}` : `dice_no_outcome${contextKey}`;
-    
-    // Получаем scenarioGameId и locationId для прегенерации
-    let scenarioGameIdForPregen: string | undefined = gameId;
-    let locationIdForPregen: string | undefined = undefined;
-    try {
-      const gameSess = await prisma.gameSession.findFirst({ where: { scenarioGameId: gameId, userId: uid } });
-      if (gameSess) {
-        scenarioGameIdForPregen = gameSess.scenarioGameId;
-        locationIdForPregen = gameSess.currentLocationId || undefined;
-      }
-    } catch (e) {
-      console.warn('[DICE] Failed to get session:', e);
-    }
-    
-    // ИЩЕМ прегенерированный текст ПЕРЕД генерацией
-    // Прегенерация удалена - генерируем через AI
-    let narr: { text: string; fallback: boolean } | null = null;
-    if (!narr) {
     history.push({ from: 'me', text: fmt });
     const gptContext = await buildGptSceneContext(prisma, { gameId, userId: uid, history });
-      narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
-      console.log('[DICE] ⚠️ Generated NEW text (pre-generated not found) for outcome:', outcomeCode || outcome);
-    }
+    const narr = await generateDiceNarrative(prisma, gameId, gptContext || (context || ''), outcome || fmt, r.total);
     
     history.push({ from: 'bot', text: narr.text });
     await prisma.chatSession.upsert({
@@ -10803,10 +10669,6 @@ app.post('/api/chat/dice', async (req, res) => {
       update: { history: history as any },
       create: { userId: uid, gameId, history: history as any },
     });
-    
-    // Отправляем текст сразу, клиент сам вызовет streaming TTS через speak()
-    console.log('[DICE] ✅ Generated narrative text length:', narr.text.length, 'chars');
-    console.log('[DICE] ✅ Narrative text preview:', narr.text.slice(0, 200));
     const response: any = { ok: true, messages: [fmt, narr.text] };
     return res.json(response);
   } catch {
